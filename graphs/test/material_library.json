@@ -1,0 +1,92 @@
+{
+  "copper": {
+    "rho_kg_m3": 8960.0,
+    "cp_J_kgK": 385.0,
+    "k_W_mK": 401.0,
+    "emissivity": 0.35
+  },
+  "aluminum": {
+    "rho_kg_m3": 2700.0,
+    "cp_J_kgK": 897.0,
+    "k_W_mK": 237.0,
+    "emissivity": 0.09
+  },
+  "stainless steel": {
+    "rho_kg_m3": 8000.0,
+    "cp_J_kgK": 500.0,
+    "k_W_mK": 16.0,
+    "emissivity": 0.45
+  },
+  "titanium": {
+    "rho_kg_m3": 4500.0,
+    "cp_J_kgK": 522.0,
+    "k_W_mK": 22.0,
+    "emissivity": 0.3
+  },
+  "brass": {
+    "rho_kg_m3": 8500.0,
+    "cp_J_kgK": 380.0,
+    "k_W_mK": 110.0,
+    "emissivity": 0.3
+  },
+  "silicon": {
+    "rho_kg_m3": 2330.0,
+    "cp_J_kgK": 705.0,
+    "k_W_mK": 148.0,
+    "emissivity": 0.7
+  },
+  "glass": {
+    "rho_kg_m3": 2500.0,
+    "cp_J_kgK": 840.0,
+    "k_W_mK": 1.05,
+    "emissivity": 0.9
+  },
+  "ceramic/alumina": {
+    "rho_kg_m3": 3900.0,
+    "cp_J_kgK": 880.0,
+    "k_W_mK": 25.0,
+    "emissivity": 0.8
+  },
+  "FR4 / PCB": {
+    "rho_kg_m3": 1850.0,
+    "cp_J_kgK": 1100.0,
+    "k_W_mK": 0.3,
+    "emissivity": 0.85
+  },
+  "Kapton": {
+    "rho_kg_m3": 1420.0,
+    "cp_J_kgK": 1090.0,
+    "k_W_mK": 0.12,
+    "emissivity": 0.8
+  },
+  "PEEK": {
+    "rho_kg_m3": 1320.0,
+    "cp_J_kgK": 1340.0,
+    "k_W_mK": 0.25,
+    "emissivity": 0.85
+  },
+  "PTFE / Teflon": {
+    "rho_kg_m3": 2200.0,
+    "cp_J_kgK": 1000.0,
+    "k_W_mK": 0.25,
+    "emissivity": 0.95
+  },
+  "epoxy": {
+    "rho_kg_m3": 1200.0,
+    "cp_J_kgK": 1000.0,
+    "k_W_mK": 0.2,
+    "emissivity": 0.85
+  },
+  "vacuum/insulator placeholder": {
+    "rho_kg_m3": 1.0,
+    "cp_J_kgK": 1.0,
+    "k_W_mK": 1e-09,
+    "emissivity": 0.0
+  },
+  "generic electronics package": {
+    "rho_kg_m3": 2200.0,
+    "cp_J_kgK": 800.0,
+    "k_W_mK": 2.0,
+    "emissivity": 0.85
+  }
+}

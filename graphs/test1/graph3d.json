@@ -1,0 +1,3274 @@
+{
+  "nodes": [
+    {
+      "coord": [
+        0,
+        0,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": true,
+      "heater": {
+        "heater_id": 0,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": true,
+      "sensor": {
+        "sensor_id": 0,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 0
+    },
+    {
+      "coord": [
+        1,
+        0,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 1,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 1,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 1
+    },
+    {
+      "coord": [
+        2,
+        0,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 2,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 2,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 2
+    },
+    {
+      "coord": [
+        3,
+        0,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 3,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 3,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 3
+    },
+    {
+      "coord": [
+        2,
+        1,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 4,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 4,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 4
+    },
+    {
+      "coord": [
+        2,
+        2,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 5,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 5,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 5
+    },
+    {
+      "coord": [
+        2,
+        3,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 6,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 6,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 6
+    },
+    {
+      "coord": [
+        2,
+        4,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 7,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 7,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 7
+    },
+    {
+      "coord": [
+        2,
+        5,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 8,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 8,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 8
+    },
+    {
+      "coord": [
+        2,
+        6,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 9,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 9,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 9
+    },
+    {
+      "coord": [
+        3,
+        4,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 10,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 10,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 10
+    },
+    {
+      "coord": [
+        4,
+        4,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 11,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 11,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 11
+    },
+    {
+      "coord": [
+        5,
+        4,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 12,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 12,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 12
+    },
+    {
+      "coord": [
+        6,
+        4,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 13,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 13,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 13
+    },
+    {
+      "coord": [
+        6,
+        3,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 14,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 14,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 14
+    },
+    {
+      "coord": [
+        6,
+        2,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 15,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 15,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 15
+    },
+    {
+      "coord": [
+        6,
+        1,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 16,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 16,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 16
+    },
+    {
+      "coord": [
+        6,
+        0,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 17,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 17,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 17
+    },
+    {
+      "coord": [
+        6,
+        -1,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 18,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 18,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 18
+    },
+    {
+      "coord": [
+        6,
+        -2,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 19,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 19,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 19
+    },
+    {
+      "coord": [
+        6,
+        -3,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 20,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 20,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 20
+    },
+    {
+      "coord": [
+        3,
+        -1,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 21,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 21,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 21
+    },
+    {
+      "coord": [
+        3,
+        -2,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 22,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 22,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 22
+    },
+    {
+      "coord": [
+        3,
+        -3,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 23,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 23,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 23
+    },
+    {
+      "coord": [
+        3,
+        -4,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 24,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 24,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 24
+    },
+    {
+      "coord": [
+        3,
+        -5,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 25,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 25,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 25
+    },
+    {
+      "coord": [
+        1,
+        -1,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 26,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 26,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 26
+    },
+    {
+      "coord": [
+        1,
+        -2,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 27,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 27,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 27
+    },
+    {
+      "coord": [
+        1,
+        -3,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 28,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 28,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 28
+    },
+    {
+      "coord": [
+        1,
+        -4,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 29,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 29,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 29
+    },
+    {
+      "coord": [
+        3,
+        0,
+        1
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 30,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 30,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 30
+    },
+    {
+      "coord": [
+        1,
+        0,
+        1
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 31,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 31,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 31
+    },
+    {
+      "coord": [
+        1,
+        0,
+        2
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 32,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 32,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 32
+    },
+    {
+      "coord": [
+        1,
+        0,
+        3
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 33,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 33,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 33
+    },
+    {
+      "coord": [
+        1,
+        0,
+        4
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 34,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 34,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 34
+    },
+    {
+      "coord": [
+        4,
+        4,
+        1
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 35,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 35,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 35
+    },
+    {
+      "coord": [
+        2,
+        3,
+        1
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 36,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 36,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 36
+    },
+    {
+      "coord": [
+        2,
+        3,
+        2
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 37,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 37,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 37
+    },
+    {
+      "coord": [
+        2,
+        3,
+        3
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 38,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 38,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 38
+    },
+    {
+      "coord": [
+        2,
+        3,
+        4
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 39,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 39,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 39
+    },
+    {
+      "coord": [
+        2,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 40,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 40,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 40
+    },
+    {
+      "coord": [
+        -1,
+        0,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 41,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 41,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 41
+    },
+    {
+      "coord": [
+        -2,
+        0,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 42,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 42,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 42
+    },
+    {
+      "coord": [
+        -3,
+        0,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 43,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 43,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 43
+    },
+    {
+      "coord": [
+        7,
+        4,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 44,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 44,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 44
+    },
+    {
+      "coord": [
+        3,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 45,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 45,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 45
+    },
+    {
+      "coord": [
+        4,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 46,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 46,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 46
+    },
+    {
+      "coord": [
+        5,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 47,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 47,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 47
+    },
+    {
+      "coord": [
+        6,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 48,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 48,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 48
+    },
+    {
+      "coord": [
+        7,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 49,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 49,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 49
+    },
+    {
+      "coord": [
+        8,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 50,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 50,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 50
+    },
+    {
+      "coord": [
+        9,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 51,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 51,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 51
+    },
+    {
+      "coord": [
+        10,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 52,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 52,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 52
+    },
+    {
+      "coord": [
+        11,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "aluminum",
+      "rho_kg_m3": 2700.0,
+      "cp_J_kgK": 897.0,
+      "k_W_mK": 237.0,
+      "emissivity": 0.09,
+      "mass_kg": 1.0,
+      "C_J_K": 897.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 53,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 53,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 53
+    },
+    {
+      "coord": [
+        12,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 54,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 54,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 54
+    },
+    {
+      "coord": [
+        13,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 55,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 55,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 55
+    },
+    {
+      "coord": [
+        14,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 56,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 56,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 56
+    },
+    {
+      "coord": [
+        7,
+        4,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 57,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 57,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 57
+    },
+    {
+      "coord": [
+        7,
+        5,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 58,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 58,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 58
+    },
+    {
+      "coord": [
+        7,
+        6,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 59,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 59,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 59
+    },
+    {
+      "coord": [
+        9,
+        3,
+        4
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 60,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 60,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 60
+    },
+    {
+      "coord": [
+        9,
+        3,
+        3
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 61,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 61,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 61
+    },
+    {
+      "coord": [
+        9,
+        3,
+        2
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 62,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 62,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 62
+    },
+    {
+      "coord": [
+        9,
+        3,
+        1
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 63,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 63,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 63
+    },
+    {
+      "coord": [
+        9,
+        3,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 64,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 64,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 64
+    },
+    {
+      "coord": [
+        9,
+        3,
+        -1
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 65,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 65,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 65
+    },
+    {
+      "coord": [
+        3,
+        3,
+        6
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 66,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 66,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 66
+    },
+    {
+      "coord": [
+        3,
+        3,
+        7
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 67,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 67,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 67
+    },
+    {
+      "coord": [
+        3,
+        3,
+        8
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 68,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 68,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 68
+    },
+    {
+      "coord": [
+        13,
+        4,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 69,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 69,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 69
+    },
+    {
+      "coord": [
+        13,
+        5,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 70,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 70,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 70
+    },
+    {
+      "coord": [
+        13,
+        6,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 71,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 71,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 71
+    },
+    {
+      "coord": [
+        12,
+        3,
+        6
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 72,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 72,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 72
+    },
+    {
+      "coord": [
+        11,
+        3,
+        6
+      ],
+      "side_length_m": 1.0,
+      "material": "aluminum",
+      "rho_kg_m3": 2700.0,
+      "cp_J_kgK": 897.0,
+      "k_W_mK": 237.0,
+      "emissivity": 0.09,
+      "mass_kg": 1.0,
+      "C_J_K": 897.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 73,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 73,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 73
+    },
+    {
+      "coord": [
+        6,
+        5,
+        0
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 74,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 74,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 74
+    },
+    {
+      "coord": [
+        15,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 75,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 75,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 75
+    },
+    {
+      "coord": [
+        16,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 76,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 76,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 76
+    },
+    {
+      "coord": [
+        17,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 77,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 77,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 77
+    },
+    {
+      "coord": [
+        18,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 78,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 78,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 78
+    },
+    {
+      "coord": [
+        19,
+        3,
+        5
+      ],
+      "side_length_m": 1.0,
+      "material": "generic electronics package",
+      "rho_kg_m3": 2200.0,
+      "cp_J_kgK": 800.0,
+      "k_W_mK": 2.0,
+      "emissivity": 0.85,
+      "mass_kg": 1.0,
+      "C_J_K": 800.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 79,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 79,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 79
+    },
+    {
+      "coord": [
+        11,
+        3,
+        7
+      ],
+      "side_length_m": 1.0,
+      "material": "aluminum",
+      "rho_kg_m3": 2700.0,
+      "cp_J_kgK": 897.0,
+      "k_W_mK": 237.0,
+      "emissivity": 0.09,
+      "mass_kg": 1.0,
+      "C_J_K": 897.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 80,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 80,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 80
+    },
+    {
+      "coord": [
+        11,
+        3,
+        8
+      ],
+      "side_length_m": 1.0,
+      "material": "aluminum",
+      "rho_kg_m3": 2700.0,
+      "cp_J_kgK": 897.0,
+      "k_W_mK": 237.0,
+      "emissivity": 0.09,
+      "mass_kg": 1.0,
+      "C_J_K": 897.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 81,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 81,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 81
+    },
+    {
+      "coord": [
+        11,
+        3,
+        9
+      ],
+      "side_length_m": 1.0,
+      "material": "aluminum",
+      "rho_kg_m3": 2700.0,
+      "cp_J_kgK": 897.0,
+      "k_W_mK": 237.0,
+      "emissivity": 0.09,
+      "mass_kg": 1.0,
+      "C_J_K": 897.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 82,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 82,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 82
+    },
+    {
+      "coord": [
+        11,
+        3,
+        10
+      ],
+      "side_length_m": 1.0,
+      "material": "aluminum",
+      "rho_kg_m3": 2700.0,
+      "cp_J_kgK": 897.0,
+      "k_W_mK": 237.0,
+      "emissivity": 0.09,
+      "mass_kg": 1.0,
+      "C_J_K": 897.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 83,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 83,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 83
+    },
+    {
+      "coord": [
+        11,
+        3,
+        11
+      ],
+      "side_length_m": 1.0,
+      "material": "aluminum",
+      "rho_kg_m3": 2700.0,
+      "cp_J_kgK": 897.0,
+      "k_W_mK": 237.0,
+      "emissivity": 0.09,
+      "mass_kg": 1.0,
+      "C_J_K": 897.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 84,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 84,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 84
+    },
+    {
+      "coord": [
+        11,
+        3,
+        12
+      ],
+      "side_length_m": 1.0,
+      "material": "aluminum",
+      "rho_kg_m3": 2700.0,
+      "cp_J_kgK": 897.0,
+      "k_W_mK": 237.0,
+      "emissivity": 0.09,
+      "mass_kg": 1.0,
+      "C_J_K": 897.0,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "has_heater": false,
+      "heater": {
+        "heater_id": 85,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "has_sensor": false,
+      "sensor": {
+        "sensor_id": 85,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "id": 85
+    }
+  ],
+  "edges": [
+    {
+      "source": 0,
+      "target": 1,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 0,
+      "target": 41,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 1,
+      "target": 2,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 1,
+      "target": 26,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 1,
+      "target": 31,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 2,
+      "target": 3,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 2,
+      "target": 4,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 3,
+      "target": 21,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 3,
+      "target": 30,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 4,
+      "target": 5,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 5,
+      "target": 6,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 6,
+      "target": 7,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 6,
+      "target": 36,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 7,
+      "target": 8,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 7,
+      "target": 10,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 8,
+      "target": 9,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 10,
+      "target": 11,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 11,
+      "target": 12,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 11,
+      "target": 35,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 12,
+      "target": 13,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 13,
+      "target": 14,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 13,
+      "target": 44,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 13,
+      "target": 74,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 14,
+      "target": 15,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 15,
+      "target": 16,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 16,
+      "target": 17,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 17,
+      "target": 18,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 18,
+      "target": 19,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 19,
+      "target": 20,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 21,
+      "target": 22,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 22,
+      "target": 23,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 23,
+      "target": 24,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 24,
+      "target": 25,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 26,
+      "target": 27,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 27,
+      "target": 28,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 28,
+      "target": 29,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 31,
+      "target": 32,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 32,
+      "target": 33,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 33,
+      "target": 34,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 36,
+      "target": 37,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 37,
+      "target": 38,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 38,
+      "target": 39,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 39,
+      "target": 40,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 40,
+      "target": 45,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 41,
+      "target": 42,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 42,
+      "target": 43,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 45,
+      "target": 46,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 45,
+      "target": 66,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 46,
+      "target": 47,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 47,
+      "target": 48,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 48,
+      "target": 49,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 49,
+      "target": 50,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 49,
+      "target": 57,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 50,
+      "target": 51,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 51,
+      "target": 52,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 51,
+      "target": 60,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 52,
+      "target": 53,
+      "Gij_W_K": 3.96652719665272,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 53,
+      "target": 54,
+      "Gij_W_K": 3.96652719665272,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 53,
+      "target": 73,
+      "Gij_W_K": 237.00000000000003,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 54,
+      "target": 55,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 54,
+      "target": 72,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 55,
+      "target": 56,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 55,
+      "target": 69,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 56,
+      "target": 75,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 57,
+      "target": 58,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 58,
+      "target": 59,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 60,
+      "target": 61,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 61,
+      "target": 62,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 62,
+      "target": 63,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 63,
+      "target": 64,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 64,
+      "target": 65,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 66,
+      "target": 67,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 67,
+      "target": 68,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 69,
+      "target": 70,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 70,
+      "target": 71,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 72,
+      "target": 73,
+      "Gij_W_K": 3.96652719665272,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 73,
+      "target": 80,
+      "Gij_W_K": 237.00000000000003,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 75,
+      "target": 76,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 76,
+      "target": 77,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 77,
+      "target": 78,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 78,
+      "target": 79,
+      "Gij_W_K": 2.0,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 80,
+      "target": 81,
+      "Gij_W_K": 237.00000000000003,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 81,
+      "target": 82,
+      "Gij_W_K": 237.00000000000003,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 82,
+      "target": 83,
+      "Gij_W_K": 237.00000000000003,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 83,
+      "target": 84,
+      "Gij_W_K": 237.00000000000003,
+      "source_metadata": "auto"
+    },
+    {
+      "source": 84,
+      "target": 85,
+      "Gij_W_K": 237.00000000000003,
+      "source_metadata": "auto"
+    }
+  ]
+}

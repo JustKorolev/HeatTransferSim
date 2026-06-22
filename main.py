@@ -51,12 +51,23 @@ def run_ui() -> None:
     ThermalUI().show()
 
 
+def run_graph_ui() -> None:
+    from graph_visualizer.app import GraphVisualizerApp
+
+    GraphVisualizerApp().show()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--ui",
         action="store_true",
         help="Launch the PyVista/Qt interactive cube viewer.",
+    )
+    parser.add_argument(
+        "--graph-ui",
+        action="store_true",
+        help="Launch the sparse 3D lumped thermal graph visualizer.",
     )
     parser.add_argument(
         "--no-plot",
@@ -68,7 +79,9 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.ui:
+    if args.graph_ui:
+        run_graph_ui()
+    elif args.ui:
         run_ui()
     else:
         run_example(show_plot=not args.no_plot)

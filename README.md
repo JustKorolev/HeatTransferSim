@@ -61,3 +61,24 @@ enters cube 2.
 `extra interface resistance` is `R_interface`, an optional resistance for
 imperfect face-to-face contact. Set it to `0` for ideal contact where the only
 resistance is conduction from each cube center to its contacting face.
+
+## Launch the sparse graph visualizer
+
+The new lumped thermal graph editor is separate from the original two-cube UI:
+
+```powershell
+python -m graph_visualizer.main
+```
+
+The existing two-cube UI is also available through the clearer compatibility
+name:
+
+```powershell
+python -m heat_transfer_visualizer.main
+```
+
+`graph_visualizer` saves each graph as a folder containing `graph3d.json`,
+`matrices.npz`, `metadata.json`, and `material_library.json`. Matrix rows and
+columns follow the saved `node_ids` array. The pairwise conduction matrix `G`
+stores conductances in W/K, zeros for non-edges, and the Laplacian is built as
+`L[i, i] = sum_j G[i, j]`, `L[i, j] = -G[i, j]`.
