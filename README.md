@@ -64,7 +64,7 @@ resistance is conduction from each cube center to its contacting face.
 
 ## Launch the sparse graph visualizer
 
-The new lumped thermal graph editor is separate from the original two-cube UI:
+The lumped thermal graph inspector/editor is separate from the original two-cube UI:
 
 ```powershell
 python -m graph_visualizer.main
@@ -77,8 +77,52 @@ name:
 python -m heat_transfer_visualizer.main
 ```
 
-`graph_visualizer` saves each graph as a folder containing `graph3d.json`,
-`matrices.npz`, `metadata.json`, and `material_library.json`. Matrix rows and
-columns follow the saved `node_ids` array. The pairwise conduction matrix `G`
-stores conductances in W/K, zeros for non-edges, and the Laplacian is built as
-`L[i, i] = sum_j G[i, j]`, `L[i, j] = -G[i, j]`.
+The visualizer can load legacy `graph3d.json` folders and new octree
+`graph.json` folders. In octree mode, geometry/topology are read-only:
+select cells in the 3D cuboid view or 2D network view, then edit heater/sensor
+tags and notes. Autosave writes tag changes back to `graph.json` and
+`ui_state.json`.
+
+## Build an octree graph from SolidWorks glTF exports
+
+```powershell
+python build_octree_graph.py `
+  --gltf assembly.gltf `
+  --contact-report ContactReport.xlsx `
+  --graph-name hispec_test_octree `
+  --output-root graphs `
+  --min-cell-size-mm 5 `
+  --max-cell-size-mm 50 `
+  --max-depth 8 `
+  --dominant-fraction-accept 0.95 `
+  --minority-fraction-ignore 0.02 `
+  --material-contrast-refine-threshold 5 `
+  --contact-refine-distance-mm 10 `
+  --samples-per-cell 9
+```
+
+The converter assumes glTF coordinates are millimeters, uses glTF material
+names first and Excel material names as fallback, exact-matches glTF node names
+to `ContactReport.xlsx` component names, and reads material properties from the
+project-level `materials.json` file by default. It writes:
+
+```text
+graphs/<graph_name>/
+  graph.json
+  nodes.csv
+  edges.csv
+  params.json
+  materials_used.json
+  material_warnings.csv
+  validation_report.txt
+  C.npy
+  G.npy
+  L.npy
+  A.npy
+  ui_state.json
+```
+
+Matrix rows and columns follow `node_ids`. `G` stores symmetric conductances in
+W/K, zeros for non-edges, and the Laplacian is built as
+`L[i, i] = sum_j G[i, j]`, `L[i, j] = -G[i, j]`. The optional dynamics matrix is
+`A = -C^{-1}L`.

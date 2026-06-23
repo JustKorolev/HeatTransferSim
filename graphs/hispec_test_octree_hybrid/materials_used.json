@@ -1,0 +1,114 @@
+{
+  "default_unknown": {
+    "name": "default_unknown",
+    "density_kg_m3": 2200.0,
+    "cp_J_kgK": 800.0,
+    "k_W_mK": 2.0,
+    "emissivity": 0.85,
+    "rho_cp_J_m3K": 1760000.0
+  },
+  "17-7PH Stainless Steel": {
+    "name": "17-7PH Stainless Steel",
+    "density_kg_m3": 7800.0,
+    "cp_J_kgK": 460.0,
+    "k_W_mK": 16.0,
+    "emissivity": 0.35,
+    "rho_cp_J_m3K": 3588000.0
+  },
+  "18-8 Stainless Steel": {
+    "name": "18-8 Stainless Steel",
+    "density_kg_m3": 8000.0,
+    "cp_J_kgK": 500.0,
+    "k_W_mK": 16.2,
+    "emissivity": 0.35,
+    "rho_cp_J_m3K": 4000000.0
+  },
+  "6061-T6 (SS)": {
+    "name": "6061-T6 (SS)",
+    "density_kg_m3": 2700.0,
+    "cp_J_kgK": 896.0,
+    "k_W_mK": 167.0,
+    "emissivity": 0.09,
+    "rho_cp_J_m3K": 2419200.0
+  },
+  "6061-T6 Aluminum": {
+    "name": "6061-T6 Aluminum",
+    "density_kg_m3": 2700.0,
+    "cp_J_kgK": 896.0,
+    "k_W_mK": 167.0,
+    "emissivity": 0.09,
+    "rho_cp_J_m3K": 2419200.0
+  },
+  "AISI 304": {
+    "name": "AISI 304",
+    "density_kg_m3": 8000.0,
+    "cp_J_kgK": 500.0,
+    "k_W_mK": 16.2,
+    "emissivity": 0.35,
+    "rho_cp_J_m3K": 4000000.0
+  },
+  "AISI 304 Stainless Steel": {
+    "name": "AISI 304 Stainless Steel",
+    "density_kg_m3": 8000.0,
+    "cp_J_kgK": 500.0,
+    "k_W_mK": 16.2,
+    "emissivity": 0.35,
+    "rho_cp_J_m3K": 4000000.0
+  },
+  "Copper": {
+    "name": "Copper",
+    "density_kg_m3": 8960.0,
+    "cp_J_kgK": 385.0,
+    "k_W_mK": 401.0,
+    "emissivity": 0.35,
+    "rho_cp_J_m3K": 3449600.0
+  },
+  "Delrin 2700 NC010, Low Viscosity Acetal Copolymer (SS)": {
+    "name": "Delrin 2700 NC010, Low Viscosity Acetal Copolymer (SS)",
+    "density_kg_m3": 1410.0,
+    "cp_J_kgK": 1460.0,
+    "k_W_mK": 0.31,
+    "emissivity": 0.85,
+    "rho_cp_J_m3K": 2058600.0
+  },
+  "Invar, AL 36": {
+    "name": "Invar, AL 36",
+    "density_kg_m3": 8050.0,
+    "cp_J_kgK": 515.0,
+    "k_W_mK": 13.0,
+    "emissivity": 0.3,
+    "rho_cp_J_m3K": 4145750.0
+  },
+  "Invar36": {
+    "name": "Invar36",
+    "density_kg_m3": 8050.0,
+    "cp_J_kgK": 515.0,
+    "k_W_mK": 13.0,
+    "emissivity": 0.3,
+    "rho_cp_J_m3K": 4145750.0
+  },
+  "Not assigned": {
+    "name": "Not assigned",
+    "density_kg_m3": 2200.0,
+    "cp_J_kgK": 800.0,
+    "k_W_mK": 2.0,
+    "emissivity": 0.85,
+    "rho_cp_J_m3K": 1760000.0
+  },
+  "Phenolic": {
+    "name": "Phenolic",
+    "density_kg_m3": 1350.0,
+    "cp_J_kgK": 1400.0,
+    "k_W_mK": 0.3,
+    "emissivity": 0.85,
+    "rho_cp_J_m3K": 1890000.0
+  },
+  "ZERO MATTER": {
+    "name": "ZERO MATTER",
+    "density_kg_m3": 1.0,
+    "cp_J_kgK": 1.0,
+    "k_W_mK": 1e-09,
+    "emissivity": 0.0,
+    "rho_cp_J_m3K": 1.0
+  }
+}

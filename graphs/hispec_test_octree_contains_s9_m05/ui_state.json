@@ -1,0 +1,12 @@
+{
+  "selected_node_id": 943,
+  "filters": {
+    "material": "All",
+    "component": "All",
+    "level_min": 0,
+    "level_max": 99,
+    "heater_sensor_only": false,
+    "boundary_only": false
+  },
+  "dark_mode": false
+}

@@ -47,6 +47,17 @@ class SensorProperties:
 class NodeProperties:
     node_id: int
     coord: tuple[int, int, int]
+    cell_id: str | None = None
+    parent_id: str | None = None
+    children_ids: list[str] = field(default_factory=list)
+    level: int = 0
+    center_mm: tuple[float, float, float] | None = None
+    size_mm: tuple[float, float, float] | None = None
+    component_name: str = ""
+    occupancy_fraction: float = 1.0
+    confidence: str = "high"
+    warnings: list[str] = field(default_factory=list)
+    notes: str = ""
     side_length_m: float = 1.0
     material: str = "generic electronics package"
     rho_kg_m3: float = 2200.0
@@ -90,11 +101,41 @@ class NodeProperties:
         copied = dict(data)
         node_id_value = copied.pop("id") if "id" in copied else copied.pop("node_id")
         node_id = int(node_id_value)
-        coord = tuple(int(v) for v in copied.pop("coord"))
+        center_mm = copied.pop("center_mm", None)
+        size_mm = copied.pop("size_mm", None)
+        component_name = copied.pop("component_name", copied.pop("component", ""))
+        material_name = copied.pop("material_name", None)
+        tags = copied.pop("tags", {}) or {}
+        coord_value = copied.pop("coord", None)
+        if coord_value is None and center_mm is not None:
+            coord_value = [round(float(v)) for v in center_mm]
+        coord = tuple(int(v) for v in (coord_value or (0, 0, 0)))
         heater_data = copied.pop("heater", {}) or {}
         sensor_data = copied.pop("sensor", {}) or {}
+        if "heater_id" in tags:
+            heater_data.setdefault("heater_id", tags.get("heater_id") or node_id)
+        if "sensor_id" in tags:
+            sensor_data.setdefault("sensor_id", tags.get("sensor_id") or node_id)
+        copied.setdefault("has_heater", bool(tags.get("heater", False)))
+        copied.setdefault("has_sensor", bool(tags.get("sensor", False)))
+        if tags.get("notes") and "notes" not in copied:
+            copied["notes"] = str(tags.get("notes"))
+        if material_name and "material" not in copied:
+            copied["material"] = str(material_name)
+        copied.pop("volume_m3", None)
+        copied.pop("dominant_component", None)
+        copied.pop("dominant_material", None)
         copied.pop("pos", None)
-        node = cls(node_id=node_id, coord=coord, **copied)
+        if size_mm is not None and "side_length_m" not in copied:
+            copied["side_length_m"] = max(float(v) for v in size_mm) / 1000.0
+        node = cls(
+            node_id=node_id,
+            coord=coord,
+            center_mm=tuple(float(v) for v in center_mm) if center_mm is not None else None,
+            size_mm=tuple(float(v) for v in size_mm) if size_mm is not None else None,
+            component_name=str(component_name),
+            **copied,
+        )
         if not isinstance(node.heater, HeaterProperties):
             node.heater = HeaterProperties(**heater_data)
         else:
@@ -108,9 +149,37 @@ class NodeProperties:
     def to_dict(self, include_id_key: bool = False) -> dict[str, Any]:
         data = asdict(self)
         data["coord"] = list(self.coord)
+        if self.center_mm is not None:
+            data["center_mm"] = list(self.center_mm)
+        if self.size_mm is not None:
+            data["size_mm"] = list(self.size_mm)
         if include_id_key:
             data["id"] = data.pop("node_id")
         return data
+
+    def to_octree_node_dict(self) -> dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "cell_id": self.cell_id or f"cell_{self.node_id}",
+            "center_mm": list(self.center_mm or self.center),
+            "size_mm": list(self.size_mm or (self.side_length_m * 1000.0,) * 3),
+            "level": self.level,
+            "component_name": self.component_name,
+            "material_name": self.material,
+            "volume_m3": self.volume_m3,
+            "mass_kg": self.mass_kg,
+            "C_J_K": self.C_J_K,
+            "occupancy_fraction": self.occupancy_fraction,
+            "confidence": self.confidence,
+            "warnings": list(self.warnings),
+            "tags": {
+                "heater": self.has_heater,
+                "sensor": self.has_sensor,
+                "heater_id": self.heater.heater_id if self.has_heater else None,
+                "sensor_id": self.sensor.sensor_id if self.has_sensor else None,
+                "notes": self.notes,
+            },
+        }
 
     def apply_material_defaults(self, library: dict[str, dict[str, float]] | None = None) -> None:
         defaults = material_defaults(self.material, library)
@@ -126,7 +195,16 @@ class NodeProperties:
 
     @property
     def center(self) -> tuple[float, float, float]:
+        if self.center_mm is not None:
+            return tuple(float(v) for v in self.center_mm)
         return tuple(float(v) for v in self.coord)
+
+    @property
+    def volume_m3(self) -> float:
+        if self.size_mm is not None:
+            sx, sy, sz = self.size_mm
+            return max(0.0, float(sx) * float(sy) * float(sz) * 1.0e-9)
+        return max(0.0, float(self.side_length_m) ** 3)
 
 
 @dataclass
@@ -135,20 +213,54 @@ class EdgeProperties:
     target: int
     Gij_W_K: float
     source_metadata: str = EdgeMode.AUTO.value
+    edge_id: str | None = None
+    edge_type: str = "internal_conduction"
+    shared_area_m2: float = 0.0
+    distance_m: float = 0.0
+    contact_confidence: str = "medium"
+    warnings: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EdgeProperties":
         copied = dict(data)
-        source_metadata = copied.pop("source_metadata", copied.pop("source_type", ""))
+        source_metadata = copied.pop("source_metadata", copied.pop("source_type", copied.get("source", "")))
+        if "node_i" in copied:
+            source = copied.pop("node_i")
+        else:
+            source = copied.pop("source")
+        if "node_j" in copied:
+            target = copied.pop("node_j")
+        else:
+            target = copied.pop("target")
         return cls(
-            source=int(copied.pop("source")),
-            target=int(copied.pop("target")),
-            Gij_W_K=float(copied.pop("Gij_W_K", 0.0)),
+            source=int(source),
+            target=int(target),
+            Gij_W_K=float(copied.pop("Gij_W_K", copied.pop("G_W_K", 0.0))),
             source_metadata=str(source_metadata),
+            edge_id=copied.pop("edge_id", None),
+            edge_type=str(copied.pop("edge_type", "internal_conduction")),
+            shared_area_m2=float(copied.pop("shared_area_m2", 0.0)),
+            distance_m=float(copied.pop("distance_m", 0.0)),
+            contact_confidence=str(copied.pop("contact_confidence", "medium")),
+            warnings=list(copied.pop("warnings", []) or []),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def to_octree_edge_dict(self) -> dict[str, Any]:
+        return {
+            "edge_id": self.edge_id or f"edge_{self.source}_{self.target}",
+            "node_i": self.source,
+            "node_j": self.target,
+            "edge_type": self.edge_type,
+            "G_W_K": self.Gij_W_K,
+            "shared_area_m2": self.shared_area_m2,
+            "distance_m": self.distance_m,
+            "contact_confidence": self.contact_confidence,
+            "source": self.source_metadata,
+            "warnings": list(self.warnings),
+        }
 
 
 @dataclass
@@ -182,6 +294,7 @@ class ThermalGraphModel:
     nodes: dict[int, NodeProperties] = field(default_factory=dict)
     edges: dict[tuple[int, int], EdgeProperties] = field(default_factory=dict)
     material_library: dict[str, dict[str, float]] = field(default_factory=dict)
+    octree_graph_data: dict[str, Any] = field(default_factory=dict)
 
     def add_node(self, node: NodeProperties) -> None:
         self._check_unique(node.node_id, node.coord)
@@ -224,6 +337,7 @@ class ThermalGraphModel:
         target: int,
         Gij_W_K: float,
         source_metadata: str = EdgeMode.AUTO.value,
+        **metadata: Any,
     ) -> None:
         if source == target:
             return
@@ -231,7 +345,7 @@ class ThermalGraphModel:
             raise ValueError("Both edge endpoints must exist.")
         key = edge_key(source, target)
         low, high = key
-        self.edges[key] = EdgeProperties(low, high, float(Gij_W_K), source_metadata)
+        self.edges[key] = EdgeProperties(low, high, float(Gij_W_K), source_metadata, **metadata)
         self.touch()
 
     def clear_edges(self) -> None:
@@ -260,6 +374,49 @@ class ThermalGraphModel:
             ],
         }
 
+    def to_octree_graph_dict(self) -> dict[str, Any]:
+        components = sorted({node.component_name for node in self.nodes.values() if node.component_name})
+        data = dict(self.octree_graph_data) if self.octree_graph_data else {}
+        data.update({
+            "metadata": self.metadata.to_dict(),
+            "input_files": data.get("input_files", {}),
+            "parameters": data.get("parameters", {}),
+            "materials_used": data.get("materials_used", sorted({node.material for node in self.nodes.values()})),
+            "component_mapping": data.get("component_mapping", {name: name for name in components}),
+            "octree_cells": [
+                {
+                    "cell_id": node.cell_id or f"cell_{node.node_id}",
+                    "parent_id": node.parent_id,
+                    "children_ids": list(node.children_ids),
+                    "level": node.level,
+                    "center_mm": list(node.center_mm or node.center),
+                    "size_mm": list(node.size_mm or (node.side_length_m * 1000.0,) * 3),
+                    "dominant_component": node.component_name,
+                    "dominant_material": node.material,
+                    "occupancy_fraction": node.occupancy_fraction,
+                    "confidence": node.confidence,
+                    "warnings": list(node.warnings),
+                }
+                for node in self.nodes.values()
+            ],
+            "graph_nodes": [
+                self.nodes[node_id].to_octree_node_dict()
+                for node_id in self.ordered_node_ids()
+            ],
+            "graph_edges": [
+                edge.to_octree_edge_dict()
+                for _, edge in sorted(self.edges.items(), key=lambda item: item[0])
+            ],
+            "warnings": [],
+            "heater_sensor_tags": {
+                str(node_id): node.to_octree_node_dict()["tags"]
+                for node_id, node in self.nodes.items()
+                if node.has_heater or node.has_sensor or node.notes
+            },
+            "validation_results": data.get("validation_results", {}),
+        })
+        return data
+
     @classmethod
     def from_graph3d_dict(
         cls,
@@ -275,6 +432,31 @@ class ThermalGraphModel:
             edge = EdgeProperties.from_dict(dict(raw_edge))
             if edge.source in model.nodes and edge.target in model.nodes:
                 model.set_edge(edge.source, edge.target, edge.Gij_W_K, edge.source_metadata)
+        return model
+
+    @classmethod
+    def from_octree_graph_dict(cls, data: dict[str, Any]) -> "ThermalGraphModel":
+        metadata = GraphMetadata.from_dict(data.get("metadata"))
+        model = cls(metadata=metadata, material_library=data.get("material_library") or {})
+        model.octree_graph_data = dict(data)
+        for raw_node in data.get("graph_nodes", []):
+            node = NodeProperties.from_dict(dict(raw_node))
+            model.add_node(node)
+        for raw_edge in data.get("graph_edges", []):
+            edge = EdgeProperties.from_dict(dict(raw_edge))
+            if edge.source in model.nodes and edge.target in model.nodes:
+                model.set_edge(
+                    edge.source,
+                    edge.target,
+                    edge.Gij_W_K,
+                    edge.source_metadata,
+                    edge_id=edge.edge_id,
+                    edge_type=edge.edge_type,
+                    shared_area_m2=edge.shared_area_m2,
+                    distance_m=edge.distance_m,
+                    contact_confidence=edge.contact_confidence,
+                    warnings=edge.warnings,
+                )
         return model
 
     def _check_unique(self, node_id: int, coord: tuple[int, int, int]) -> None:

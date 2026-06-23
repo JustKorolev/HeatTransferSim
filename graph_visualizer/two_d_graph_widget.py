@@ -23,16 +23,18 @@ class TwoDGraphWidget:
         self.parent = parent
         self.on_select_node = on_select_node
         self.model: ThermalGraphModel | None = None
+        self.visible_node_ids: set[int] | None = None
         self.positions: dict[int, tuple[float, float]] = {}
         self.node_points: dict[int, tuple[float, float]] = {}
         self.edge_lines: list[tuple[int, int, Any]] = []
+        self.dark_mode = False
 
         self.widget = self.QtWidgets.QWidget(parent)
         layout = self.QtWidgets.QVBoxLayout(self.widget)
         controls = self.QtWidgets.QHBoxLayout()
         controls.addWidget(self.QtWidgets.QLabel("Layout:"))
         self.layout_combo = self.QtWidgets.QComboBox()
-        self.layout_combo.addItems(["Spring", "XY projection", "XZ projection", "YZ projection"])
+        self.layout_combo.addItems(["XY projection", "XZ projection", "YZ projection", "Spring"])
         self.layout_combo.currentTextChanged.connect(self.refresh)
         controls.addWidget(self.layout_combo)
         refresh_button = self.QtWidgets.QPushButton("Refresh 2D Layout")
@@ -47,6 +49,11 @@ class TwoDGraphWidget:
         self.ax = self.figure.add_subplot(111)
         self.canvas.mpl_connect("motion_notify_event", self._handle_motion)
         self.canvas.mpl_connect("button_press_event", self._handle_click)
+
+    def set_dark_mode(self, enabled: bool) -> None:
+        self.dark_mode = bool(enabled)
+        self._apply_theme()
+        self.canvas.draw_idle()
 
     def _load_dependencies(self) -> None:
         try:
@@ -66,26 +73,49 @@ class TwoDGraphWidget:
         self.FancyArrowPatch = FancyArrowPatch
         self.nx = nx
 
-    def set_model(self, model: ThermalGraphModel, force_layout: bool = False) -> None:
+    def set_model(
+        self,
+        model: ThermalGraphModel,
+        force_layout: bool = False,
+        visible_node_ids: set[int] | None = None,
+        auto_refresh: bool = True,
+    ) -> None:
         self.model = model
-        self.refresh(force_layout=force_layout)
+        self.visible_node_ids = visible_node_ids
+        if auto_refresh:
+            self.refresh(force_layout=force_layout)
 
     def refresh(self, *_: Any, force_layout: bool = False) -> None:
         self.ax.clear()
+        self._apply_theme()
         self.node_points = {}
         self.edge_lines = []
         model = self.model
-        if model is None or not model.nodes:
-            self.ax.set_title("No graph nodes")
+        visible = self.visible_node_ids if self.visible_node_ids is not None else set(model.nodes) if model is not None else set()
+        if model is None or not visible:
+            self.ax.set_title("No graph nodes", color=self._text_color())
+            self.ax.axis("off")
+            self.canvas.draw_idle()
+            return
+        if self.layout_combo.currentText() == "Spring" and len(visible) > 1000:
+            self.ax.set_title(
+                f"Spring layout skipped for {len(visible)} nodes; use projection or filters",
+                color=self._text_color(),
+            )
             self.ax.axis("off")
             self.canvas.draw_idle()
             return
 
         self.positions = self._compute_positions(model, force_layout=force_layout)
+        if len(visible) > 1000:
+            self._draw_large_projection(model, visible)
+            return
         conductances = [max(0.0, float(edge.Gij_W_K)) for edge in model.edges.values()]
         max_g = max(conductances) if conductances else 1.0
 
         for edge in model.edges.values():
+            if edge.source not in visible or edge.target not in visible:
+                continue
             if edge.source not in self.positions or edge.target not in self.positions:
                 continue
             x0, y0 = self.positions[edge.source]
@@ -98,7 +128,7 @@ class TwoDGraphWidget:
                     (x1, y1),
                     arrowstyle="-",
                     connectionstyle=f"arc3,rad={curve:.3f}",
-                    color="#5f6368",
+                    color=self._edge_color(),
                     linewidth=width,
                     alpha=0.72,
                     zorder=1,
@@ -107,38 +137,105 @@ class TwoDGraphWidget:
                 self.edge_lines.append((edge.source, edge.target, patch))
             else:
                 (line,) = self.ax.plot(
-                    [x0, x1], [y0, y1], color="#5f6368", linewidth=width, alpha=0.72, zorder=1
+                    [x0, x1], [y0, y1], color=self._edge_color(), linewidth=width, alpha=0.72, zorder=1
                 )
                 self.edge_lines.append((edge.source, edge.target, line))
 
         for node_id in model.ordered_node_ids():
+            if node_id not in visible:
+                continue
             x, y = self.positions[node_id]
             node = model.nodes[node_id]
             color = "#ffb703" if node.has_heater else "#2a9d8f" if node.has_sensor else "#58a6ff"
-            self.ax.scatter([x], [y], s=320, c=[color], edgecolors="#202124", zorder=3)
-            self.ax.text(x, y, str(node_id), ha="center", va="center", fontsize=9, zorder=4)
+            self.ax.scatter([x], [y], s=320, c=[color], edgecolors=self._node_edge_color(), zorder=3)
+            self.ax.text(
+                x,
+                y,
+                str(node_id),
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=self._node_text_color(),
+                zorder=4,
+            )
             self.node_points[node_id] = (x, y)
 
-        self.ax.set_title("Read-only adjacency graph")
+        self.ax.set_title("Read-only adjacency graph", color=self._text_color())
         self.ax.set_aspect("equal", adjustable="datalim")
         self.ax.margins(0.18)
         self.ax.axis("off")
         self.canvas.draw_idle()
 
+    def _draw_large_projection(self, model: ThermalGraphModel, visible: set[int]) -> None:
+        xs: list[float] = []
+        ys: list[float] = []
+        colors: list[str] = []
+        self.node_points = {}
+        for node_id in model.ordered_node_ids():
+            if node_id not in visible or node_id not in self.positions:
+                continue
+            x, y = self.positions[node_id]
+            node = model.nodes[node_id]
+            xs.append(x)
+            ys.append(y)
+            colors.append("#ffb703" if node.has_heater else "#2a9d8f" if node.has_sensor else "#58a6ff")
+            self.node_points[node_id] = (x, y)
+        self.ax.scatter(xs, ys, s=12, c=colors, alpha=0.72, linewidths=0, zorder=3)
+        edge_count = sum(
+            1
+            for edge in model.edges.values()
+            if edge.source in visible and edge.target in visible
+        )
+        self.edge_lines = []
+        self.ax.set_title(
+            f"Projection view: {len(visible)} nodes, {edge_count} edges hidden for speed",
+            color=self._text_color(),
+        )
+        self.ax.set_aspect("equal", adjustable="datalim")
+        self.ax.margins(0.08)
+        self.ax.axis("off")
+        self.canvas.draw_idle()
+
+    def _apply_theme(self) -> None:
+        background = "#111827" if self.dark_mode else "white"
+        text = self._text_color()
+        self.figure.patch.set_facecolor(background)
+        self.ax.set_facecolor(background)
+        self.ax.tick_params(colors=text)
+        for spine in self.ax.spines.values():
+            spine.set_color(text)
+
+    def _text_color(self) -> str:
+        return "#e5e7eb" if self.dark_mode else "#202124"
+
+    def _node_text_color(self) -> str:
+        return "#f9fafb" if self.dark_mode else "#202124"
+
+    def _node_edge_color(self) -> str:
+        return "#d1d5db" if self.dark_mode else "#202124"
+
+    def _edge_color(self) -> str:
+        return "#9ca3af" if self.dark_mode else "#5f6368"
+
     def _compute_positions(
         self, model: ThermalGraphModel, force_layout: bool = False
     ) -> dict[int, tuple[float, float]]:
         layout_name = self.layout_combo.currentText()
+        visible = self.visible_node_ids if self.visible_node_ids is not None else set(model.nodes)
         if layout_name == "XY projection":
-            return {node_id: (node.coord[0], node.coord[1]) for node_id, node in model.nodes.items()}
+            return {node_id: (node.center[0], node.center[1]) for node_id, node in model.nodes.items() if node_id in visible}
         if layout_name == "XZ projection":
-            return {node_id: (node.coord[0], node.coord[2]) for node_id, node in model.nodes.items()}
+            return {node_id: (node.center[0], node.center[2]) for node_id, node in model.nodes.items() if node_id in visible}
         if layout_name == "YZ projection":
-            return {node_id: (node.coord[1], node.coord[2]) for node_id, node in model.nodes.items()}
+            return {node_id: (node.center[1], node.center[2]) for node_id, node in model.nodes.items() if node_id in visible}
 
         graph = self.nx.Graph()
-        graph.add_nodes_from(model.ordered_node_ids())
-        graph.add_edges_from((edge.source, edge.target) for edge in model.edges.values())
+        graph.add_nodes_from(node_id for node_id in model.ordered_node_ids() if node_id in visible)
+        graph.add_edges_from(
+            (edge.source, edge.target)
+            for edge in model.edges.values()
+            if edge.source in visible and edge.target in visible
+        )
         if graph.number_of_edges() == 0:
             return {
                 node_id: (float(index), 0.0)
@@ -317,4 +414,3 @@ def edge_curve_for_positions(
         return 0.0
     sign = 1 if (source + target) % 2 == 0 else -1
     return sign * min(0.55, 0.18 + 0.08 * blockers)
-

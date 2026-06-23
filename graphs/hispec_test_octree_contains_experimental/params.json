@@ -1,0 +1,19 @@
+{
+  "gltf": "meshes\\hispec-0005.gltf",
+  "contact_report": "C:\\Users\\andre\\Downloads\\ContactReport.xlsx",
+  "materials": "materials.json",
+  "graph_name": "hispec_test_octree_contains_experimental",
+  "output_root": "graphs",
+  "min_cell_size_mm": 7.0,
+  "max_cell_size_mm": 30.0,
+  "max_depth": 8,
+  "dominant_fraction_accept": 0.95,
+  "minority_fraction_ignore": 0.02,
+  "material_contrast_refine_threshold": 5.0,
+  "contact_refine_distance_mm": 10.0,
+  "boundary_refine": true,
+  "max_leaf_cells": 15000,
+  "samples_per_cell": 1,
+  "min_solid_fraction": 0.2,
+  "bbox_fallback": false
+}

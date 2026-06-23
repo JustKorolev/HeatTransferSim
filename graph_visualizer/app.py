@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from .graph_io import (
     save_graph_folder,
 )
 from .material_library import default_material_library
-from .matrix_builder import build_matrices, refresh_auto_edges
+from .matrix_builder import refresh_auto_edges
 from .models import (
     EdgeMode,
     GraphMetadata,
@@ -62,6 +63,7 @@ class GraphVisualizerApp:
         self.draw_preview_coords: list[tuple[int, int, int]] = []
         self._last_shown_preview_coords: list[tuple[int, int, int]] = []
         self._suppress_next_draw_pick = False
+        self.dark_mode = False
 
         self.app = self.QtWidgets.QApplication.instance() or self.QtWidgets.QApplication([])
         self.window = self.QtWidgets.QMainWindow()
@@ -70,6 +72,7 @@ class GraphVisualizerApp:
         self.autosave_timer.setSingleShot(True)
         self.autosave_timer.timeout.connect(self._autosave_now)
         self._build_layout()
+        self._apply_theme()
         self._refresh_all(reset_camera=True)
 
     def _load_qt(self) -> None:
@@ -100,6 +103,7 @@ class GraphVisualizerApp:
         self._build_file_controls()
         self._build_global_controls()
         self._build_search_controls()
+        self._build_filter_controls()
         self._build_node_form()
         self._build_details_panel()
         self.left_layout.addStretch(1)
@@ -112,21 +116,17 @@ class GraphVisualizerApp:
         self.three_d_tab = self.QtWidgets.QWidget()
         three_d_layout = self.QtWidgets.QVBoxLayout(self.three_d_tab)
         toggles = self.QtWidgets.QHBoxLayout()
-        self.show_labels = self._checkbox("Labels", True, self._handle_visual_toggle)
-        self.show_edges = self._checkbox("Edges", True, self._handle_visual_toggle)
+        self.show_labels = self._checkbox("Labels", False, self._handle_visual_toggle)
+        self.show_edges = self._checkbox("Edges", False, self._handle_visual_toggle)
         self.show_heaters = self._checkbox("Heaters", True, self._handle_visual_toggle)
         self.show_sensors = self._checkbox("Sensors", True, self._handle_visual_toggle)
         for widget in (self.show_labels, self.show_edges, self.show_heaters, self.show_sensors):
             toggles.addWidget(widget)
-        self._build_draw_controls(toggles)
         toggles.addStretch(1)
         three_d_layout.addLayout(toggles)
         self.viewer = GraphPyVistaWidget(
             self.three_d_tab,
             on_pick_node=self._handle_viewer_pick,
-            on_drag_update=self.update_draw_preview,
-            on_left_click=self.commit_draw_preview_if_active,
-            on_escape=self.cancel_draw_preview,
             tooltip_for_node=self._tooltip_for_node,
         )
         three_d_layout.addWidget(self.viewer.interactor, 1)
@@ -156,6 +156,8 @@ class GraphVisualizerApp:
             button = self.QtWidgets.QPushButton(text)
             button.clicked.connect(callback)
             row.addWidget(button)
+        self.theme_toggle = self._checkbox("Dark", self.dark_mode, self._handle_theme_toggle)
+        row.addWidget(self.theme_toggle)
         self.left_layout.addLayout(row)
 
     def _build_global_controls(self) -> None:
@@ -207,15 +209,37 @@ class GraphVisualizerApp:
         row.addWidget(search_button)
         self.left_layout.addWidget(box)
 
+    def _build_filter_controls(self) -> None:
+        box = self._group_box("Filters")
+        form = self.QtWidgets.QFormLayout(box)
+        self.filter_material = self.QtWidgets.QComboBox()
+        self.filter_component = self.QtWidgets.QComboBox()
+        self.filter_level_min = self._int_spin(0, 99, 0)
+        self.filter_level_max = self._int_spin(0, 99, 99)
+        self.filter_heater_sensor = self._checkbox("heater or sensor only", False, self._handle_visual_toggle)
+        self.filter_boundary = self._checkbox("contact/boundary only", False, self._handle_visual_toggle)
+        for combo in (self.filter_material, self.filter_component):
+            combo.currentTextChanged.connect(self._handle_visual_toggle)
+        self.filter_level_min.valueChanged.connect(self._handle_visual_toggle)
+        self.filter_level_max.valueChanged.connect(self._handle_visual_toggle)
+        form.addRow("material", self.filter_material)
+        form.addRow("component", self.filter_component)
+        form.addRow("min level", self.filter_level_min)
+        form.addRow("max level", self.filter_level_max)
+        form.addRow("", self.filter_heater_sensor)
+        form.addRow("", self.filter_boundary)
+        self.left_layout.addWidget(box)
+
     def _build_node_form(self) -> None:
-        box = self._group_box("Cell Entry")
+        box = self._group_box("Selected Cell Tags")
         layout = self.QtWidgets.QVBoxLayout(box)
-        plus_button = self.QtWidgets.QPushButton("+ Add New Cell")
-        plus_button.setStyleSheet("font-size: 18px; font-weight: 700; padding: 8px;")
-        plus_button.clicked.connect(self.prepare_new_node)
-        layout.addWidget(plus_button)
 
         form = self.QtWidgets.QFormLayout()
+        self.inputs["part_code"] = self.QtWidgets.QLineEdit()
+        self.inputs["part_code"].setReadOnly(True)
+        self.inputs["part_code"].setStyleSheet("font-weight: 700;")
+        self.inputs["component_name"] = self.QtWidgets.QLineEdit()
+        self.inputs["component_name"].setReadOnly(True)
         self.inputs["node_id"] = self._int_spin(-10**9, 10**9, 0)
         for axis in ("i", "j", "k"):
             self.inputs[f"coord_{axis}"] = self._int_spin(-10**6, 10**6, 0)
@@ -231,10 +255,14 @@ class GraphVisualizerApp:
         self.inputs["C_manual_override"] = self._checkbox("", False, self._update_C_enabled)
         self.inputs["C_J_K"] = self._double_spin(0.0, 1.0e15, 800.0, 10.0)
         self.inputs["Grad_W_K"] = self._double_spin(0.0, 1.0e12, 0.0, 0.01)
+        self.inputs["notes"] = self.QtWidgets.QPlainTextEdit()
+        self.inputs["notes"].setMaximumHeight(64)
         for field_name in ("mass_kg", "cp_J_kgK"):
             self.inputs[field_name].valueChanged.connect(self._auto_update_C)
 
         for label, key in (
+            ("part code", "part_code"),
+            ("component", "component_name"),
             ("node_id", "node_id"),
             ("coord i", "coord_i"),
             ("coord j", "coord_j"),
@@ -249,8 +277,27 @@ class GraphVisualizerApp:
             ("manual C", "C_manual_override"),
             ("C_J_K", "C_J_K"),
             ("Grad_W_K", "Grad_W_K"),
+            ("notes", "notes"),
         ):
             form.addRow(label, self.inputs[key])
+
+        for key in (
+            "node_id",
+            "coord_i",
+            "coord_j",
+            "coord_k",
+            "side_length_m",
+            "material",
+            "rho_kg_m3",
+            "cp_J_kgK",
+            "k_W_mK",
+            "emissivity",
+            "mass_kg",
+            "C_manual_override",
+            "C_J_K",
+            "Grad_W_K",
+        ):
+            self.inputs[key].setEnabled(False)
 
         self.inputs["has_heater"] = self._checkbox("has heater", False, self._update_optional_sections)
         self.heater_box = self._group_box("Heater")
@@ -279,12 +326,9 @@ class GraphVisualizerApp:
         layout.addWidget(self.sensor_box)
 
         button_row = self.QtWidgets.QHBoxLayout()
-        self.apply_button = self.QtWidgets.QPushButton("Apply Cell")
+        self.apply_button = self.QtWidgets.QPushButton("Save Tags")
         self.apply_button.clicked.connect(self.apply_node_form)
-        delete_button = self.QtWidgets.QPushButton("Delete Selected")
-        delete_button.clicked.connect(self.delete_selected_node)
         button_row.addWidget(self.apply_button)
-        button_row.addWidget(delete_button)
         layout.addLayout(button_row)
         self.left_layout.addWidget(box)
         self._update_optional_sections()
@@ -322,28 +366,17 @@ class GraphVisualizerApp:
     def apply_node_form(self) -> None:
         try:
             node = self._node_from_form()
-            topology_changed = False
             if self.selected_node_id is None or self.selected_node_id not in self.model.nodes:
-                self.model.add_node(node)
-                topology_changed = True
-            else:
-                old_node = self.model.nodes[self.selected_node_id]
-                topology_changed = (
-                    old_node.node_id != node.node_id or old_node.coord != node.coord
-                )
-                self.model.update_node(self.selected_node_id, node)
-            self.selected_node_id = node.node_id
-            invalidated_loaded_g = False
-            if topology_changed:
-                invalidated_loaded_g = self._handle_topology_changed()
-            elif self.model.metadata.edge_mode == EdgeMode.AUTO.value:
-                refresh_auto_edges(self.model)
-                self._mark_dirty()
-            else:
-                self._mark_dirty()
+                raise ValueError("Select an existing octree cell before saving tags.")
+            old_node = self.model.nodes[self.selected_node_id]
+            old_node.has_heater = node.has_heater
+            old_node.heater = node.heater
+            old_node.has_sensor = node.has_sensor
+            old_node.sensor = node.sensor
+            old_node.notes = node.notes
+            self._mark_dirty()
             self._refresh_all(reset_camera=False)
-            if not invalidated_loaded_g:
-                self._set_status(f"Saved cell {node.node_id}.")
+            self._set_status(f"Saved tags for cell {old_node.node_id}.")
         except Exception as exc:
             self._set_status(str(exc), error=True)
 
@@ -361,9 +394,12 @@ class GraphVisualizerApp:
         if node_id not in self.model.nodes:
             return
         self.selected_node_id = node_id
-        self._load_node_into_form(self.model.nodes[node_id])
+        node = self.model.nodes[node_id]
+        self._load_node_into_form(node)
         self._refresh_details()
         self.viewer.select_node(node_id)
+        component = self._component_display(node)
+        self._set_status(f"Selected cell {node_id}: {component}.")
 
     def _handle_viewer_pick(
         self,
@@ -461,6 +497,7 @@ class GraphVisualizerApp:
             self.cancel_draw_preview()
             self._sync_metadata_widgets()
             self.prepare_new_node()
+            self._load_ui_state(folder)
             self._refresh_all(reset_camera=True)
             self._set_status(f"Loaded graph folder {folder}.")
         except Exception as exc:
@@ -492,6 +529,7 @@ class GraphVisualizerApp:
             errors = validate_model(self.model)
             raise_if_errors(errors, "Cannot save graph")
             matrices = save_graph_folder(self.model, folder)
+            self._save_ui_state(folder)
             self._set_status(
                 f"Saved {len(self.model.nodes)} nodes, {len(self.model.edges)} edges, "
                 f"matrix shape {matrices['G'].shape}."
@@ -675,6 +713,7 @@ class GraphVisualizerApp:
             errors = validate_model(self.model)
             raise_if_errors(errors, "Cannot autosave graph")
             save_graph_folder(self.model, self.current_folder)
+            self._save_ui_state(self.current_folder)
             self.dirty = False
             self._update_window_title()
             self._set_status(f"Autosaved at {datetime.now().strftime('%H:%M:%S')}.")
@@ -686,6 +725,46 @@ class GraphVisualizerApp:
         self.window.setWindowTitle(
             f"Graph Visualizer - Sparse Thermal Lump Network{marker}"
         )
+
+    def _save_ui_state(self, folder: Path) -> None:
+        state = {
+            "selected_node_id": self.selected_node_id,
+            "filters": {
+                "material": self.filter_material.currentText() if hasattr(self, "filter_material") and self.filter_material.count() else "All",
+                "component": self.filter_component.currentText() if hasattr(self, "filter_component") and self.filter_component.count() else "All",
+                "level_min": int(self.filter_level_min.value()) if hasattr(self, "filter_level_min") else 0,
+                "level_max": int(self.filter_level_max.value()) if hasattr(self, "filter_level_max") else 99,
+                "heater_sensor_only": self.filter_heater_sensor.isChecked() if hasattr(self, "filter_heater_sensor") else False,
+                "boundary_only": self.filter_boundary.isChecked() if hasattr(self, "filter_boundary") else False,
+            },
+            "dark_mode": self.dark_mode,
+        }
+        with (folder / "ui_state.json").open("w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2)
+
+    def _load_ui_state(self, folder: Path) -> None:
+        path = folder / "ui_state.json"
+        if not path.exists():
+            return
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                state = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return
+        if "dark_mode" in state:
+            self.dark_mode = bool(state["dark_mode"])
+            if hasattr(self, "theme_toggle"):
+                self.theme_toggle.blockSignals(True)
+                self.theme_toggle.setChecked(self.dark_mode)
+                self.theme_toggle.blockSignals(False)
+            self._apply_theme()
+        selected = state.get("selected_node_id")
+        try:
+            selected_id = int(selected)
+        except (TypeError, ValueError):
+            selected_id = None
+        if selected_id in self.model.nodes:
+            self.selected_node_id = selected_id
 
     def _node_from_form(self) -> NodeProperties:
         node_id = int(self.inputs["node_id"].value())
@@ -722,6 +801,7 @@ class GraphVisualizerApp:
                 sensor_bias_K=float(self.inputs["sensor_bias_K"].value()),
                 sensor_time_constant_s=float(self.inputs["sensor_time_constant_s"].value()),
             ),
+            notes=self.inputs["notes"].toPlainText(),
         )
         if not node.C_manual_override:
             node.recompute_heat_capacity()
@@ -733,6 +813,8 @@ class GraphVisualizerApp:
 
     def _load_node_into_form(self, node: NodeProperties) -> None:
         self._building_form = True
+        self.inputs["part_code"].setText(self._part_code(node.component_name))
+        self.inputs["component_name"].setText(node.component_name or "")
         self.inputs["node_id"].setValue(node.node_id)
         self.inputs["coord_i"].setValue(node.coord[0])
         self.inputs["coord_j"].setValue(node.coord[1])
@@ -748,6 +830,7 @@ class GraphVisualizerApp:
         self.inputs["C_manual_override"].setChecked(node.C_manual_override)
         self.inputs["C_J_K"].setValue(node.C_J_K)
         self.inputs["Grad_W_K"].setValue(node.Grad_W_K)
+        self.inputs["notes"].setPlainText(node.notes)
         self.inputs["has_heater"].setChecked(node.has_heater)
         self.inputs["heater_id"].setValue(node.heater.heater_id or node.node_id)
         self.inputs["heater_min_power_W"].setValue(node.heater.heater_min_power_W)
@@ -797,6 +880,8 @@ class GraphVisualizerApp:
             self.inputs["sensor_id"].setValue(node_id)
 
     def _refresh_all(self, reset_camera: bool = False) -> None:
+        self._sync_filter_options()
+        visible_node_ids = self._filtered_node_ids()
         self.viewer.set_toggles(
             self.show_labels.isChecked(),
             self.show_edges.isChecked(),
@@ -804,11 +889,57 @@ class GraphVisualizerApp:
             self.show_sensors.isChecked(),
         )
         self.viewer.set_draw_mode(self.draw_mode_enabled)
-        build_matrices(self.model)
         self.viewer.selected_node_id = self.selected_node_id
-        self.viewer.draw(self.model, reset_camera=reset_camera)
-        self.two_d_view.set_model(self.model)
+        self.viewer.draw(self.model, reset_camera=reset_camera, visible_node_ids=visible_node_ids)
+        self.two_d_view.set_model(
+            self.model,
+            visible_node_ids=visible_node_ids,
+            auto_refresh=self.view_tabs.currentWidget() is self.two_d_view.widget,
+        )
         self._refresh_details()
+
+    def _sync_filter_options(self) -> None:
+        if not hasattr(self, "filter_material"):
+            return
+        for combo, values in (
+            (self.filter_material, sorted({node.material for node in self.model.nodes.values()})),
+            (self.filter_component, sorted({node.component_name for node in self.model.nodes.values() if node.component_name})),
+        ):
+            current = combo.currentText() if combo.count() else "All"
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("All")
+            combo.addItems(values)
+            combo.setCurrentText(current if current in ["All", *values] else "All")
+            combo.blockSignals(False)
+
+    def _filtered_node_ids(self) -> set[int]:
+        if not hasattr(self, "filter_material"):
+            return set(self.model.nodes)
+        material = self.filter_material.currentText() if self.filter_material.count() else "All"
+        component = self.filter_component.currentText() if self.filter_component.count() else "All"
+        min_level = int(self.filter_level_min.value())
+        max_level = int(self.filter_level_max.value())
+        contact_nodes = {
+            endpoint
+            for edge in self.model.edges.values()
+            if edge.edge_type not in {"internal_conduction", "same_material_spatial"}
+            for endpoint in (edge.source, edge.target)
+        }
+        visible: set[int] = set()
+        for node_id, node in self.model.nodes.items():
+            if material != "All" and node.material != material:
+                continue
+            if component != "All" and node.component_name != component:
+                continue
+            if not (min_level <= int(node.level) <= max_level):
+                continue
+            if self.filter_heater_sensor.isChecked() and not (node.has_heater or node.has_sensor):
+                continue
+            if self.filter_boundary.isChecked() and node.confidence == "high" and node_id not in contact_nodes:
+                continue
+            visible.add(node_id)
+        return visible
 
     def _refresh_details(self) -> None:
         if self.selected_node_id is None or self.selected_node_id not in self.model.nodes:
@@ -821,18 +952,50 @@ class GraphVisualizerApp:
         ]
         self.details_label.setText(
             f"node_id: {node.node_id}\n"
-            f"coord: {node.coord}\n"
+            f"cell_id: {node.cell_id or node.coord}\n"
+            f"part code: {self._part_code(node.component_name)}\n"
+            f"component: {node.component_name or '?'}\n"
+            f"center_mm: {node.center}\n"
+            f"size_mm: {node.size_mm or node.side_length_m}\n"
             f"material: {node.material}\n"
+            f"level: {node.level}, confidence: {node.confidence}\n"
             f"C: {node.C_J_K:.6g} J/K, Grad: {node.Grad_W_K:.6g} W/K\n"
             f"heater: {node.has_heater}, sensor: {node.has_sensor}\n"
             f"incident conductive edges: {len(incident)}"
         )
 
+    @staticmethod
+    def _part_code(component_name: str) -> str:
+        match = re.search(r"P\d{3,5}", component_name or "")
+        return match.group(0) if match else ""
+
+    def _component_display(self, node: NodeProperties) -> str:
+        part_code = self._part_code(node.component_name)
+        if part_code and node.component_name:
+            return f"{part_code} ({node.component_name})"
+        return node.component_name or "unknown component"
+
     def _handle_visual_toggle(self, *_: Any) -> None:
         self._refresh_all(reset_camera=False)
 
+    def _handle_theme_toggle(self, *_: Any) -> None:
+        self.dark_mode = bool(self.theme_toggle.isChecked())
+        self._apply_theme()
+        self._refresh_all(reset_camera=False)
+        if self.current_folder is not None:
+            self._save_ui_state(self.current_folder)
+        self._set_status("Dark mode enabled." if self.dark_mode else "Light mode enabled.")
+
+    def _apply_theme(self) -> None:
+        self.app.setStyleSheet(self._dark_stylesheet() if self.dark_mode else "")
+        if hasattr(self, "viewer"):
+            self.viewer.set_dark_mode(self.dark_mode)
+        if hasattr(self, "two_d_view"):
+            self.two_d_view.set_dark_mode(self.dark_mode)
+
     def _handle_tab_changed(self, index: int) -> None:
         if self.view_tabs.widget(index) is self.two_d_view.widget:
+            self.two_d_view.visible_node_ids = self._filtered_node_ids()
             self.two_d_view.refresh()
 
     def _update_metadata_from_inputs(self, *_: Any) -> None:
@@ -875,7 +1038,10 @@ class GraphVisualizerApp:
         return cleaned or "untitled_graph"
 
     def _set_status(self, message: str, error: bool = False) -> None:
-        color = "#b00020" if error else "#1f6f3f"
+        if self.dark_mode:
+            color = "#fca5a5" if error else "#86efac"
+        else:
+            color = "#b00020" if error else "#1f6f3f"
         self.status_label.setStyleSheet(f"color: {color};")
         self.status_label.setText(message)
 
@@ -891,6 +1057,72 @@ class GraphVisualizerApp:
         box = self.QtWidgets.QGroupBox(title)
         box.setStyleSheet("QGroupBox { font-weight: 700; margin-top: 8px; }")
         return box
+
+    @staticmethod
+    def _dark_stylesheet() -> str:
+        return """
+        QWidget {
+            background-color: #111827;
+            color: #e5e7eb;
+            selection-background-color: #2563eb;
+            selection-color: #ffffff;
+        }
+        QScrollArea, QTabWidget::pane {
+            border: 1px solid #374151;
+        }
+        QGroupBox {
+            border: 1px solid #374151;
+            border-radius: 6px;
+            margin-top: 12px;
+            padding-top: 10px;
+            font-weight: 700;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+        }
+        QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+            background-color: #1f2937;
+            color: #f9fafb;
+            border: 1px solid #4b5563;
+            border-radius: 4px;
+            padding: 3px;
+        }
+        QLineEdit:read-only {
+            color: #d1d5db;
+            background-color: #172033;
+        }
+        QPushButton {
+            background-color: #1f2937;
+            color: #f9fafb;
+            border: 1px solid #4b5563;
+            border-radius: 4px;
+            padding: 5px 8px;
+        }
+        QPushButton:hover {
+            background-color: #374151;
+        }
+        QPushButton:pressed {
+            background-color: #2563eb;
+        }
+        QTabBar::tab {
+            background: #1f2937;
+            color: #d1d5db;
+            border: 1px solid #374151;
+            padding: 6px 10px;
+        }
+        QTabBar::tab:selected {
+            background: #111827;
+            color: #ffffff;
+            border-bottom-color: #111827;
+        }
+        QToolTip {
+            background-color: #111827;
+            color: #f9fafb;
+            border: 1px solid #4b5563;
+        }
+        """
 
     def _checkbox(self, text: str, checked: bool, callback: Any | None = None) -> Any:
         widget = self.QtWidgets.QCheckBox(text)

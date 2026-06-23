@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
 from typing import Any
 
 
@@ -99,9 +101,17 @@ DEFAULT_MATERIAL_LIBRARY: dict[str, dict[str, float]] = {
     },
 }
 
+PROJECT_MATERIALS_FILE = Path(__file__).resolve().parents[1] / "materials.json"
+
 
 def default_material_library() -> dict[str, dict[str, float]]:
-    """Return an isolated copy of the default material library."""
+    """Return the project material library, falling back to built-in defaults."""
+    if PROJECT_MATERIALS_FILE.exists():
+        try:
+            with PROJECT_MATERIALS_FILE.open("r", encoding="utf-8") as handle:
+                return normalize_material_library(json.load(handle))
+        except (OSError, json.JSONDecodeError):
+            pass
     return deepcopy(DEFAULT_MATERIAL_LIBRARY)
 
 
@@ -117,16 +127,29 @@ def material_defaults(
 
 def normalize_material_library(raw: Any) -> dict[str, dict[str, float]]:
     """Coerce a loaded JSON material library to the expected numeric shape."""
+    if isinstance(raw, list):
+        raw = {
+            str(row.get("name")): row
+            for row in raw
+            if isinstance(row, dict) and row.get("name")
+        }
     if not isinstance(raw, dict):
-        return default_material_library()
-    normalized = default_material_library()
+        return deepcopy(DEFAULT_MATERIAL_LIBRARY)
+    normalized = deepcopy(DEFAULT_MATERIAL_LIBRARY)
     for name, values in raw.items():
         if not isinstance(values, dict):
             continue
         current = material_defaults("generic electronics package", normalized)
-        for key in ("rho_kg_m3", "cp_J_kgK", "k_W_mK", "emissivity"):
+        key_aliases = {
+            "rho_kg_m3": ("rho_kg_m3", "density_kg_m3"),
+            "cp_J_kgK": ("cp_J_kgK",),
+            "k_W_mK": ("k_W_mK",),
+            "emissivity": ("emissivity",),
+        }
+        for key, aliases in key_aliases.items():
+            raw_value = next((values[alias] for alias in aliases if alias in values), current[key])
             try:
-                current[key] = float(values.get(key, current[key]))
+                current[key] = float(raw_value)
             except (TypeError, ValueError):
                 pass
         normalized[str(name)] = current

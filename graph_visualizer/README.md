@@ -16,8 +16,8 @@ python -m heat_transfer_visualizer.main
 
 The main viewer has two tabs:
 
-- `3D View`: the editable PyVista cube scene with selection, Draw Mode,
-  labels, edges, heater markers, and sensor markers.
+- `3D View`: the PyVista octree/cell scene with cuboid cell rendering,
+  selection, labels, edges, heater markers, and sensor markers.
 - `2D View`: a read-only flattened adjacency graph for inspecting nodes and
   conductive links. It does not edit graph topology or node/edge properties.
 
@@ -26,14 +26,15 @@ coordinate projections: `XY`, `XZ`, and `YZ`, where coordinates come from each
 node's sparse `(i, j, k)` grid coordinate. `Refresh 2D Layout` recomputes and
 redraws the 2D graph.
 
-Hovering over a node in either view shows a compact node summary: coordinate,
-material, mass, `C`, `Grad`, heater status, and sensor status. Heater and
-sensor details are included when present. Hovering over a 2D edge shows its
-conductance `Gij_W_K` and source/mode.
+Hovering over a node in either view shows a compact node summary: cell ID,
+center/size in millimeters, component, material, level, volume, mass, `C`,
+heater status, and sensor status. Heater and sensor details are included when
+present. Hovering over a 2D edge shows its conductance `Gij_W_K`, edge type,
+area, distance, and source/mode.
 
 ## Graph Folder Structure
 
-Graphs are saved as folders:
+Legacy graphs are saved as folders:
 
 ```text
 thermal_graphs/
@@ -56,6 +57,31 @@ graph status instead of writing files.
 `graph3d.json` stores node and edge metadata in a NetworkX-compatible shape:
 nodes have an `id` field plus node attributes, and edges have `source`,
 `target`, and `Gij_W_K`.
+
+Octree conversion folders use the newer layout:
+
+```text
+graphs/
+  my_graph_name/
+    graph.json
+    nodes.csv
+    edges.csv
+    params.json
+    materials_used.json
+    material_warnings.csv
+    validation_report.txt
+    C.npy
+    G.npy
+    L.npy
+    A.npy
+    ui_state.json
+```
+
+In this mode the visualizer is an inspection and tagging tool. Geometry and
+topology fields are read-only; selecting a leaf cell allows editing heater,
+sensor, ID, and notes metadata only. The filters panel can restrict the 3D and
+2D views by material, component, octree level, heater/sensor tags, or
+contact/boundary cells.
 
 `metadata.json` stores graph-level settings such as `T_sur_K`, edge mode,
 timestamps, graph name, and notes.
@@ -117,25 +143,21 @@ Topology edits invalidate loaded `G`. Adding, deleting, renumbering, or moving
 nodes switches the graph back to auto-estimated mode, regenerates face-adjacent
 edges, and rebuilds `G` and `L`.
 
-## Draw Mode
+## Octree Graph Conversion
 
-`Draw Mode` is a toolbar toggle for straight face-normal extrusion.
+Use the project-level wrapper to convert a SolidWorks-exported glTF/GLB plus a
+contact report and material table:
 
-1. Enable `Draw Mode`.
-2. Click a face of an existing cube cell.
-3. Drag to preview transparent ghost cells.
-4. Click again to commit the preview.
+```powershell
+python build_octree_graph.py `
+  --gltf assembly.gltf `
+  --contact-report ContactReport.xlsx `
+  --graph-name hispec_test_octree `
+  --output-root graphs
+```
 
-The extrusion direction comes from the clicked cube face normal, not from
-screen-space direction. For example, clicking the `+x` face of `(i, j, k)`
-creates `(i+1, j, k)`, `(i+2, j, k)`, and so on.
-
-Preview cells stop at the first occupied coordinate. If the immediately adjacent
-cell is occupied, no new cells are created and the UI shows a non-fatal message.
-Press `Escape` or disable `Draw Mode` to cancel a preview.
-
-New draw-created nodes receive IDs starting at `max(existing_node_ids) + 1`, or
-`0` for an empty graph. They copy material, dimension, mass, and heat-capacity
-fields from the source cell. Heater, sensor, and radiation fields reset:
-`Grad_W_K = 0`, no heater, no sensor, and heater/sensor IDs default to the new
-node ID.
+The converter preserves millimeter coordinates for visualization, computes
+thermal quantities in SI units, generates `C`, `G`, `L`, and `A`, and writes a
+validation report with unknown materials, non-watertight mesh warnings, matrix
+checks, and tolerance-accepted boundary cells. Material properties are read from
+the project-level `materials.json` by default.

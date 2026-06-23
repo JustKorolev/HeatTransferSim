@@ -6,3 +6,5 @@ pyvistaqt
 PySide6
 qtpy
 networkx
+trimesh
+openpyxl

@@ -15,10 +15,10 @@ HeaterFunction = Callable[[float], float]
 
 
 def make_pulsed_heater(power: float, start_time: float, stop_time: float) -> HeaterFunction:
-    """Create a constant-power heater active on [start_time, stop_time]."""
+    """Create a constant-power heater active on [start_time, stop_time)."""
 
     def heater(time: float) -> float:
-        return float(power) if start_time <= time <= stop_time else 0.0
+        return float(power) if start_time <= time < stop_time else 0.0
 
     return heater
 

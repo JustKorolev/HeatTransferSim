@@ -10,7 +10,13 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
     lines = [
         f"Node {node_id}",
         f"coord: {getattr(attrs, 'coord', '?')}",
+        f"cell: {getattr(attrs, 'cell_id', None) or getattr(attrs, 'coord', '?')}",
+        f"center_mm: {getattr(attrs, 'center_mm', None) or getattr(attrs, 'coord', '?')}",
+        f"size_mm: {getattr(attrs, 'size_mm', None) or getattr(attrs, 'side_length_m', '?')}",
+        f"level: {getattr(attrs, 'level', '?')}",
+        f"component: {getattr(attrs, 'component_name', '') or '?'}",
         f"material: {getattr(attrs, 'material', '?')}",
+        f"volume: {_fmt(getattr(attrs, 'volume_m3', None))} m^3",
         f"mass: {_fmt(getattr(attrs, 'mass_kg', None))} kg",
         f"C: {_fmt(getattr(attrs, 'C_J_K', None))} J/K",
         f"Grad: {_fmt(getattr(attrs, 'Grad_W_K', None))} W/K",
@@ -46,6 +52,9 @@ def format_edge_tooltip(source: int, target: int, attrs: Any) -> str:
         [
             f"Edge {source} -- {target}",
             f"Gij: {_fmt(getter('Gij_W_K'))} W/K",
+            f"type: {getter('edge_type', '?')}",
+            f"area: {_fmt(getter('shared_area_m2'))} m^2",
+            f"distance: {_fmt(getter('distance_m'))} m",
             f"mode: {getter('source_metadata', getter('source_type', '?'))}",
         ]
     )
