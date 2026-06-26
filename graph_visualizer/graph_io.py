@@ -6,11 +6,19 @@ import json
 from pathlib import Path
 from typing import Any
 import csv
+import os
+import tempfile
 
 import numpy as np
 
-from .material_library import default_material_library, normalize_material_library
-from .matrix_builder import apply_conductance_matrix, build_matrices, refresh_auto_edges
+from .material_library import default_material_library, material_defaults, normalize_material_library
+from .matrix_builder import (
+    apply_conductance_matrix,
+    build_matrices,
+    refresh_auto_edges,
+    refresh_geometry_edges,
+    refresh_radiation_from_exposed_faces,
+)
 from .models import EdgeMode, GraphMetadata, ThermalGraphModel
 from .validation import (
     raise_if_errors,
@@ -43,17 +51,13 @@ def save_graph_folder(model: ThermalGraphModel, folder_path: str | Path) -> dict
     raise_if_errors(matrix_errors, "Cannot save graph matrices")
 
     model.metadata.graph_name = model.metadata.graph_name or folder.name
-    with (folder / GRAPH_FILE).open("w", encoding="utf-8") as handle:
-        json.dump(model.to_graph3d_dict(), handle, indent=2)
-    with (folder / OCTREE_GRAPH_FILE).open("w", encoding="utf-8") as handle:
-        json.dump(model.to_octree_graph_dict(), handle, indent=2)
+    _atomic_write_json(folder / GRAPH_FILE, model.to_graph3d_dict(), indent=2)
+    _atomic_write_json(folder / OCTREE_GRAPH_FILE, model.to_octree_graph_dict(), indent=2)
     np.savez(folder / MATRIX_FILE, **matrices)
     _save_octree_outputs(model, matrices, folder)
-    with (folder / METADATA_FILE).open("w", encoding="utf-8") as handle:
-        json.dump(model.metadata.to_dict(), handle, indent=2)
+    _atomic_write_json(folder / METADATA_FILE, model.metadata.to_dict(), indent=2)
     material_library = model.material_library or default_material_library()
-    with (folder / MATERIAL_FILE).open("w", encoding="utf-8") as handle:
-        json.dump(material_library, handle, indent=2)
+    _atomic_write_json(folder / MATERIAL_FILE, material_library, indent=2)
     return matrices
 
 
@@ -68,12 +72,15 @@ def load_graph_folder(folder_path: str | Path) -> tuple[ThermalGraphModel, dict[
             graph_data = json.load(handle)
         model = ThermalGraphModel.from_octree_graph_dict(graph_data)
         model.metadata.graph_name = model.metadata.graph_name or folder.name
+        if isinstance(graph_data.get("materials_used"), (dict, list)):
+            model.material_library = normalize_material_library(graph_data["materials_used"])
         material_path = folder / "materials_used.json"
         if material_path.exists():
             with material_path.open("r", encoding="utf-8") as handle:
                 loaded_materials = json.load(handle)
             if isinstance(loaded_materials, dict):
                 model.material_library = normalize_material_library(loaded_materials)
+        _apply_loaded_material_properties(model)
     else:
         missing = [name for name, path in ((GRAPH_FILE, graph_path),) if not path.exists()]
         if missing:
@@ -100,24 +107,192 @@ def load_graph_folder(folder_path: str | Path) -> tuple[ThermalGraphModel, dict[
     if matrix_path.exists():
         with np.load(matrix_path, allow_pickle=False) as loaded:
             matrices = {key: loaded[key] for key in loaded.files}
+        matrices = _normalize_loaded_matrices(model, matrices)
+        matrices = _repair_empty_auto_conduction(model, matrices)
     elif octree_path.exists():
         node_ids = np.array(model.ordered_node_ids(), dtype=int)
         matrices = {
             "node_ids": node_ids,
+            "coords": np.array([model.nodes[int(node_id)].coord for node_id in node_ids], dtype=int),
             "C": np.array([model.nodes[int(node_id)].C_J_K for node_id in node_ids], dtype=float),
+            "Grad": np.array([model.nodes[int(node_id)].Grad_W_K for node_id in node_ids], dtype=float),
         }
-        return model, matrices
+        for key in ("C", "G", "L", "G_rad", "initial_temperature_K"):
+            path = folder / f"{key}.npy"
+            if path.exists():
+                matrices[key] = np.load(path, allow_pickle=False)
+        if "G" not in matrices:
+            size = len(node_ids)
+            matrices["G"] = np.zeros((size, size), dtype=float)
+            index = {int(node_id): row for row, node_id in enumerate(node_ids)}
+            for edge in model.edges.values():
+                if edge.source in index and edge.target in index:
+                    i = index[edge.source]
+                    j = index[edge.target]
+                    matrices["G"][i, j] = matrices["G"][j, i] = max(0.0, float(edge.Gij_W_K))
+        if "L" not in matrices:
+            matrices["L"] = np.diag(matrices["G"].sum(axis=1)) - matrices["G"]
+        if "G_rad" not in matrices:
+            matrices["G_rad"] = np.array(
+                [
+                    model.nodes[int(node_id)].G_rad_W_K
+                    if model.nodes[int(node_id)].G_rad_W_K > 0.0
+                    else model.nodes[int(node_id)].Grad_W_K
+                    for node_id in node_ids
+                ],
+                dtype=float,
+            )
+        if "initial_temperature_K" not in matrices:
+            matrices["initial_temperature_K"] = np.array(
+                [model.nodes[int(node_id)].initial_temperature_K for node_id in node_ids],
+                dtype=float,
+            )
+        matrices = _repair_empty_auto_conduction(model, matrices)
     else:
-        matrices = build_matrices(model)
+        matrices = {
+            "node_ids": np.array(model.ordered_node_ids(), dtype=int),
+        }
         for key in ("C", "G", "L", "A"):
             path = folder / f"{key}.npy"
             if path.exists():
                 matrices[key] = np.load(path, allow_pickle=False)
+        matrices = _normalize_loaded_matrices(model, matrices)
+        matrices = _repair_empty_auto_conduction(model, matrices)
+    if octree_path.exists():
+        matrices = _refresh_octree_auto_geometry(model, matrices)
+        _refresh_octree_radiation(model)
+        matrices = _sync_radiation_matrix_from_model(model, matrices)
     matrix_errors = validate_matrices(matrices, model.ordered_node_ids())
     raise_if_errors(matrix_errors, "Loaded matrices are invalid")
     if EdgeMode.normalize(model.metadata.edge_mode) == EdgeMode.LOADED_G.value:
         apply_conductance_matrix(model, matrices["node_ids"], matrices["G"])
     return model, matrices
+
+
+def _repair_empty_auto_conduction(
+    model: ThermalGraphModel,
+    matrices: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    if EdgeMode.normalize(model.metadata.edge_mode) != EdgeMode.AUTO.value:
+        return matrices
+    if len(model.edges) > 0 or _matrix_has_conduction(matrices):
+        return matrices
+    refresh_auto_edges(model)
+    if len(model.edges) == 0:
+        refresh_geometry_edges(model)
+    if len(model.edges) == 0:
+        return matrices
+    model.octree_graph_data.setdefault("warnings", [])
+    model.octree_graph_data["warnings"].append(
+        "Loaded graph had no conductive edges/matrix; regenerated geometry-based auto edges."
+    )
+    return build_matrices(model)
+
+
+def _apply_loaded_material_properties(model: ThermalGraphModel) -> None:
+    library = model.material_library or default_material_library()
+    for node in model.nodes.values():
+        defaults = material_defaults(node.material, library)
+        node.rho_kg_m3 = float(defaults["rho_kg_m3"])
+        node.cp_J_kgK = float(defaults["cp_J_kgK"])
+        node.k_W_mK = float(defaults["k_W_mK"])
+        node.emissivity = float(defaults["emissivity"])
+
+
+def _refresh_octree_auto_geometry(
+    model: ThermalGraphModel,
+    matrices: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    if EdgeMode.normalize(model.metadata.edge_mode) != EdgeMode.AUTO.value:
+        return matrices
+    if not model.nodes:
+        return matrices
+    if any(node.center_mm is None or node.size_mm is None for node in model.nodes.values()):
+        return matrices
+    previous_edges = len(model.edges)
+    refresh_geometry_edges(model)
+    if len(model.edges) == 0:
+        return matrices
+    model.octree_graph_data.setdefault("warnings", [])
+    if previous_edges:
+        model.octree_graph_data["warnings"].append(
+            "Regenerated auto geometry conductances from loaded material properties."
+        )
+    return build_matrices(model)
+
+
+def _matrix_has_conduction(matrices: dict[str, np.ndarray]) -> bool:
+    for key in ("G", "L"):
+        if key not in matrices:
+            continue
+        values = np.asarray(matrices[key], dtype=float)
+        if values.size and np.any(np.abs(values) > 1.0e-15):
+            return True
+    return False
+
+
+def _refresh_octree_radiation(model: ThermalGraphModel) -> None:
+    params = model.octree_graph_data.get("parameters", {}) if model.octree_graph_data else {}
+    reference_temperature = params.get(
+        "radiation_reference_temperature_K",
+        model.metadata.T_sur_K,
+    )
+    try:
+        updated = refresh_radiation_from_exposed_faces(model, float(reference_temperature))
+    except (TypeError, ValueError):
+        updated = refresh_radiation_from_exposed_faces(model)
+    if updated:
+        model.octree_graph_data.setdefault("warnings", [])
+        model.octree_graph_data["warnings"].append(
+            f"Refreshed radiative exposed-face areas for {updated} cells."
+        )
+
+
+def _sync_radiation_matrix_from_model(
+    model: ThermalGraphModel,
+    matrices: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    normalized = dict(matrices)
+    node_ids = np.asarray(normalized.get("node_ids", model.ordered_node_ids()), dtype=int)
+    normalized["G_rad"] = np.array(
+        [model.nodes[int(node_id)].G_rad_W_K for node_id in node_ids],
+        dtype=float,
+    )
+    normalized["Grad"] = np.array(
+        [model.nodes[int(node_id)].Grad_W_K for node_id in node_ids],
+        dtype=float,
+    )
+    return normalized
+
+
+def _normalize_loaded_matrices(
+    model: ThermalGraphModel, matrices: dict[str, np.ndarray]
+) -> dict[str, np.ndarray]:
+    normalized = dict(matrices)
+    node_ids = np.asarray(normalized.get("node_ids", model.ordered_node_ids()), dtype=int)
+    if "coords" not in normalized:
+        normalized["coords"] = np.array([model.nodes[int(node_id)].coord for node_id in node_ids], dtype=int)
+    if "Grad" not in normalized:
+        normalized["Grad"] = np.array([model.nodes[int(node_id)].Grad_W_K for node_id in node_ids], dtype=float)
+    if "G" in normalized and "L" not in normalized:
+        G = np.asarray(normalized["G"], dtype=float)
+        normalized["L"] = np.diag(G.sum(axis=1)) - G
+    if "G_rad" not in normalized:
+        normalized["G_rad"] = np.array(
+            [
+                model.nodes[int(node_id)].G_rad_W_K
+                if model.nodes[int(node_id)].G_rad_W_K > 0.0
+                else model.nodes[int(node_id)].Grad_W_K
+                for node_id in node_ids
+            ],
+            dtype=float,
+        )
+    if "initial_temperature_K" not in normalized:
+        normalized["initial_temperature_K"] = np.array(
+            [model.nodes[int(node_id)].initial_temperature_K for node_id in node_ids],
+            dtype=float,
+        )
+    return normalized
 
 
 def _save_octree_graph_folder_lightweight(
@@ -127,26 +302,39 @@ def _save_octree_graph_folder_lightweight(
     errors = validate_model(model)
     raise_if_errors(errors, "Cannot save graph")
     model.metadata.graph_name = model.metadata.graph_name or folder.name
-    with (folder / OCTREE_GRAPH_FILE).open("w", encoding="utf-8") as handle:
-        json.dump(model.to_octree_graph_dict(), handle, indent=2)
-    with (folder / METADATA_FILE).open("w", encoding="utf-8") as handle:
-        json.dump(model.metadata.to_dict(), handle, indent=2)
+    _atomic_write_json(folder / OCTREE_GRAPH_FILE, model.to_octree_graph_dict(), indent=2)
+    _atomic_write_json(folder / METADATA_FILE, model.metadata.to_dict(), indent=2)
     material_library = model.material_library or default_material_library()
-    with (folder / MATERIAL_FILE).open("w", encoding="utf-8") as handle:
-        json.dump(material_library, handle, indent=2)
-    node_ids = np.array(model.ordered_node_ids(), dtype=int)
-    matrices = {
-        "node_ids": node_ids,
-        "C": np.array([model.nodes[int(node_id)].C_J_K for node_id in node_ids], dtype=float),
-    }
+    _atomic_write_json(folder / MATERIAL_FILE, material_library, indent=2)
+    matrices = build_matrices(model)
     _save_octree_outputs(model, matrices, folder)
     return matrices
 
 
 def _save_octree_outputs(model: ThermalGraphModel, matrices: dict[str, np.ndarray], folder: Path) -> None:
-    node_rows = [model.nodes[node_id].to_octree_node_dict() for node_id in model.ordered_node_ids()]
+    node_rows = [
+        _flatten_node_row(model.nodes[node_id].to_octree_node_dict())
+        for node_id in model.ordered_node_ids()
+    ]
     with (folder / "nodes.csv").open("w", newline="", encoding="utf-8") as handle:
-        fields = ["node_id", "cell_id", "component_name", "material_name", "level", "volume_m3", "mass_kg", "C_J_K", "occupancy_fraction", "confidence"]
+        fields = [
+            "node_id",
+            "cell_id",
+            "component_name",
+            "material_name",
+            "level",
+            "volume_m3",
+            "mass_kg",
+            "C_J_K",
+            "initial_temperature_K",
+            "radiation_is_exposed",
+            "radiation_radiating_area_m2",
+            "radiation_emissivity",
+            "radiation_G_rad_W_K",
+            "radiation_R_rad_K_W",
+            "occupancy_fraction",
+            "confidence",
+        ]
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(node_rows)
@@ -155,23 +343,50 @@ def _save_octree_outputs(model: ThermalGraphModel, matrices: dict[str, np.ndarra
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(edge.to_octree_edge_dict() for edge in model.edges.values())
-    with (folder / "params.json").open("w", encoding="utf-8") as handle:
-        json.dump(model.octree_graph_data.get("parameters", {}), handle, indent=2)
-    with (folder / "materials_used.json").open("w", encoding="utf-8") as handle:
-        json.dump(model.material_library or default_material_library(), handle, indent=2)
+    _atomic_write_json(folder / "params.json", model.octree_graph_data.get("parameters", {}), indent=2)
+    _atomic_write_json(folder / "materials_used.json", model.material_library or default_material_library(), indent=2)
     for key in ("C", "G", "L"):
         if key in matrices:
             np.save(folder / f"{key}.npy", matrices[key])
-    if "C" in matrices and "L" in matrices and np.all(np.asarray(matrices["C"]) > 0.0):
-        np.save(folder / "A.npy", -np.diag(1.0 / np.asarray(matrices["C"], dtype=float)) @ np.asarray(matrices["L"], dtype=float))
+    if "G_rad" in matrices:
+        np.save(folder / "G_rad.npy", matrices["G_rad"])
+    _write_browser_matrix_exports(matrices, folder)
+    (folder / "simulations").mkdir(exist_ok=True)
     ui_state = {
         "selected_node_id": None,
         "filters": {"materials": [], "components": [], "levels": []},
     }
     path = folder / "ui_state.json"
     if not path.exists():
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(ui_state, handle, indent=2)
+        _atomic_write_json(path, ui_state, indent=2)
+
+
+def _flatten_node_row(row: dict[str, Any]) -> dict[str, Any]:
+    flattened = dict(row)
+    radiation = flattened.pop("radiation", None)
+    if isinstance(radiation, dict):
+        for key, value in radiation.items():
+            flattened[f"radiation_{key}"] = value
+    return flattened
+
+
+def _write_browser_matrix_exports(matrices: dict[str, np.ndarray], folder: Path) -> None:
+    if "C" in matrices:
+        _atomic_write_json(folder / "C_diag.json", {"data": np.asarray(matrices["C"], dtype=float).tolist()})
+    if "G_rad" in matrices:
+        _atomic_write_json(folder / "G_rad_diag.json", {"data": np.asarray(matrices["G_rad"], dtype=float).tolist()})
+    if "L" in matrices:
+        L = np.asarray(matrices["L"], dtype=float)
+        if L.ndim == 2:
+            row, col = np.nonzero(L)
+            payload = {
+                "shape": list(L.shape),
+                "format": "coo",
+                "row": row.astype(int).tolist(),
+                "col": col.astype(int).tolist(),
+                "data": L[row, col].astype(float).tolist(),
+            }
+            _atomic_write_json(folder / "L_sparse.json", payload)
 
 
 def load_conductance_matrix_from_folder(
@@ -200,3 +415,41 @@ def _load_materials(path: Path) -> dict[str, dict[str, float]]:
         return default_material_library()
     with path.open("r", encoding="utf-8") as handle:
         return normalize_material_library(json.load(handle))
+
+
+def _atomic_write_json(path: Path, payload: Any, indent: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_name = handle.name
+            json.dump(_json_ready(payload), handle, indent=indent)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        if tmp_name:
+            try:
+                Path(tmp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_ready(value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    return value

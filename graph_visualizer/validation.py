@@ -31,6 +31,7 @@ def validate_model(model: ThermalGraphModel) -> list[str]:
         "mass_kg",
         "C_J_K",
         "Grad_W_K",
+        "initial_temperature_K",
         "side_length_m",
     )
     for node_id, node in model.nodes.items():
@@ -41,6 +42,8 @@ def validate_model(model: ThermalGraphModel) -> list[str]:
             errors.append(f"Node {node_id} has negative thermal capacitance.")
         if node.Grad_W_K < 0.0:
             errors.append(f"Node {node_id} has negative Grad_W_K.")
+        if not np.isfinite(float(node.initial_temperature_K)):
+            errors.append(f"Node {node_id} has non-finite initial_temperature_K.")
         if node.side_length_m <= 0.0:
             errors.append(f"Node {node_id} must have positive side_length_m.")
     for edge in model.edges.values():
@@ -90,6 +93,12 @@ def validate_matrices(
         errors.append("C contains negative thermal capacitances.")
     if np.any(Grad < -1.0e-12):
         errors.append("Grad contains negative radiative conductances.")
+    if "G_rad" in matrices:
+        G_rad = np.asarray(matrices["G_rad"])
+        if G_rad.shape not in {(size,), (size, size)}:
+            errors.append(f"G_rad must have shape ({size},) or ({size}, {size}), got {G_rad.shape}.")
+        if np.any(G_rad < -1.0e-12):
+            errors.append("G_rad contains negative radiative conductances.")
     return errors
 
 

@@ -32,6 +32,16 @@ DEFAULT_MATERIAL = Material(
     k_W_mK=2.0,
     emissivity=0.85,
 )
+DEFAULT_ASSIGNED_MATERIAL_NAME = "6061-T6 Aluminum"
+UNASSIGNED_MATERIAL_NAMES = {
+    "",
+    "default_unknown",
+    "not assigned",
+    "none",
+    "null",
+    "unknown",
+    "unassigned",
+}
 PROJECT_MATERIALS_FILE = Path(__file__).resolve().parents[1] / "materials.json"
 
 
@@ -69,10 +79,23 @@ def load_material_table(path: str | Path | None = None) -> tuple[dict[str, Mater
 def resolve_material(
     name: str | None, materials: dict[str, Material], warnings: list[str]
 ) -> Material:
-    if name and name in materials:
+    if not is_unassigned_material_name(name) and name and name in materials:
         return materials[name]
-    warnings.append(f"Unknown material {name!r}; using {DEFAULT_MATERIAL.name}.")
-    return materials.get(DEFAULT_MATERIAL.name, DEFAULT_MATERIAL)
+    fallback = default_assigned_material(materials)
+    warnings.append(f"Unknown or unassigned material {name!r}; using {fallback.name}.")
+    return fallback
+
+
+def default_assigned_material(materials: dict[str, Material]) -> Material:
+    """Return the material used when cells have missing/unknown material metadata."""
+    return materials.get(DEFAULT_ASSIGNED_MATERIAL_NAME, DEFAULT_MATERIAL)
+
+
+def is_unassigned_material_name(name: str | None) -> bool:
+    if name is None:
+        return True
+    normalized = str(name).strip().lower()
+    return normalized in UNASSIGNED_MATERIAL_NAMES
 
 
 def contrast_exceeds(materials: list[Material], threshold: float) -> bool:

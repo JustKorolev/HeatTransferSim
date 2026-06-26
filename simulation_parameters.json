@@ -25,5 +25,18 @@
   "num_points": 1001,
   "simulated_seconds_per_update": 0.05,
   "simulation_duration": 710.0,
-  "solver_max_step": 0.05
+  "solver_max_step": 0.05,
+  "dt_s": 1.0,
+  "t_final_s": 3600.0,
+  "playback_speed": 1.0,
+  "use_ambient_radiation": true,
+  "T_env_K": 293.15,
+  "input_mode": "zero",
+  "autoscale_temperature": true,
+  "color_min_K": 0.0,
+  "color_max_K": 400.0,
+  "colormap": "thermal_jet",
+  "loop_playback": false,
+  "save_trajectory": false,
+  "browser_simulation_size_warning": 1000
 }

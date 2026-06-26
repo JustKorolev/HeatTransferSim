@@ -11,7 +11,13 @@ import numpy as np
 
 from .load_gltf import GltfScene, MeshObject
 from .load_contact_report import ContactReport
-from .materials import Material, contrast_exceeds, resolve_material
+from .materials import (
+    DEFAULT_ASSIGNED_MATERIAL_NAME,
+    Material,
+    contrast_exceeds,
+    is_unassigned_material_name,
+    resolve_material,
+)
 
 _TRIMESH_CONTAINS_AVAILABLE: bool | None = None
 _TRIANGLE_CACHE: dict[int, np.ndarray] = {}
@@ -266,9 +272,20 @@ def _classify_cell(
 def _physical_material_name(
     obj: MeshObject, contact_report: ContactReport, known_materials: set[str]
 ) -> str:
-    if obj.material_name and obj.material_name in known_materials:
+    if (
+        obj.material_name
+        and obj.material_name in known_materials
+        and not is_unassigned_material_name(obj.material_name)
+    ):
         return obj.material_name
-    return contact_report.material_for_component(obj.name) or "default_unknown"
+    report_material = contact_report.material_for_component(obj.name)
+    if (
+        report_material
+        and report_material in known_materials
+        and not is_unassigned_material_name(report_material)
+    ):
+        return report_material
+    return DEFAULT_ASSIGNED_MATERIAL_NAME
 
 
 def _mesh_contains_point(obj: MeshObject, point: np.ndarray) -> bool:

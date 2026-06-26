@@ -25,8 +25,10 @@ def build_graph(
     materials: dict[str, Material],
     warnings: list[str],
     default_contact_G_W_K: float = 0.1,
+    radiation_reference_temperature_K: float = 293.15,
 ) -> GraphBuildResult:
     solid = [cell for cell in leaves if not cell.is_empty]
+    exposed_areas_m2 = _exposed_areas_m2(solid)
     volumes_by_component: dict[str, float] = {}
     for cell in solid:
         if cell.dominant_component:
@@ -36,6 +38,14 @@ def build_graph(
     nodes: list[dict] = []
     for node_id, cell in enumerate(solid):
         material = resolve_material(cell.dominant_material, materials, warnings)
+        radiating_area_m2 = exposed_areas_m2.get(cell.cell_id, 0.0)
+        G_rad = (
+            4.0
+            * material.emissivity
+            * 5.670374419e-8
+            * radiating_area_m2
+            * float(radiation_reference_temperature_K) ** 3
+        )
         component = cell.dominant_component or ""
         if component in contact_report.component_masses_kg and volumes_by_component.get(component, 0.0) > 0:
             mass = contact_report.component_masses_kg[component] * cell.volume_m3 / volumes_by_component[component]
@@ -53,9 +63,17 @@ def build_graph(
                 "volume_m3": cell.volume_m3,
                 "mass_kg": mass,
                 "C_J_K": mass * material.cp_J_kgK,
+                "initial_temperature_K": 293.15,
                 "occupancy_fraction": max(cell.occupancy.values(), default=0.0),
                 "confidence": cell.confidence,
                 "warnings": list(cell.warnings),
+                "radiation": {
+                    "is_exposed": radiating_area_m2 > 0.0,
+                    "radiating_area_m2": float(radiating_area_m2),
+                    "emissivity": float(material.emissivity),
+                    "G_rad_W_K": float(G_rad),
+                    "R_rad_K_W": float(1.0 / G_rad) if G_rad > 0.0 else None,
+                },
                 "tags": {"heater": False, "sensor": False, "heater_id": None, "sensor_id": None, "notes": ""},
             }
         )
@@ -141,3 +159,18 @@ def _shared_face_area_and_distance(a: OctreeCell, b: OctreeCell) -> tuple[float,
     area = overlaps[other[0]] * overlaps[other[1]]
     distance = float(np.linalg.norm(ca - cb))
     return float(max(0.0, area)), distance
+
+
+def _exposed_areas_m2(cells: list[OctreeCell]) -> dict[str, float]:
+    """Estimate each leaf cell's exterior area after subtracting solid face contacts."""
+    areas_mm2: dict[str, float] = {}
+    for cell in cells:
+        sx, sy, sz = (float(v) for v in cell.size_mm)
+        areas_mm2[cell.cell_id] = 2.0 * (sx * sy + sx * sz + sy * sz)
+    for a, b in combinations(cells, 2):
+        shared_area_mm2, _distance_mm = _shared_face_area_and_distance(a, b)
+        if shared_area_mm2 <= 0.0:
+            continue
+        areas_mm2[a.cell_id] = max(0.0, areas_mm2[a.cell_id] - shared_area_mm2)
+        areas_mm2[b.cell_id] = max(0.0, areas_mm2[b.cell_id] - shared_area_mm2)
+    return {cell_id: area_mm2 * 1.0e-6 for cell_id, area_mm2 in areas_mm2.items()}

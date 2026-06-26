@@ -96,6 +96,7 @@ def clone_node_for_extrusion(source: NodeProperties, node_id: int, coord: GridCo
         heater=HeaterProperties(heater_id=int(node_id)),
         has_sensor=False,
         sensor=SensorProperties(sensor_id=int(node_id)),
+        has_cryocooler=False,
     )
     if not node.C_manual_override:
         node.recompute_heat_capacity()

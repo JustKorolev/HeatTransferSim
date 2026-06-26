@@ -17,13 +17,14 @@ class TwoDGraphWidget:
     def __init__(
         self,
         parent: Any,
-        on_select_node: Callable[[int], None] | None = None,
+        on_select_node: Callable[..., None] | None = None,
     ) -> None:
         self._load_dependencies()
         self.parent = parent
         self.on_select_node = on_select_node
         self.model: ThermalGraphModel | None = None
         self.visible_node_ids: set[int] | None = None
+        self.selected_node_ids: set[int] = set()
         self.positions: dict[int, tuple[float, float]] = {}
         self.node_points: dict[int, tuple[float, float]] = {}
         self.edge_lines: list[tuple[int, int, Any]] = []
@@ -146,8 +147,25 @@ class TwoDGraphWidget:
                 continue
             x, y = self.positions[node_id]
             node = model.nodes[node_id]
-            color = "#ffb703" if node.has_heater else "#2a9d8f" if node.has_sensor else "#58a6ff"
-            self.ax.scatter([x], [y], s=320, c=[color], edgecolors=self._node_edge_color(), zorder=3)
+            color = (
+                "#ffb703"
+                if node.has_heater
+                else "#06b6d4"
+                if getattr(node, "has_cryocooler", False)
+                else "#2a9d8f"
+                if node.has_sensor
+                else "#58a6ff"
+            )
+            selected = node_id in self.selected_node_ids
+            self.ax.scatter(
+                [x],
+                [y],
+                s=360 if selected else 320,
+                c=["#ffd166" if selected else color],
+                edgecolors="#f87171" if selected else self._node_edge_color(),
+                linewidths=2.4 if selected else 1.0,
+                zorder=3,
+            )
             self.ax.text(
                 x,
                 y,
@@ -178,9 +196,34 @@ class TwoDGraphWidget:
             node = model.nodes[node_id]
             xs.append(x)
             ys.append(y)
-            colors.append("#ffb703" if node.has_heater else "#2a9d8f" if node.has_sensor else "#58a6ff")
+            colors.append(
+                "#ffb703"
+                if node.has_heater
+                else "#06b6d4"
+                if getattr(node, "has_cryocooler", False)
+                else "#2a9d8f"
+                if node.has_sensor
+                else "#58a6ff"
+            )
             self.node_points[node_id] = (x, y)
         self.ax.scatter(xs, ys, s=12, c=colors, alpha=0.72, linewidths=0, zorder=3)
+        selected_xs: list[float] = []
+        selected_ys: list[float] = []
+        for node_id in self.selected_node_ids:
+            if node_id in self.node_points:
+                x, y = self.node_points[node_id]
+                selected_xs.append(x)
+                selected_ys.append(y)
+        if selected_xs:
+            self.ax.scatter(
+                selected_xs,
+                selected_ys,
+                s=34,
+                c=["#ffd166"],
+                edgecolors="#f87171",
+                linewidths=1.4,
+                zorder=4,
+            )
         edge_count = sum(
             1
             for edge in model.edges.values()
@@ -288,7 +331,9 @@ class TwoDGraphWidget:
             return
         node_id = self._nearest_node(event)
         if node_id is not None:
-            self.on_select_node(node_id)
+            modifiers = self.QtWidgets.QApplication.keyboardModifiers()
+            additive = bool(modifiers & self.QtCore.Qt.ControlModifier)
+            self.on_select_node(node_id, additive=additive)
 
     def _nearest_node(self, event: Any) -> int | None:
         if event.x is None or event.y is None:

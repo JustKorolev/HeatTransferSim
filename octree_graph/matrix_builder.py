@@ -10,6 +10,16 @@ def build_matrices(nodes: list[dict], edges: list[dict]) -> dict[str, np.ndarray
     size = len(node_ids)
     index = {node_id: row for row, node_id in enumerate(node_ids)}
     C = np.array([float(node["C_J_K"]) for node in nodes], dtype=float)
+    G_rad = np.array(
+        [
+            float((node.get("radiation") or {}).get("G_rad_W_K", node.get("Grad_W_K", 0.0)))
+            for node in nodes
+        ],
+        dtype=float,
+    )
+    initial_temperature_K = np.array(
+        [float(node.get("initial_temperature_K", 293.15)) for node in nodes], dtype=float
+    )
     G = np.zeros((size, size), dtype=float)
     for edge in edges:
         i = index[int(edge["node_i"])]
@@ -18,5 +28,11 @@ def build_matrices(nodes: list[dict], edges: list[dict]) -> dict[str, np.ndarray
         G[i, j] = value
         G[j, i] = value
     L = np.diag(G.sum(axis=1)) - G
-    A = -np.diag(1.0 / C) @ L if size and np.all(C > 0.0) else np.zeros_like(L)
-    return {"node_ids": node_ids, "C": C, "G": G, "L": L, "A": A}
+    return {
+        "node_ids": node_ids,
+        "C": C,
+        "G": G,
+        "L": L,
+        "G_rad": G_rad,
+        "initial_temperature_K": initial_temperature_K,
+    }

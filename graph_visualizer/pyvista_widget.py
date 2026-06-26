@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import numpy as np
+from matplotlib import colormaps
 
 from .models import ThermalGraphModel
 
@@ -37,15 +38,19 @@ class GraphPyVistaWidget:
         self.plotter.set_background("white")
         self.dark_mode = False
         self.selected_node_id: int | None = None
+        self.selected_node_ids: set[int] = set()
         self.draw_mode_enabled = False
         self.show_labels = True
         self.show_edges = True
         self.show_heaters = True
         self.show_sensors = True
+        self.show_coolers = True
         self._node_actors: dict[int, Any] = {}
+        self._node_meshes: dict[int, Any] = {}
         self._actor_node_ids: dict[str, int] = {}
         self._label_actors: list[Any] = []
         self._marker_actors: list[Any] = []
+        self._marker_actors_by_kind: dict[str, list[Any]] = {"heater": [], "sensor": [], "cooler": []}
         self._edge_actors: list[Any] = []
         self._preview_actors: list[Any] = []
         self._batched_actor: Any | None = None
@@ -58,7 +63,9 @@ class GraphPyVistaWidget:
         self._observers_enabled = False
         self._ignore_next_mesh_pick = False
         self._hover_node_id: int | None = None
+        self._hover_tooltips_enabled = True
         self._material_colors: dict[str, str] = {}
+        self._closed = False
 
     def _load_dependencies(self) -> None:
         try:
@@ -83,17 +90,74 @@ class GraphPyVistaWidget:
     def interactor(self) -> Any:
         return self.plotter.interactor
 
+    def close(self) -> None:
+        """Stop future renders before Qt destroys the OpenGL handle."""
+        self._closed = True
+        try:
+            self.QtWidgets.QToolTip.hideText()
+        except Exception:
+            pass
+        for method_name in ("close", "Finalize", "finalize"):
+            method = getattr(self.plotter, method_name, None)
+            if method is None:
+                continue
+            try:
+                method()
+                break
+            except Exception:
+                pass
+
+    def safe_render(self) -> bool:
+        """Render only while the Qt/VTK window handle is still valid."""
+        if self._closed:
+            return False
+        try:
+            widget = self.interactor
+            if hasattr(widget, "isVisible") and not widget.isVisible():
+                return False
+            if hasattr(widget, "winId") and int(widget.winId()) == 0:
+                return False
+            self.plotter.render()
+            return True
+        except RuntimeError:
+            self._closed = True
+            return False
+        except Exception:
+            return False
+
     def set_toggles(
         self,
         show_labels: bool,
         show_edges: bool,
         show_heaters: bool,
         show_sensors: bool,
+        show_coolers: bool = True,
     ) -> None:
         self.show_labels = show_labels
         self.show_edges = show_edges
         self.show_heaters = show_heaters
         self.show_sensors = show_sensors
+        self.show_coolers = show_coolers
+
+    def update_io_marker_visibility(
+        self,
+        show_heaters: bool,
+        show_sensors: bool,
+        show_coolers: bool,
+        render: bool = True,
+    ) -> bool:
+        """Toggle existing I/O marker actors without rebuilding graph geometry."""
+        self.show_heaters = bool(show_heaters)
+        self.show_sensors = bool(show_sensors)
+        self.show_coolers = bool(show_coolers)
+        for kind, visible in (
+            ("heater", self.show_heaters),
+            ("sensor", self.show_sensors),
+            ("cooler", self.show_coolers),
+        ):
+            for actor in self._marker_actors_by_kind.get(kind, []):
+                self._set_actor_visible(actor, visible)
+        return self.safe_render() if render else True
 
     def set_dark_mode(self, enabled: bool) -> None:
         self.dark_mode = bool(enabled)
@@ -104,6 +168,11 @@ class GraphPyVistaWidget:
         model: ThermalGraphModel,
         reset_camera: bool = False,
         visible_node_ids: set[int] | None = None,
+        node_colors: dict[int, str] | None = None,
+        node_scalar_values: dict[int, float] | None = None,
+        scalar_cmap: str = "jet",
+        scalar_clim: tuple[float, float] | None = None,
+        scalar_bar_title: str = "Temperature [K]",
     ) -> None:
         camera_position = self.plotter.camera_position if not reset_camera else None
         preview_coords = list(getattr(self, "_last_preview_coords", []))
@@ -111,9 +180,11 @@ class GraphPyVistaWidget:
         committed_bounds = self._committed_model_bounds(model)
         self.plotter.clear()
         self._node_actors = {}
+        self._node_meshes = {}
         self._actor_node_ids = {}
         self._label_actors = []
         self._marker_actors = []
+        self._marker_actors_by_kind = {"heater": [], "sensor": [], "cooler": []}
         self._edge_actors = []
         self._batched_actor = None
         self._batched_mesh = None
@@ -121,9 +192,18 @@ class GraphPyVistaWidget:
         self._batched_selected_actor = None
         visible = visible_node_ids if visible_node_ids is not None else set(model.ordered_node_ids())
         if len(visible) > 1200:
-            self._draw_batched(model, visible)
+            self._draw_batched(
+                model,
+                visible,
+                node_colors=node_colors,
+                node_scalar_values=node_scalar_values,
+                scalar_cmap=scalar_cmap,
+                scalar_clim=scalar_clim,
+                scalar_bar_title=scalar_bar_title,
+            )
             self._finish_scene(committed_bounds, camera_position, reset_camera)
             return
+        scalar_bar_added = False
         for node_id in model.ordered_node_ids():
             if node_id not in visible:
                 continue
@@ -142,17 +222,35 @@ class GraphPyVistaWidget:
                 z_length=lengths[2],
             )
             mesh.field_data["node_id"] = np.array([node_id], dtype=int)
-            selected = node_id == self.selected_node_id
-            actor = self.plotter.add_mesh(
-                mesh,
-                color="#ffd166" if selected else self._color_for_material(node.material),
-                opacity=0.34 if not selected else 0.62,
-                show_edges=True,
-                edge_color="#f87171" if selected else self._node_edge_color(),
-                line_width=3 if selected else 1,
-                pickable=True,
-            )
+            selected = node_id == self.selected_node_id or node_id in self.selected_node_ids
+            color = (node_colors or {}).get(node_id, self._color_for_material(node.material))
+            mesh_kwargs = {
+                "opacity": 0.78 if node_scalar_values is not None and not selected else (0.62 if selected else 0.34),
+                "show_edges": True,
+                "edge_color": "#f87171" if selected else self._node_edge_color(),
+                "line_width": 3 if selected else 1,
+                "pickable": True,
+            }
+            if node_scalar_values is not None and node_id in node_scalar_values:
+                mesh.cell_data["temperature_K"] = np.full(mesh.n_cells, float(node_scalar_values[node_id]))
+                actor = self.plotter.add_mesh(
+                    mesh,
+                    scalars="temperature_K",
+                    cmap=scalar_cmap,
+                    clim=scalar_clim,
+                    show_scalar_bar=not scalar_bar_added,
+                    scalar_bar_args=self._scalar_bar_args(scalar_bar_title),
+                    **mesh_kwargs,
+                )
+                scalar_bar_added = True
+            else:
+                actor = self.plotter.add_mesh(
+                    mesh,
+                    color="#ffd166" if selected else color,
+                    **mesh_kwargs,
+                )
             self._node_actors[node_id] = actor
+            self._node_meshes[node_id] = mesh
             self._actor_node_ids[self._actor_key(actor)] = node_id
             self._enable_actor_pick(actor)
             if self.show_labels:
@@ -165,10 +263,7 @@ class GraphPyVistaWidget:
                     always_visible=True,
                 )
                 self._label_actors.append(label_actor)
-            if self.show_heaters and node.has_heater:
-                self._add_marker(center + np.array([0.0, 0.0, 0.36 * marker_side]), "#ff6b35", "H")
-            if self.show_sensors and node.has_sensor:
-                self._add_marker(center + np.array([0.0, 0.0, -0.36 * marker_side]), "#2a9d8f", "S")
+            self._add_io_markers_for_node(node, center, marker_side)
 
         if self.show_edges:
             for edge in model.edges.values():
@@ -187,20 +282,100 @@ class GraphPyVistaWidget:
             self.show_preview(preview_coords, preview_side)
 
     def select_node(self, node_id: int | None, model: ThermalGraphModel | None = None) -> None:
-        previous_node_id = self.selected_node_id
-        self.selected_node_id = node_id
-        if previous_node_id == node_id:
+        self.select_nodes(set() if node_id is None else {int(node_id)}, active_node_id=node_id)
+
+    def select_nodes(self, node_ids: set[int], active_node_id: int | None = None) -> None:
+        previous = set(self.selected_node_ids)
+        previous_active = self.selected_node_id
+        self.selected_node_ids = {int(node_id) for node_id in node_ids}
+        self.selected_node_id = active_node_id if active_node_id is not None else next(iter(self.selected_node_ids), None)
+        if previous == self.selected_node_ids and previous_active == self.selected_node_id:
             return
-        if previous_node_id in self._node_actors:
-            self._style_node_actor(self._node_actors[previous_node_id], selected=False)
-        if node_id in self._node_actors:
-            self._style_node_actor(self._node_actors[node_id], selected=True)
-        elif node_id in self._batched_node_geometry:
-            self._show_batched_selection(node_id)
-        self.plotter.render()
+        for node_id in previous | self.selected_node_ids:
+            if node_id in self._node_actors:
+                self._style_node_actor(self._node_actors[node_id], selected=node_id in self.selected_node_ids)
+        if self._batched_node_geometry:
+            self._show_batched_selection(self.selected_node_ids)
+        self.safe_render()
+
+    def update_node_colors(self, node_colors: dict[int, str]) -> None:
+        """Update visible node actor colors without rebuilding geometry."""
+        for node_id, actor in self._node_actors.items():
+            if node_id == self.selected_node_id or node_id in self.selected_node_ids:
+                continue
+            color = node_colors.get(node_id)
+            if color is None:
+                continue
+            try:
+                actor.prop.color = color
+                actor.GetProperty().Modified()
+            except Exception:
+                pass
+        try:
+            self.safe_render()
+        except Exception:
+            pass
+
+    def update_node_scalars(
+        self,
+        node_scalar_values: dict[int, float],
+        scalar_clim: tuple[float, float] | None = None,
+    ) -> bool:
+        """Update temperature scalars in-place without rebuilding axes or bounds."""
+        if self._batched_actor is not None and self._batched_mesh is not None:
+            try:
+                node_ids = np.asarray(self._batched_mesh.cell_data["node_id"], dtype=int)
+                scalars = np.array(
+                    [float(node_scalar_values.get(int(node_id), np.nan)) for node_id in node_ids],
+                    dtype=float,
+                )
+                self._update_actor_cell_scalars(
+                    self._batched_actor,
+                    self._batched_mesh,
+                    scalars,
+                    scalar_clim,
+                )
+                self.safe_render()
+                return True
+            except Exception:
+                return self._update_actor_direct_colors(node_scalar_values, scalar_clim)
+
+        if not self._node_meshes:
+            return False
+        updated = False
+        for node_id, mesh in self._node_meshes.items():
+            if node_id not in node_scalar_values:
+                continue
+            try:
+                actor = self._node_actors.get(node_id)
+                if actor is not None:
+                    scalars = np.full(mesh.n_cells, float(node_scalar_values[node_id]))
+                    updated = self._update_actor_cell_scalars(
+                        actor,
+                        mesh,
+                        scalars,
+                        scalar_clim,
+                    ) or updated
+            except Exception:
+                continue
+        if updated:
+            self._update_actor_direct_colors(node_scalar_values, scalar_clim)
+            self.safe_render()
+        if not updated:
+            return self._update_actor_direct_colors(node_scalar_values, scalar_clim)
+        return True
 
     def set_draw_mode(self, enabled: bool) -> None:
         self.draw_mode_enabled = bool(enabled)
+
+    def set_hover_tooltips_enabled(self, enabled: bool) -> None:
+        self._hover_tooltips_enabled = bool(enabled)
+        if not self._hover_tooltips_enabled and self._hover_node_id is not None:
+            self._hover_node_id = None
+            try:
+                self.QtWidgets.QToolTip.hideText()
+            except Exception:
+                pass
 
     def show_preview(self, coords: list[tuple[int, int, int]], side_length_m: float) -> None:
         normalized_coords = list(coords)
@@ -220,7 +395,7 @@ class GraphPyVistaWidget:
             actor = self._add_preview_mesh(mesh)
             self._exclude_actor_from_bounds(actor)
             self._preview_actors.append(actor)
-        self.plotter.render()
+        self.safe_render()
 
     def clear_preview(self, render: bool = True) -> None:
         self._last_preview_coords = []
@@ -233,7 +408,7 @@ class GraphPyVistaWidget:
         self._preview_actors = []
         if render:
             try:
-                self.plotter.render()
+                self.safe_render()
             except Exception:
                 pass
 
@@ -306,14 +481,16 @@ class GraphPyVistaWidget:
         direction = vector / length
         return (float(direction[0]), float(direction[1])), length
 
-    def _add_marker(self, center: np.ndarray, color: str, label: str) -> None:
+    def _add_marker(self, center: np.ndarray, color: str, label: str, kind: str, visible: bool) -> None:
         actor = self.plotter.add_points(
             np.array([center], dtype=float),
             color=color,
             point_size=15,
             render_points_as_spheres=True,
         )
+        self._set_actor_visible(actor, visible)
         self._marker_actors.append(actor)
+        self._marker_actors_by_kind.setdefault(kind, []).append(actor)
         label_actor = self.plotter.add_point_labels(
             np.array([center], dtype=float),
             [label],
@@ -322,7 +499,52 @@ class GraphPyVistaWidget:
             shape_opacity=0.0,
             always_visible=True,
         )
+        self._set_actor_visible(label_actor, visible)
         self._marker_actors.append(label_actor)
+        self._marker_actors_by_kind.setdefault(kind, []).append(label_actor)
+
+    def _add_io_markers_for_node(self, node: Any, center: np.ndarray, marker_side: float) -> None:
+        if bool(getattr(node, "has_heater", False)):
+            self._add_marker(
+                center + np.array([0.0, 0.0, 0.36 * marker_side]),
+                "#ff6b35",
+                "H",
+                "heater",
+                self.show_heaters,
+            )
+        if bool(getattr(node, "has_sensor", False)):
+            self._add_marker(
+                center + np.array([0.0, 0.0, -0.36 * marker_side]),
+                "#2a9d8f",
+                "S",
+                "sensor",
+                self.show_sensors,
+            )
+        if bool(getattr(node, "has_cryocooler", False)):
+            self._add_marker(
+                center + np.array([-0.36 * marker_side, 0.0, 0.0]),
+                "#06b6d4",
+                "C",
+                "cooler",
+                self.show_coolers,
+            )
+
+    @staticmethod
+    def _set_actor_visible(actor: Any, visible: bool) -> None:
+        for method_name in ("SetVisibility", "SetPickable"):
+            method = getattr(actor, method_name, None)
+            if method is None:
+                continue
+            try:
+                method(bool(visible))
+            except Exception:
+                pass
+        prop = getattr(actor, "prop", None)
+        if prop is not None:
+            try:
+                prop.visibility = bool(visible)
+            except Exception:
+                pass
 
     def _style_node_actor(self, actor: Any, selected: bool) -> None:
         prop = actor.GetProperty()
@@ -405,13 +627,15 @@ class GraphPyVistaWidget:
         mouse_position: tuple[int, int] | None,
     ) -> None:
         if self.on_pick_node is not None:
-            self.on_pick_node(node_id, picked_point, mouse_position)
+            self.on_pick_node(node_id, picked_point, mouse_position, self._ctrl_modifier_active())
 
     def _handle_mouse_move(self, *_: Any) -> None:
+        if self._closed:
+            return
         if self.draw_mode_enabled and self.on_drag_update is not None:
             self.on_drag_update(self._mouse_position())
             return
-        if self._batched_actor is not None:
+        if not self._hover_tooltips_enabled:
             return
         self._update_hover_tooltip()
 
@@ -430,6 +654,13 @@ class GraphPyVistaWidget:
                 pass
         if key == "Escape" and self.on_escape is not None:
             self.on_escape()
+
+    def _ctrl_modifier_active(self) -> bool:
+        try:
+            modifiers = self.QtWidgets.QApplication.keyboardModifiers()
+            return bool(modifiers & self.QtCore.Qt.ControlModifier)
+        except Exception:
+            return False
 
     def _picked_point(self) -> tuple[float, float, float] | None:
         for owner in (self.plotter, getattr(self.plotter, "iren", None)):
@@ -457,6 +688,8 @@ class GraphPyVistaWidget:
     def _pick_node_at_mouse(
         self,
     ) -> tuple[int, tuple[float, float, float] | None, tuple[int, int] | None] | None:
+        if self._closed:
+            return None
         mouse_position = self._mouse_position()
         if mouse_position is None:
             return None
@@ -478,7 +711,7 @@ class GraphPyVistaWidget:
         except Exception:
             actor = None
         node_id = self._node_id_for_actor(actor)
-        if node_id is None and actor is self._batched_actor:
+        if node_id is None and self._is_batched_actor(actor):
             try:
                 cell_id = int(picker.GetCellId())
                 if self._batched_mesh is not None and cell_id >= 0:
@@ -560,6 +793,13 @@ class GraphPyVistaWidget:
             if actor is node_actor or actor == node_actor:
                 return node_id
         return None
+
+    def _is_batched_actor(self, actor: Any) -> bool:
+        if actor is None or self._batched_actor is None:
+            return False
+        if actor is self._batched_actor or actor == self._batched_actor:
+            return True
+        return self._actor_key(actor) == self._actor_key(self._batched_actor)
 
     def _world_to_display(self, point: np.ndarray) -> tuple[float, float] | None:
         renderer = self._renderer()
@@ -646,9 +886,9 @@ class GraphPyVistaWidget:
         show_bounds_kwargs = {
             "grid": "front",
             "location": "outer",
-            "xlabel": "x [mm]",
-            "ylabel": "y [mm]",
-            "zlabel": "z [mm]",
+            "xtitle": "x [mm]",
+            "ytitle": "y [mm]",
+            "ztitle": "z [mm]",
             "color": self._label_color(),
         }
         if committed_bounds is not None:
@@ -657,7 +897,14 @@ class GraphPyVistaWidget:
             self.plotter.show_bounds(**show_bounds_kwargs)
         except TypeError:
             show_bounds_kwargs.pop("color", None)
-            self.plotter.show_bounds(**show_bounds_kwargs)
+            try:
+                self.plotter.show_bounds(**show_bounds_kwargs)
+            except TypeError:
+                legacy_kwargs = dict(show_bounds_kwargs)
+                legacy_kwargs["xlabel"] = legacy_kwargs.pop("xtitle")
+                legacy_kwargs["ylabel"] = legacy_kwargs.pop("ytitle")
+                legacy_kwargs["zlabel"] = legacy_kwargs.pop("ztitle")
+                self.plotter.show_bounds(**legacy_kwargs)
         if reset_camera:
             self.plotter.camera_position = "iso"
             self.plotter.reset_camera()
@@ -665,14 +912,23 @@ class GraphPyVistaWidget:
             self.plotter.camera_position = camera_position
         self._enable_mesh_picking_once()
         self._enable_interaction_observers_once()
-        self.plotter.render()
+        self.safe_render()
 
-    def _draw_batched(self, model: ThermalGraphModel, visible: set[int]) -> None:
+    def _draw_batched(
+        self,
+        model: ThermalGraphModel,
+        visible: set[int],
+        node_colors: dict[int, str] | None = None,
+        node_scalar_values: dict[int, float] | None = None,
+        scalar_cmap: str = "jet",
+        scalar_clim: tuple[float, float] | None = None,
+        scalar_bar_title: str = "Temperature [K]",
+    ) -> None:
         points: list[list[float]] = []
         faces: list[int] = []
         cell_node_ids: list[int] = []
-        material_indices: list[int] = []
-        material_index: dict[str, int] = {}
+        cell_colors: list[list[int]] = []
+        cell_scalars: list[float] = []
         face_template = (
             (0, 1, 3, 2),
             (4, 6, 7, 5),
@@ -704,11 +960,20 @@ class GraphPyVistaWidget:
                 (1, 1, 1),
             ):
                 points.append((center + half * np.array(signs, dtype=float)).tolist())
-            mat_index = material_index.setdefault(node.material, len(material_index))
+            color = (node_colors or {}).get(node_id, self._color_for_material(node.material))
+            rgb = self._hex_to_uint8_rgb(color)
+            scalar_value = (
+                float(node_scalar_values[node_id])
+                if node_scalar_values is not None and node_id in node_scalar_values
+                else float("nan")
+            )
             for face in face_template:
                 faces.extend([4, *(base + index for index in face)])
                 cell_node_ids.append(node_id)
-                material_indices.append(mat_index)
+                if node_scalar_values is None:
+                    cell_colors.append(rgb)
+                else:
+                    cell_scalars.append(scalar_value)
             self._batched_node_geometry[node_id] = (center, lengths)
         if not points:
             return
@@ -717,20 +982,38 @@ class GraphPyVistaWidget:
             np.asarray(faces, dtype=np.int64),
         )
         mesh.cell_data["node_id"] = np.asarray(cell_node_ids, dtype=int)
-        mesh.cell_data["material_index"] = np.asarray(material_indices, dtype=int)
+        if node_scalar_values is not None:
+            mesh.cell_data["temperature_K"] = np.asarray(cell_scalars, dtype=float)
+        else:
+            mesh.cell_data["cell_rgb"] = np.asarray(cell_colors, dtype=np.uint8)
         self._batched_mesh = mesh
-        self._batched_actor = self.plotter.add_mesh(
-            mesh,
-            scalars="material_index",
-            cmap="tab20",
-            opacity=0.36,
-            show_edges=True,
-            edge_color=self._node_edge_color(),
-            line_width=0.35,
-            pickable=True,
-        )
+        mesh_kwargs = {
+            "opacity": 0.78 if node_scalar_values is not None else 0.36,
+            "show_edges": True,
+            "edge_color": self._node_edge_color(),
+            "line_width": 0.35,
+            "pickable": True,
+        }
+        if node_scalar_values is not None:
+            self._batched_actor = self.plotter.add_mesh(
+                mesh,
+                scalars="temperature_K",
+                cmap=scalar_cmap,
+                clim=scalar_clim,
+                show_scalar_bar=True,
+                scalar_bar_args=self._scalar_bar_args(scalar_bar_title),
+                **mesh_kwargs,
+            )
+        else:
+            self._batched_actor = self.plotter.add_mesh(
+                mesh,
+                scalars="cell_rgb",
+                rgb=True,
+                show_scalar_bar=False,
+                **mesh_kwargs,
+            )
         self._enable_actor_pick(self._batched_actor)
-        self._show_batched_selection(self.selected_node_id)
+        self._show_batched_selection(self.selected_node_ids)
         if self.show_edges:
             self._draw_batched_edges(model, visible)
 
@@ -754,22 +1037,34 @@ class GraphPyVistaWidget:
             self.plotter.add_mesh(mesh, color=self._edge_color(), line_width=1, opacity=0.55)
         )
 
-    def _show_batched_selection(self, node_id: int | None) -> None:
+    def _show_batched_selection(self, node_ids: set[int] | int | None) -> None:
         if self._batched_selected_actor is not None:
             try:
                 self.plotter.remove_actor(self._batched_selected_actor)
             except Exception:
                 pass
             self._batched_selected_actor = None
-        if node_id is None or node_id not in self._batched_node_geometry:
+        if node_ids is None:
             return
-        center, lengths = self._batched_node_geometry[node_id]
-        mesh = self.pv.Cube(
-            center=center,
-            x_length=lengths[0],
-            y_length=lengths[1],
-            z_length=lengths[2],
-        )
+        selected_ids = {int(node_ids)} if isinstance(node_ids, int) else {int(node_id) for node_id in node_ids}
+        meshes = []
+        for node_id in selected_ids:
+            if node_id not in self._batched_node_geometry:
+                continue
+            center, lengths = self._batched_node_geometry[node_id]
+            meshes.append(
+                self.pv.Cube(
+                    center=center,
+                    x_length=lengths[0],
+                    y_length=lengths[1],
+                    z_length=lengths[2],
+                )
+            )
+        if not meshes:
+            return
+        mesh = meshes[0]
+        for extra in meshes[1:]:
+            mesh = mesh.merge(extra)
         self._batched_selected_actor = self.plotter.add_mesh(
             mesh,
             color="#ffd166",
@@ -822,3 +1117,190 @@ class GraphPyVistaWidget:
             0.1607843137,
             0.2156862745,
         )
+
+    def _scalar_bar_args(self, title: str) -> dict[str, Any]:
+        return {
+            "title": title,
+            "vertical": True,
+            "position_x": 0.86,
+            "position_y": 0.08,
+            "width": 0.08,
+            "height": 0.32,
+            "title_font_size": 12,
+            "label_font_size": 10,
+            "color": self._label_color(),
+        }
+
+    @staticmethod
+    def _mark_dataset_modified(mesh: Any) -> None:
+        for method_name in ("Modified", "modified"):
+            method = getattr(mesh, method_name, None)
+            if method is None:
+                continue
+            try:
+                method()
+                return
+            except Exception:
+                pass
+
+    def _update_actor_cell_scalars(
+        self,
+        actor: Any,
+        source_mesh: Any,
+        scalars: np.ndarray,
+        scalar_clim: tuple[float, float] | None,
+    ) -> bool:
+        mapper = self._actor_mapper(actor)
+        datasets: list[Any] = [source_mesh]
+        if mapper is not None:
+            try:
+                mapper_input = mapper.GetInput()
+                if mapper_input is not None:
+                    wrapped = self.pv.wrap(mapper_input)
+                    if wrapped is not source_mesh:
+                        datasets.append(wrapped)
+            except Exception:
+                pass
+
+        updated = False
+        mapper_dataset = None
+        for dataset in datasets:
+            try:
+                values = np.asarray(scalars, dtype=float)
+                if int(getattr(dataset, "n_cells", len(values))) != len(values):
+                    continue
+                dataset.cell_data["temperature_K"] = values
+                try:
+                    dataset.set_active_scalars("temperature_K", preference="cell")
+                except Exception:
+                    pass
+                self._mark_cell_data_modified(dataset, "temperature_K")
+                self._mark_dataset_modified(dataset)
+                mapper_dataset = dataset
+                updated = True
+            except Exception:
+                continue
+
+        if mapper is not None:
+            try:
+                if mapper_dataset is not None:
+                    mapper.SetInputData(mapper_dataset)
+                mapper.SetScalarModeToUseCellData()
+                mapper.SelectColorArray("temperature_K")
+                mapper.SetColorModeToMapScalars()
+                self._set_mapper_scalar_range(mapper, scalar_clim)
+                mapper.Update()
+                mapper.Modified()
+            except Exception:
+                pass
+        try:
+            actor.Modified()
+        except Exception:
+            pass
+        return updated
+
+    def _update_actor_direct_colors(
+        self,
+        node_scalar_values: dict[int, float],
+        scalar_clim: tuple[float, float] | None,
+    ) -> bool:
+        if not self._node_actors:
+            return False
+        cmin, cmax = scalar_clim or self._range_from_values(node_scalar_values)
+        span = max(cmax - cmin, 1.0e-12)
+        cmap = colormaps["jet"]
+        updated = False
+        for node_id, actor in self._node_actors.items():
+            if node_id not in node_scalar_values or node_id == self.selected_node_id:
+                continue
+            try:
+                t = max(0.0, min(1.0, (float(node_scalar_values[node_id]) - cmin) / span))
+                rgba = cmap(t)
+                actor.GetProperty().SetColor(float(rgba[0]), float(rgba[1]), float(rgba[2]))
+                actor.GetProperty().Modified()
+                actor.Modified()
+                updated = True
+            except Exception:
+                continue
+        if updated:
+            self.safe_render()
+        return updated
+
+    @staticmethod
+    def _range_from_values(values: dict[int, float]) -> tuple[float, float]:
+        array = np.array(list(values.values()), dtype=float)
+        if array.size == 0:
+            return (0.0, 1.0)
+        cmin = float(np.nanmin(array))
+        cmax = float(np.nanmax(array))
+        if not np.isfinite(cmin) or not np.isfinite(cmax) or cmax <= cmin:
+            cmax = cmin + 1.0
+        return (cmin, cmax)
+
+    @staticmethod
+    def _actor_mapper(actor: Any) -> Any | None:
+        if actor is None:
+            return None
+        for accessor in ("GetMapper",):
+            method = getattr(actor, accessor, None)
+            if method is None:
+                continue
+            try:
+                mapper = method()
+                if mapper is not None:
+                    return mapper
+            except Exception:
+                pass
+        mapper = getattr(actor, "mapper", None)
+        return mapper
+
+    @staticmethod
+    def _mark_cell_data_modified(dataset: Any, array_name: str) -> None:
+        try:
+            array = dataset.GetCellData().GetArray(array_name)
+            if array is not None:
+                array.Modified()
+            dataset.GetCellData().Modified()
+            return
+        except Exception:
+            pass
+        try:
+            array = dataset.cell_data[array_name]
+            if hasattr(array, "Modified"):
+                array.Modified()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _set_actor_scalar_range(actor: Any, scalar_clim: tuple[float, float] | None) -> None:
+        if actor is None or scalar_clim is None:
+            return
+        try:
+            mapper = actor.GetMapper()
+            GraphPyVistaWidget._set_mapper_scalar_range(mapper, scalar_clim)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _set_mapper_scalar_range(mapper: Any, scalar_clim: tuple[float, float] | None) -> None:
+        if mapper is None or scalar_clim is None:
+            return
+        try:
+            mapper.SetScalarRange(float(scalar_clim[0]), float(scalar_clim[1]))
+            lookup_table = mapper.GetLookupTable()
+            if lookup_table is not None:
+                lookup_table.SetRange(float(scalar_clim[0]), float(scalar_clim[1]))
+                lookup_table.Modified()
+            mapper.Modified()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _hex_to_uint8_rgb(color: str) -> list[int]:
+        cleaned = str(color).strip().lstrip("#")
+        if len(cleaned) != 6:
+            return [88, 166, 255]
+        try:
+            return [int(cleaned[index : index + 2], 16) for index in (0, 2, 4)]
+        except ValueError:
+            return [88, 166, 255]

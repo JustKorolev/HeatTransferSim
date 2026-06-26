@@ -1,11 +1,14 @@
 {
-  "selected_node_id": 943,
+  "selected_node_id": 5189,
+  "selected_node_ids": [
+    5189
+  ],
   "filters": {
     "material": "All",
     "component": "All",
     "level_min": 0,
     "level_max": 99,
-    "heater_sensor_only": false,
+    "heater_sensor_only": true,
     "boundary_only": false
   },
   "dark_mode": false

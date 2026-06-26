@@ -44,6 +44,83 @@ class SensorProperties:
 
 
 @dataclass
+class PIDControlSettings:
+    kp: float = 0.0
+    ki: float = 0.0
+    kd: float = 0.0
+    integral_leak_per_s: float = 0.0
+    setpoint: float = 293.15
+
+
+@dataclass
+class ManualHeaterSettings:
+    power: float = 0.0
+
+
+@dataclass
+class PIDState:
+    integral: float = 0.0
+    previous_error: float | None = None
+
+
+@dataclass
+class HeaterControl:
+    mode: str = "manual"
+    pid: PIDControlSettings = field(default_factory=PIDControlSettings)
+    manual: ManualHeaterSettings = field(default_factory=ManualHeaterSettings)
+    pid_state: PIDState = field(default_factory=PIDState)
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict[str, Any] | None,
+        *,
+        initial_temperature_K: float = 293.15,
+        default_manual_power_W: float = 0.0,
+    ) -> "HeaterControl":
+        raw = data or {}
+        mode = str(raw.get("mode", "manual"))
+        if mode not in {"pid", "mimo", "manual"}:
+            mode = "manual"
+        pid_data = raw.get("pid", {}) or {}
+        manual_data = raw.get("manual", {}) or {}
+        state_data = raw.get("pid_state", raw.get("pidState", {}) or {}) or {}
+        return cls(
+            mode=mode,
+            pid=PIDControlSettings(
+                kp=float(pid_data.get("kp", 0.0)),
+                ki=float(pid_data.get("ki", 0.0)),
+                kd=float(pid_data.get("kd", 0.0)),
+                integral_leak_per_s=max(
+                    0.0,
+                    float(
+                        pid_data.get(
+                            "integral_leak_per_s",
+                            pid_data.get("integralLeakPerS", 0.0),
+                        )
+                    ),
+                ),
+                setpoint=float(pid_data.get("setpoint", initial_temperature_K)),
+            ),
+            manual=ManualHeaterSettings(
+                power=float(manual_data.get("power", default_manual_power_W))
+            ),
+            pid_state=PIDState(
+                integral=float(state_data.get("integral", 0.0)),
+                previous_error=(
+                    None
+                    if state_data.get("previous_error", state_data.get("previousError")) is None
+                    else float(state_data.get("previous_error", state_data.get("previousError")))
+                ),
+            ),
+        )
+
+    def reset_pid_state(self) -> None:
+        self.pid_state.integral = 0.0
+        self.pid_state.previous_error = None
+
+
+@dataclass
 class NodeProperties:
     node_id: int
     coord: tuple[int, int, int]
@@ -68,10 +145,24 @@ class NodeProperties:
     C_J_K: float = 800.0
     C_manual_override: bool = False
     Grad_W_K: float = 0.0
+    initial_temperature_K: float = 293.15
+    is_exposed: bool = False
+    radiating_area_m2: float = 0.0
+    G_rad_W_K: float = 0.0
+    R_rad_K_W: float | None = None
     has_heater: bool = False
     heater: HeaterProperties = field(default_factory=HeaterProperties)
+    heater_control: HeaterControl = field(default_factory=HeaterControl)
     has_sensor: bool = False
     sensor: SensorProperties = field(default_factory=SensorProperties)
+    has_cryocooler: bool = False
+    controller_setpoint_K: float = 293.15
+    controller_weight: float = 0.0
+    sensor_settling_time_s: float = 0.0
+    controller_kp_coarse: float = 0.0
+    controller_ki_coarse: float = 0.0
+    controller_kp_hold: float = 0.0
+    controller_ki_hold: float = 0.0
 
     @classmethod
     def with_material(
@@ -111,18 +202,69 @@ class NodeProperties:
             coord_value = [round(float(v)) for v in center_mm]
         coord = tuple(int(v) for v in (coord_value or (0, 0, 0)))
         heater_data = copied.pop("heater", {}) or {}
+        heater_control_data = copied.pop("heater_control", copied.pop("heaterControl", {}) or {}) or {}
         sensor_data = copied.pop("sensor", {}) or {}
+        controller_data = copied.pop("controller", copied.pop("mimo_controller", {}) or {}) or {}
+        if isinstance(controller_data, dict):
+            copied.setdefault(
+                "controller_setpoint_K",
+                float(controller_data.get("setpoint_K", controller_data.get("setpoint", 293.15))),
+            )
+            copied.setdefault("controller_weight", float(controller_data.get("weight", 0.0)))
+            copied.setdefault(
+                "sensor_settling_time_s",
+                float(controller_data.get("sensor_settling_time_s", controller_data.get("settling_time_s", 0.0))),
+            )
+            legacy_kp = controller_data.get("kp_scale", copied.get("controller_kp_scale", 0.0))
+            legacy_ki = controller_data.get("ki_scale", copied.get("controller_ki_scale", 0.0))
+            copied.setdefault(
+                "controller_kp_coarse",
+                float(controller_data.get("kp_coarse", controller_data.get("kp", legacy_kp))),
+            )
+            copied.setdefault(
+                "controller_ki_coarse",
+                float(controller_data.get("ki_coarse", controller_data.get("ki", legacy_ki))),
+            )
+            copied.setdefault(
+                "controller_kp_hold",
+                float(controller_data.get("kp_hold", copied.get("controller_kp_hold", legacy_kp))),
+            )
+            copied.setdefault(
+                "controller_ki_hold",
+                float(controller_data.get("ki_hold", copied.get("controller_ki_hold", legacy_ki))),
+            )
+        if "controller_kp_scale" in copied and "controller_kp_coarse" not in copied:
+            copied["controller_kp_coarse"] = float(copied["controller_kp_scale"])
+            copied.setdefault("controller_kp_hold", float(copied["controller_kp_scale"]))
+        if "controller_ki_scale" in copied and "controller_ki_coarse" not in copied:
+            copied["controller_ki_coarse"] = float(copied["controller_ki_scale"])
+            copied.setdefault("controller_ki_hold", float(copied["controller_ki_scale"]))
+        copied.pop("controller_kp_scale", None)
+        copied.pop("controller_ki_scale", None)
+        copied.pop("heat_sink", None)
+        copied.pop("heatSink", None)
         if "heater_id" in tags:
             heater_data.setdefault("heater_id", tags.get("heater_id") or node_id)
         if "sensor_id" in tags:
             sensor_data.setdefault("sensor_id", tags.get("sensor_id") or node_id)
         copied.setdefault("has_heater", bool(tags.get("heater", False)))
         copied.setdefault("has_sensor", bool(tags.get("sensor", False)))
+        copied.pop("has_heat_sink", None)
+        copied.setdefault(
+            "has_cryocooler",
+            bool(tags.get("cryocooler", tags.get("active_cooler", False))),
+        )
         if tags.get("notes") and "notes" not in copied:
             copied["notes"] = str(tags.get("notes"))
         if material_name and "material" not in copied:
             copied["material"] = str(material_name)
         copied.pop("volume_m3", None)
+        radiation = copied.pop("radiation", {}) or {}
+        copied.setdefault("is_exposed", bool(radiation.get("is_exposed", False)))
+        copied.setdefault("radiating_area_m2", float(radiation.get("radiating_area_m2", 0.0)))
+        copied.setdefault("G_rad_W_K", float(radiation.get("G_rad_W_K", copied.get("Grad_W_K", 0.0))))
+        copied.setdefault("R_rad_K_W", radiation.get("R_rad_K_W"))
+        copied.setdefault("initial_temperature_K", float(copied.get("initial_temperature_K", 293.15)))
         copied.pop("dominant_component", None)
         copied.pop("dominant_material", None)
         copied.pop("pos", None)
@@ -140,6 +282,20 @@ class NodeProperties:
             node.heater = HeaterProperties(**heater_data)
         else:
             node.heater = HeaterProperties(**heater_data)
+        if node.has_heater:
+            node.has_sensor = True
+        if not isinstance(node.heater_control, HeaterControl):
+            node.heater_control = HeaterControl.from_dict(
+                heater_control_data,
+                initial_temperature_K=node.initial_temperature_K,
+                default_manual_power_W=float(node.heater.heater_max_power_W) * float(node.heater.heater_efficiency),
+            )
+        else:
+            node.heater_control = HeaterControl.from_dict(
+                heater_control_data,
+                initial_temperature_K=node.initial_temperature_K,
+                default_manual_power_W=float(node.heater.heater_max_power_W) * float(node.heater.heater_efficiency),
+            )
         if not isinstance(node.sensor, SensorProperties):
             node.sensor = SensorProperties(**sensor_data)
         else:
@@ -169,15 +325,34 @@ class NodeProperties:
             "volume_m3": self.volume_m3,
             "mass_kg": self.mass_kg,
             "C_J_K": self.C_J_K,
+            "initial_temperature_K": self.initial_temperature_K,
             "occupancy_fraction": self.occupancy_fraction,
             "confidence": self.confidence,
             "warnings": list(self.warnings),
+            "radiation": {
+                "is_exposed": self.is_exposed,
+                "radiating_area_m2": self.radiating_area_m2,
+                "emissivity": self.emissivity,
+                "G_rad_W_K": self.G_rad_W_K,
+                "R_rad_K_W": self.R_rad_K_W,
+            },
             "tags": {
                 "heater": self.has_heater,
                 "sensor": self.has_sensor,
+                "cryocooler": self.has_cryocooler,
                 "heater_id": self.heater.heater_id if self.has_heater else None,
                 "sensor_id": self.sensor.sensor_id if self.has_sensor else None,
                 "notes": self.notes,
+            },
+            "heater_control": asdict(self.heater_control),
+            "controller": {
+                "setpoint_K": self.controller_setpoint_K,
+                "weight": self.controller_weight,
+                "sensor_settling_time_s": self.sensor_settling_time_s,
+                "kp_coarse": self.controller_kp_coarse,
+                "ki_coarse": self.controller_ki_coarse,
+                "kp_hold": self.controller_kp_hold,
+                "ki_hold": self.controller_ki_hold,
             },
         }
 
@@ -295,6 +470,7 @@ class ThermalGraphModel:
     edges: dict[tuple[int, int], EdgeProperties] = field(default_factory=dict)
     material_library: dict[str, dict[str, float]] = field(default_factory=dict)
     octree_graph_data: dict[str, Any] = field(default_factory=dict)
+    controller_gain_matrix: dict[int, dict[int, float]] = field(default_factory=dict)
 
     def add_node(self, node: NodeProperties) -> None:
         self._check_unique(node.node_id, node.coord)
@@ -329,6 +505,7 @@ class ThermalGraphModel:
             for key, edge in self.edges.items()
             if edge.source != node_id and edge.target != node_id
         }
+        self.prune_controller_gain_matrix()
         self.touch()
 
     def set_edge(
@@ -352,6 +529,40 @@ class ThermalGraphModel:
         self.edges.clear()
         self.touch()
 
+    def controller_gain(self, sensor_node_id: int, heater_node_id: int) -> float:
+        row = self.controller_gain_matrix.get(int(sensor_node_id), {})
+        return float(row.get(int(heater_node_id), 0.0))
+
+    def set_controller_gain(self, sensor_node_id: int, heater_node_id: int, value: float) -> None:
+        sensor_id = int(sensor_node_id)
+        heater_id = int(heater_node_id)
+        row = self.controller_gain_matrix.setdefault(sensor_id, {})
+        number = float(value)
+        if abs(number) <= 0.0:
+            row.pop(heater_id, None)
+        else:
+            row[heater_id] = number
+        if not row:
+            self.controller_gain_matrix.pop(sensor_id, None)
+        self.touch()
+
+    def prune_controller_gain_matrix(self) -> None:
+        sensor_ids = {node_id for node_id, node in self.nodes.items() if node.has_sensor}
+        heater_ids = {node_id for node_id, node in self.nodes.items() if node.has_heater}
+        pruned: dict[int, dict[int, float]] = {}
+        for sensor_id, row in self.controller_gain_matrix.items():
+            sensor_key = int(sensor_id)
+            if sensor_key not in sensor_ids:
+                continue
+            kept = {
+                int(heater_id): float(value)
+                for heater_id, value in row.items()
+                if int(heater_id) in heater_ids and abs(float(value)) > 0.0
+            }
+            if kept:
+                pruned[sensor_key] = kept
+        self.controller_gain_matrix = pruned
+
     def ordered_node_ids(self) -> list[int]:
         return sorted(self.nodes)
 
@@ -372,6 +583,13 @@ class ThermalGraphModel:
                 edge.to_dict()
                 for _, edge in sorted(self.edges.items(), key=lambda item: item[0])
             ],
+            "controller_gain_matrix": {
+                str(sensor_id): {
+                    str(heater_id): float(value)
+                    for heater_id, value in sorted(row.items(), key=lambda item: int(item[0]))
+                }
+                for sensor_id, row in sorted(self.controller_gain_matrix.items(), key=lambda item: int(item[0]))
+            },
         }
 
     def to_octree_graph_dict(self) -> dict[str, Any]:
@@ -411,7 +629,14 @@ class ThermalGraphModel:
             "heater_sensor_tags": {
                 str(node_id): node.to_octree_node_dict()["tags"]
                 for node_id, node in self.nodes.items()
-                if node.has_heater or node.has_sensor or node.notes
+                if node.has_heater or node.has_sensor or node.has_cryocooler or node.notes
+            },
+            "controller_gain_matrix": {
+                str(sensor_id): {
+                    str(heater_id): float(value)
+                    for heater_id, value in sorted(row.items(), key=lambda item: int(item[0]))
+                }
+                for sensor_id, row in sorted(self.controller_gain_matrix.items(), key=lambda item: int(item[0]))
             },
             "validation_results": data.get("validation_results", {}),
         })
@@ -432,6 +657,8 @@ class ThermalGraphModel:
             edge = EdgeProperties.from_dict(dict(raw_edge))
             if edge.source in model.nodes and edge.target in model.nodes:
                 model.set_edge(edge.source, edge.target, edge.Gij_W_K, edge.source_metadata)
+        model.controller_gain_matrix = _parse_controller_gain_matrix(data.get("controller_gain_matrix"))
+        model.prune_controller_gain_matrix()
         return model
 
     @classmethod
@@ -439,6 +666,7 @@ class ThermalGraphModel:
         metadata = GraphMetadata.from_dict(data.get("metadata"))
         model = cls(metadata=metadata, material_library=data.get("material_library") or {})
         model.octree_graph_data = dict(data)
+        model.controller_gain_matrix = _parse_controller_gain_matrix(data.get("controller_gain_matrix"))
         for raw_node in data.get("graph_nodes", []):
             node = NodeProperties.from_dict(dict(raw_node))
             model.add_node(node)
@@ -457,6 +685,7 @@ class ThermalGraphModel:
                     contact_confidence=edge.contact_confidence,
                     warnings=edge.warnings,
                 )
+        model.prune_controller_gain_matrix()
         return model
 
     def _check_unique(self, node_id: int, coord: tuple[int, int, int]) -> None:
@@ -471,6 +700,31 @@ class ThermalGraphModel:
 
 def edge_key(source: int, target: int) -> tuple[int, int]:
     return (min(int(source), int(target)), max(int(source), int(target)))
+
+
+def _parse_controller_gain_matrix(raw: Any) -> dict[int, dict[int, float]]:
+    if not isinstance(raw, dict):
+        return {}
+    parsed: dict[int, dict[int, float]] = {}
+    for raw_sensor_id, raw_row in raw.items():
+        if not isinstance(raw_row, dict):
+            continue
+        try:
+            sensor_id = int(raw_sensor_id)
+        except (TypeError, ValueError):
+            continue
+        row: dict[int, float] = {}
+        for raw_heater_id, raw_value in raw_row.items():
+            try:
+                heater_id = int(raw_heater_id)
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if abs(value) > 0.0:
+                row[heater_id] = value
+        if row:
+            parsed[sensor_id] = row
+    return parsed
 
 
 def utc_now_iso() -> str:
