@@ -361,7 +361,8 @@ class GraphVisualizerApp:
         self.inputs["heater_pid_kp"] = self._double_spin(-1.0e12, 1.0e12, 0.0, 0.1)
         self.inputs["heater_pid_ki"] = self._double_spin(-1.0e12, 1.0e12, 0.0, 0.1)
         self.inputs["heater_pid_kd"] = self._double_spin(-1.0e12, 1.0e12, 0.0, 0.1)
-        self.inputs["heater_pid_integral_leak_per_s"] = self._double_spin(0.0, 1.0e6, 0.0, 0.01)
+        self.inputs["heater_pid_lambda_order"] = self._double_spin(0.0, 2.0, 1.0, 0.05)
+        self.inputs["heater_pid_mu_order"] = self._double_spin(0.0, 2.0, 1.0, 0.05)
         self.inputs["heater_pid_setpoint"] = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
         self.inputs["heater_manual_power"] = self._double_spin(0.0, 1.0e9, 0.0, 1.0)
         self.inputs["controller_setpoint_K"] = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
@@ -371,6 +372,10 @@ class GraphVisualizerApp:
         self.inputs["controller_ki_coarse"] = self._double_spin(0.0, 1.0e9, 0.0, 0.01)
         self.inputs["controller_kp_hold"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
         self.inputs["controller_ki_hold"] = self._double_spin(0.0, 1.0e9, 0.0, 0.01)
+        self.inputs["controller_kd_coarse"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
+        self.inputs["controller_kd_hold"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
+        self.inputs["controller_lambda_order"] = self._double_spin(0.0, 2.0, 1.0, 0.05)
+        self.inputs["controller_mu_order"] = self._double_spin(0.0, 2.0, 1.0, 0.05)
         self.inputs["sensor_settling_time_s"].setToolTip(
             "MIMO sensor settling time used for lag compensation. For a first-order sensor, settling time is roughly 5*tau."
         )
@@ -379,21 +384,12 @@ class GraphVisualizerApp:
             "heater_pid_kp",
             "heater_pid_ki",
             "heater_pid_kd",
-            "heater_pid_integral_leak_per_s",
+            "heater_pid_lambda_order",
+            "heater_pid_mu_order",
             "heater_pid_setpoint",
             "heater_manual_power",
         ):
             heater_form.addRow(key, self.inputs[key])
-        for label, key in (
-            ("MIMO setpoint K", "controller_setpoint_K"),
-            ("MIMO sensor weight", "controller_weight"),
-            ("MIMO settling time s", "sensor_settling_time_s"),
-            ("coarse kP", "controller_kp_coarse"),
-            ("coarse kI", "controller_ki_coarse"),
-            ("hold kP", "controller_kp_hold"),
-            ("hold kI", "controller_ki_hold"),
-        ):
-            heater_form.addRow(label, self.inputs[key])
 
         self.inputs["has_sensor"] = self._checkbox("has sensor", False, self._update_optional_sections)
         self.sensor_box = self._group_box("Sensor")
@@ -410,6 +406,20 @@ class GraphVisualizerApp:
             ("noise std K", "sensor_noise_std_K"),
             ("bias K", "sensor_bias_K"),
             ("time constant tau s", "sensor_time_constant_s"),
+        ):
+            sensor_form.addRow(label, self.inputs[key])
+        for label, key in (
+            ("MIMO setpoint K", "controller_setpoint_K"),
+            ("MIMO sensor weight", "controller_weight"),
+            ("MIMO settling time s", "sensor_settling_time_s"),
+            ("MIMO coarse kP", "controller_kp_coarse"),
+            ("MIMO coarse kI", "controller_ki_coarse"),
+            ("MIMO coarse kD", "controller_kd_coarse"),
+            ("MIMO hold kP", "controller_kp_hold"),
+            ("MIMO hold kI", "controller_ki_hold"),
+            ("MIMO hold kD", "controller_kd_hold"),
+            ("MIMO lambda", "controller_lambda_order"),
+            ("MIMO mu", "controller_mu_order"),
         ):
             sensor_form.addRow(label, self.inputs[key])
 
@@ -522,7 +532,8 @@ class GraphVisualizerApp:
             "heater_pid_kp",
             "heater_pid_ki",
             "heater_pid_kd",
-            "heater_pid_integral_leak_per_s",
+            "heater_pid_lambda_order",
+            "heater_pid_mu_order",
             "heater_manual_power",
             "heater_pid_setpoint",
             "sensor_id",
@@ -536,6 +547,10 @@ class GraphVisualizerApp:
             "controller_ki_coarse",
             "controller_kp_hold",
             "controller_ki_hold",
+            "controller_kd_coarse",
+            "controller_kd_hold",
+            "controller_lambda_order",
+            "controller_mu_order",
         ):
             self.inputs[key].valueChanged.connect(self._handle_node_form_changed)
         self.inputs["notes"].textChanged.connect(self._handle_node_form_changed)
@@ -572,6 +587,10 @@ class GraphVisualizerApp:
         target.controller_ki_coarse = template.controller_ki_coarse
         target.controller_kp_hold = template.controller_kp_hold
         target.controller_ki_hold = template.controller_ki_hold
+        target.controller_kd_coarse = template.controller_kd_coarse
+        target.controller_kd_hold = template.controller_kd_hold
+        target.controller_lambda_order = template.controller_lambda_order
+        target.controller_mu_order = template.controller_mu_order
         target.notes = template.notes
         target.initial_temperature_K = template.initial_temperature_K
 
@@ -634,6 +653,8 @@ class GraphVisualizerApp:
             return
         self.model.set_controller_gain(sensor_id, int(heater_id), float(value))
         self._mark_dirty()
+        if hasattr(self, "simulation_tab"):
+            self.simulation_tab.save_active_controller_gain_matrix_from_editor(self.model)
         self._refresh_simulation_readouts_from_editor()
 
     def _handle_controller_gain_matrix_changed(self) -> None:
@@ -1104,7 +1125,8 @@ class GraphVisualizerApp:
                     kp=float(self.inputs["heater_pid_kp"].value()),
                     ki=float(self.inputs["heater_pid_ki"].value()),
                     kd=float(self.inputs["heater_pid_kd"].value()),
-                    integral_leak_per_s=float(self.inputs["heater_pid_integral_leak_per_s"].value()),
+                    lambda_order=float(self.inputs["heater_pid_lambda_order"].value()),
+                    mu_order=float(self.inputs["heater_pid_mu_order"].value()),
                     setpoint=float(self.inputs["heater_pid_setpoint"].value()),
                 ),
                 manual=ManualHeaterSettings(power=float(self.inputs["heater_manual_power"].value())),
@@ -1125,6 +1147,10 @@ class GraphVisualizerApp:
             controller_ki_coarse=float(self.inputs["controller_ki_coarse"].value()),
             controller_kp_hold=float(self.inputs["controller_kp_hold"].value()),
             controller_ki_hold=float(self.inputs["controller_ki_hold"].value()),
+            controller_kd_coarse=float(self.inputs["controller_kd_coarse"].value()),
+            controller_kd_hold=float(self.inputs["controller_kd_hold"].value()),
+            controller_lambda_order=float(self.inputs["controller_lambda_order"].value()),
+            controller_mu_order=float(self.inputs["controller_mu_order"].value()),
             notes=self.inputs["notes"].toPlainText(),
         )
         if not node.C_manual_override:
@@ -1178,7 +1204,8 @@ class GraphVisualizerApp:
         self.inputs["heater_pid_kp"].setValue(heater_control.pid.kp)
         self.inputs["heater_pid_ki"].setValue(heater_control.pid.ki)
         self.inputs["heater_pid_kd"].setValue(heater_control.pid.kd)
-        self.inputs["heater_pid_integral_leak_per_s"].setValue(heater_control.pid.integral_leak_per_s)
+        self.inputs["heater_pid_lambda_order"].setValue(float(getattr(heater_control.pid, "lambda_order", 1.0)))
+        self.inputs["heater_pid_mu_order"].setValue(float(getattr(heater_control.pid, "mu_order", 1.0)))
         self.inputs["heater_pid_setpoint"].setValue(heater_control.pid.setpoint)
         manual_power = heater_control.manual.power
         if node.has_heater and heater_control.mode == "manual" and manual_power <= 0.0:
@@ -1196,6 +1223,10 @@ class GraphVisualizerApp:
         self.inputs["controller_ki_coarse"].setValue(float(getattr(node, "controller_ki_coarse", 0.0)))
         self.inputs["controller_kp_hold"].setValue(float(getattr(node, "controller_kp_hold", 0.0)))
         self.inputs["controller_ki_hold"].setValue(float(getattr(node, "controller_ki_hold", 0.0)))
+        self.inputs["controller_kd_coarse"].setValue(float(getattr(node, "controller_kd_coarse", 0.0)))
+        self.inputs["controller_kd_hold"].setValue(float(getattr(node, "controller_kd_hold", 0.0)))
+        self.inputs["controller_lambda_order"].setValue(float(getattr(node, "controller_lambda_order", 1.0)))
+        self.inputs["controller_mu_order"].setValue(float(getattr(node, "controller_mu_order", 1.0)))
         self.inputs["has_cryocooler"].setChecked(node.has_cryocooler)
         self._update_optional_sections()
         self._update_C_enabled()
@@ -1287,7 +1318,8 @@ class GraphVisualizerApp:
             "heater_pid_kp",
             "heater_pid_ki",
             "heater_pid_kd",
-            "heater_pid_integral_leak_per_s",
+            "heater_pid_lambda_order",
+            "heater_pid_mu_order",
             "heater_pid_setpoint",
         ):
             self.inputs[key].setEnabled(pid_active)
@@ -1300,6 +1332,10 @@ class GraphVisualizerApp:
             "controller_ki_coarse",
             "controller_kp_hold",
             "controller_ki_hold",
+            "controller_kd_coarse",
+            "controller_kd_hold",
+            "controller_lambda_order",
+            "controller_mu_order",
         ):
             self.inputs[key].setEnabled(mimo_active)
             self.inputs[key].setSpecialValueText("" if not mimo_active else "")

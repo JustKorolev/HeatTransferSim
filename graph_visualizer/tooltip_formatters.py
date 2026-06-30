@@ -58,8 +58,9 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"PID kp: {_fmt(getattr(pid, 'kp', None))}",
                 f"PID ki: {_fmt(getattr(pid, 'ki', None))}",
                 f"PID kd: {_fmt(getattr(pid, 'kd', None))}",
+                f"PID lambda: {_fmt(getattr(pid, 'lambda_order', None))}",
+                f"PID mu: {_fmt(getattr(pid, 'mu_order', None))}",
                 f"PID setpoint: {_fmt(getattr(pid, 'setpoint', None))} K",
-                f"PID leak: {_fmt(getattr(pid, 'integral_leak_per_s', None))} 1/s",
                 f"PID integral: {_fmt(getattr(state, 'integral', None))}",
                 f"PID prev error: {_fmt(getattr(state, 'previous_error', None))} K",
             ]
@@ -78,8 +79,12 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"MIMO settling: {_fmt(getattr(attrs, 'sensor_settling_time_s', None))} s",
                 f"coarse kP: {_fmt(getattr(attrs, 'controller_kp_coarse', None))}",
                 f"coarse kI: {_fmt(getattr(attrs, 'controller_ki_coarse', None))}",
+                f"coarse kD: {_fmt(getattr(attrs, 'controller_kd_coarse', None))}",
                 f"hold kP: {_fmt(getattr(attrs, 'controller_kp_hold', None))}",
                 f"hold kI: {_fmt(getattr(attrs, 'controller_ki_hold', None))}",
+                f"hold kD: {_fmt(getattr(attrs, 'controller_kd_hold', None))}",
+                f"MIMO lambda: {_fmt(getattr(attrs, 'controller_lambda_order', None))}",
+                f"MIMO mu: {_fmt(getattr(attrs, 'controller_mu_order', None))}",
             ]
         )
     return "\n".join(lines)

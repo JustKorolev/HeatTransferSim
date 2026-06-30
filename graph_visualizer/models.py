@@ -48,6 +48,8 @@ class PIDControlSettings:
     kp: float = 0.0
     ki: float = 0.0
     kd: float = 0.0
+    lambda_order: float = 1.0
+    mu_order: float = 1.0
     integral_leak_per_s: float = 0.0
     setpoint: float = 293.15
 
@@ -61,6 +63,7 @@ class ManualHeaterSettings:
 class PIDState:
     integral: float = 0.0
     previous_error: float | None = None
+    error_history: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -91,6 +94,14 @@ class HeaterControl:
                 kp=float(pid_data.get("kp", 0.0)),
                 ki=float(pid_data.get("ki", 0.0)),
                 kd=float(pid_data.get("kd", 0.0)),
+                lambda_order=max(
+                    0.0,
+                    float(pid_data.get("lambda_order", pid_data.get("lambda", pid_data.get("lambdaOrder", 1.0)))),
+                ),
+                mu_order=max(
+                    0.0,
+                    float(pid_data.get("mu_order", pid_data.get("mu", pid_data.get("muOrder", 1.0)))),
+                ),
                 integral_leak_per_s=max(
                     0.0,
                     float(
@@ -112,12 +123,17 @@ class HeaterControl:
                     if state_data.get("previous_error", state_data.get("previousError")) is None
                     else float(state_data.get("previous_error", state_data.get("previousError")))
                 ),
+                error_history=[
+                    float(value)
+                    for value in state_data.get("error_history", state_data.get("errorHistory", []))
+                ],
             ),
         )
 
     def reset_pid_state(self) -> None:
         self.pid_state.integral = 0.0
         self.pid_state.previous_error = None
+        self.pid_state.error_history = []
 
 
 @dataclass
@@ -163,6 +179,11 @@ class NodeProperties:
     controller_ki_coarse: float = 0.0
     controller_kp_hold: float = 0.0
     controller_ki_hold: float = 0.0
+    controller_kd_coarse: float = 0.0
+    controller_kd_hold: float = 0.0
+    controller_lambda_order: float = 1.0
+    controller_mu_order: float = 1.0
+    controller_integral_leak_per_s: float = 0.0
 
     @classmethod
     def with_material(
@@ -233,6 +254,45 @@ class NodeProperties:
                 "controller_ki_hold",
                 float(controller_data.get("ki_hold", copied.get("controller_ki_hold", legacy_ki))),
             )
+            copied.setdefault(
+                "controller_kd_coarse",
+                float(controller_data.get("kd_coarse", controller_data.get("kd", copied.get("controller_kd_coarse", 0.0)))),
+            )
+            copied.setdefault(
+                "controller_kd_hold",
+                float(controller_data.get("kd_hold", copied.get("controller_kd_hold", 0.0))),
+            )
+            copied.setdefault(
+                "controller_lambda_order",
+                max(
+                    0.0,
+                    float(
+                        controller_data.get(
+                            "lambda_order",
+                            controller_data.get("lambda", copied.get("controller_lambda_order", 1.0)),
+                        )
+                    ),
+                ),
+            )
+            copied.setdefault(
+                "controller_mu_order",
+                max(
+                    0.0,
+                    float(
+                        controller_data.get(
+                            "mu_order",
+                            controller_data.get("mu", copied.get("controller_mu_order", 1.0)),
+                        )
+                    ),
+                ),
+            )
+            copied.setdefault(
+                "controller_integral_leak_per_s",
+                float(controller_data.get("integral_leak_per_s", copied.get("controller_integral_leak_per_s", 0.0))),
+            )
+        copied.pop("controller_integral_negative_error_leak_per_s", None)
+        copied.pop("integral_negative_error_leak_per_s", None)
+        copied.pop("negative_error_leak_per_s", None)
         if "controller_kp_scale" in copied and "controller_kp_coarse" not in copied:
             copied["controller_kp_coarse"] = float(copied["controller_kp_scale"])
             copied.setdefault("controller_kp_hold", float(copied["controller_kp_scale"]))
@@ -353,6 +413,11 @@ class NodeProperties:
                 "ki_coarse": self.controller_ki_coarse,
                 "kp_hold": self.controller_kp_hold,
                 "ki_hold": self.controller_ki_hold,
+                "kd_coarse": self.controller_kd_coarse,
+                "kd_hold": self.controller_kd_hold,
+                "lambda_order": self.controller_lambda_order,
+                "mu_order": self.controller_mu_order,
+                "integral_leak_per_s": self.controller_integral_leak_per_s,
             },
         }
 
@@ -471,6 +536,7 @@ class ThermalGraphModel:
     material_library: dict[str, dict[str, float]] = field(default_factory=dict)
     octree_graph_data: dict[str, Any] = field(default_factory=dict)
     controller_gain_matrix: dict[int, dict[int, float]] = field(default_factory=dict)
+    controller_feedforward_by_heater: dict[int, float] = field(default_factory=dict)
 
     def add_node(self, node: NodeProperties) -> None:
         self._check_unique(node.node_id, node.coord)
@@ -506,6 +572,7 @@ class ThermalGraphModel:
             if edge.source != node_id and edge.target != node_id
         }
         self.prune_controller_gain_matrix()
+        self.prune_controller_feedforward()
         self.touch()
 
     def set_edge(
@@ -563,6 +630,26 @@ class ThermalGraphModel:
                 pruned[sensor_key] = kept
         self.controller_gain_matrix = pruned
 
+    def controller_feedforward(self, heater_node_id: int) -> float:
+        return float(self.controller_feedforward_by_heater.get(int(heater_node_id), 0.0))
+
+    def set_controller_feedforward(self, heater_node_id: int, value: float) -> None:
+        heater_id = int(heater_node_id)
+        number = max(0.0, float(value))
+        if number <= 0.0:
+            self.controller_feedforward_by_heater.pop(heater_id, None)
+        else:
+            self.controller_feedforward_by_heater[heater_id] = number
+        self.touch()
+
+    def prune_controller_feedforward(self) -> None:
+        heater_ids = {node_id for node_id, node in self.nodes.items() if node.has_heater}
+        self.controller_feedforward_by_heater = {
+            int(heater_id): max(0.0, float(value))
+            for heater_id, value in self.controller_feedforward_by_heater.items()
+            if int(heater_id) in heater_ids and float(value) > 0.0
+        }
+
     def ordered_node_ids(self) -> list[int]:
         return sorted(self.nodes)
 
@@ -589,6 +676,10 @@ class ThermalGraphModel:
                     for heater_id, value in sorted(row.items(), key=lambda item: int(item[0]))
                 }
                 for sensor_id, row in sorted(self.controller_gain_matrix.items(), key=lambda item: int(item[0]))
+            },
+            "controller_feedforward_by_heater": {
+                str(heater_id): float(value)
+                for heater_id, value in sorted(self.controller_feedforward_by_heater.items(), key=lambda item: int(item[0]))
             },
         }
 
@@ -638,6 +729,10 @@ class ThermalGraphModel:
                 }
                 for sensor_id, row in sorted(self.controller_gain_matrix.items(), key=lambda item: int(item[0]))
             },
+            "controller_feedforward_by_heater": {
+                str(heater_id): float(value)
+                for heater_id, value in sorted(self.controller_feedforward_by_heater.items(), key=lambda item: int(item[0]))
+            },
             "validation_results": data.get("validation_results", {}),
         })
         return data
@@ -658,7 +753,9 @@ class ThermalGraphModel:
             if edge.source in model.nodes and edge.target in model.nodes:
                 model.set_edge(edge.source, edge.target, edge.Gij_W_K, edge.source_metadata)
         model.controller_gain_matrix = _parse_controller_gain_matrix(data.get("controller_gain_matrix"))
+        model.controller_feedforward_by_heater = _parse_feedforward_vector(data.get("controller_feedforward_by_heater"))
         model.prune_controller_gain_matrix()
+        model.prune_controller_feedforward()
         return model
 
     @classmethod
@@ -667,6 +764,7 @@ class ThermalGraphModel:
         model = cls(metadata=metadata, material_library=data.get("material_library") or {})
         model.octree_graph_data = dict(data)
         model.controller_gain_matrix = _parse_controller_gain_matrix(data.get("controller_gain_matrix"))
+        model.controller_feedforward_by_heater = _parse_feedforward_vector(data.get("controller_feedforward_by_heater"))
         for raw_node in data.get("graph_nodes", []):
             node = NodeProperties.from_dict(dict(raw_node))
             model.add_node(node)
@@ -686,6 +784,7 @@ class ThermalGraphModel:
                     warnings=edge.warnings,
                 )
         model.prune_controller_gain_matrix()
+        model.prune_controller_feedforward()
         return model
 
     def _check_unique(self, node_id: int, coord: tuple[int, int, int]) -> None:
@@ -724,6 +823,21 @@ def _parse_controller_gain_matrix(raw: Any) -> dict[int, dict[int, float]]:
                 row[heater_id] = value
         if row:
             parsed[sensor_id] = row
+    return parsed
+
+
+def _parse_feedforward_vector(raw: Any) -> dict[int, float]:
+    if not isinstance(raw, dict):
+        return {}
+    parsed: dict[int, float] = {}
+    for raw_heater_id, raw_value in raw.items():
+        try:
+            heater_id = int(raw_heater_id)
+            value = max(0.0, float(raw_value))
+        except (TypeError, ValueError):
+            continue
+        if value > 0.0:
+            parsed[heater_id] = value
     return parsed
 
 

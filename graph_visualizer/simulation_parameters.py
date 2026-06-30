@@ -23,8 +23,14 @@ class SimulationParameters:
     mimo_hold_threshold_K: float = 1.0
     mimo_coarse_threshold_K: float = 3.0
     mimo_coupling_cutoff_fraction: float = 0.95
-    mimo_decoupling_lambda: float = 1.0e-6
+    mimo_lambda_regularization: float = 1.0e-3
+    mimo_rho_smoothness: float = 1.0e-2
     mimo_default_heater_max_power_W: float = 30.0
+    heat_loss_feedforward_enabled: bool = False
+    heat_loss_feedforward_gain: float = 1.0
+    heat_loss_feedforward_regularization: float = 1.0e-3
+    enabled_heater_node_ids: tuple[int, ...] | None = None
+    enabled_sensor_node_ids: tuple[int, ...] | None = None
     autoscale_temperature: bool = True
     color_min_K: float = 0.0
     color_max_K: float = 400.0
@@ -44,7 +50,18 @@ def load_simulation_parameters(path: Path) -> tuple[SimulationParameters, dict[s
             raw = {}
     migrated = _migrate_legacy_fields(raw)
     known = {field.name for field in fields(SimulationParameters)}
-    deprecated = {"mimo_Kp_coarse", "mimo_Ki_coarse", "mimo_Kp_hold", "mimo_Ki_hold"}
+    deprecated = {
+        "mimo_Kp_coarse",
+        "mimo_Ki_coarse",
+        "mimo_Kp_hold",
+        "mimo_Ki_hold",
+        "mimo_decoupling_lambda",
+        "mimo_heater_slew_rate_W_per_s",
+        "mimo_control_deadband_K",
+        "mimo_hold_control_deadband_K",
+        "mimo_negative_error_bleed_per_s",
+        "mimo_hold_negative_error_bleed_per_s",
+    }
     values = {key: migrated[key] for key in known if key in migrated}
     extras = {key: value for key, value in raw.items() if key not in known and key not in deprecated}
     return SimulationParameters(**values), extras
@@ -99,4 +116,6 @@ def _migrate_legacy_fields(raw: dict[str, Any]) -> dict[str, Any]:
         data["t_final_s"] = data["simulation_duration"]
     if "display_update_interval_ms" not in data and "display_update_interval_ms" in raw:
         data["display_update_interval_ms"] = raw["display_update_interval_ms"]
+    if "mimo_lambda_regularization" not in data and "mimo_decoupling_lambda" in data:
+        data["mimo_lambda_regularization"] = data["mimo_decoupling_lambda"]
     return data
