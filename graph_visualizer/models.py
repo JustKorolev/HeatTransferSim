@@ -536,7 +536,6 @@ class ThermalGraphModel:
     material_library: dict[str, dict[str, float]] = field(default_factory=dict)
     octree_graph_data: dict[str, Any] = field(default_factory=dict)
     controller_gain_matrix: dict[int, dict[int, float]] = field(default_factory=dict)
-    controller_feedforward_by_heater: dict[int, float] = field(default_factory=dict)
 
     def add_node(self, node: NodeProperties) -> None:
         self._check_unique(node.node_id, node.coord)
@@ -572,7 +571,6 @@ class ThermalGraphModel:
             if edge.source != node_id and edge.target != node_id
         }
         self.prune_controller_gain_matrix()
-        self.prune_controller_feedforward()
         self.touch()
 
     def set_edge(
@@ -630,26 +628,6 @@ class ThermalGraphModel:
                 pruned[sensor_key] = kept
         self.controller_gain_matrix = pruned
 
-    def controller_feedforward(self, heater_node_id: int) -> float:
-        return float(self.controller_feedforward_by_heater.get(int(heater_node_id), 0.0))
-
-    def set_controller_feedforward(self, heater_node_id: int, value: float) -> None:
-        heater_id = int(heater_node_id)
-        number = max(0.0, float(value))
-        if number <= 0.0:
-            self.controller_feedforward_by_heater.pop(heater_id, None)
-        else:
-            self.controller_feedforward_by_heater[heater_id] = number
-        self.touch()
-
-    def prune_controller_feedforward(self) -> None:
-        heater_ids = {node_id for node_id, node in self.nodes.items() if node.has_heater}
-        self.controller_feedforward_by_heater = {
-            int(heater_id): max(0.0, float(value))
-            for heater_id, value in self.controller_feedforward_by_heater.items()
-            if int(heater_id) in heater_ids and float(value) > 0.0
-        }
-
     def ordered_node_ids(self) -> list[int]:
         return sorted(self.nodes)
 
@@ -676,10 +654,6 @@ class ThermalGraphModel:
                     for heater_id, value in sorted(row.items(), key=lambda item: int(item[0]))
                 }
                 for sensor_id, row in sorted(self.controller_gain_matrix.items(), key=lambda item: int(item[0]))
-            },
-            "controller_feedforward_by_heater": {
-                str(heater_id): float(value)
-                for heater_id, value in sorted(self.controller_feedforward_by_heater.items(), key=lambda item: int(item[0]))
             },
         }
 
@@ -729,10 +703,6 @@ class ThermalGraphModel:
                 }
                 for sensor_id, row in sorted(self.controller_gain_matrix.items(), key=lambda item: int(item[0]))
             },
-            "controller_feedforward_by_heater": {
-                str(heater_id): float(value)
-                for heater_id, value in sorted(self.controller_feedforward_by_heater.items(), key=lambda item: int(item[0]))
-            },
             "validation_results": data.get("validation_results", {}),
         })
         return data
@@ -753,9 +723,7 @@ class ThermalGraphModel:
             if edge.source in model.nodes and edge.target in model.nodes:
                 model.set_edge(edge.source, edge.target, edge.Gij_W_K, edge.source_metadata)
         model.controller_gain_matrix = _parse_controller_gain_matrix(data.get("controller_gain_matrix"))
-        model.controller_feedforward_by_heater = _parse_feedforward_vector(data.get("controller_feedforward_by_heater"))
         model.prune_controller_gain_matrix()
-        model.prune_controller_feedforward()
         return model
 
     @classmethod
@@ -764,7 +732,6 @@ class ThermalGraphModel:
         model = cls(metadata=metadata, material_library=data.get("material_library") or {})
         model.octree_graph_data = dict(data)
         model.controller_gain_matrix = _parse_controller_gain_matrix(data.get("controller_gain_matrix"))
-        model.controller_feedforward_by_heater = _parse_feedforward_vector(data.get("controller_feedforward_by_heater"))
         for raw_node in data.get("graph_nodes", []):
             node = NodeProperties.from_dict(dict(raw_node))
             model.add_node(node)
@@ -784,7 +751,6 @@ class ThermalGraphModel:
                     warnings=edge.warnings,
                 )
         model.prune_controller_gain_matrix()
-        model.prune_controller_feedforward()
         return model
 
     def _check_unique(self, node_id: int, coord: tuple[int, int, int]) -> None:
@@ -823,21 +789,6 @@ def _parse_controller_gain_matrix(raw: Any) -> dict[int, dict[int, float]]:
                 row[heater_id] = value
         if row:
             parsed[sensor_id] = row
-    return parsed
-
-
-def _parse_feedforward_vector(raw: Any) -> dict[int, float]:
-    if not isinstance(raw, dict):
-        return {}
-    parsed: dict[int, float] = {}
-    for raw_heater_id, raw_value in raw.items():
-        try:
-            heater_id = int(raw_heater_id)
-            value = max(0.0, float(raw_value))
-        except (TypeError, ValueError):
-            continue
-        if value > 0.0:
-            parsed[heater_id] = value
     return parsed
 
 

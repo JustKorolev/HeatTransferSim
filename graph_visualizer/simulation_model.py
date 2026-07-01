@@ -13,7 +13,7 @@ from scipy.sparse import bmat, csr_matrix, diags
 from scipy.sparse.linalg import expm_multiply
 
 from .mimo_controller import (
-    allocate_bounded_weighted_least_squares,
+    allocate_thermal_rate_qp,
     weighted_rms_error,
 )
 from .models import ThermalGraphModel
@@ -76,6 +76,7 @@ class PreparedSimulation:
     controller_warnings: list[str] = field(default_factory=list)
     controller_last_power_by_heater: dict[int, float] = field(default_factory=dict)
     controller_allocator_diagnostics: dict[str, Any] = field(default_factory=dict)
+    controller_dynamic_gain_cache: dict[str, Any] = field(default_factory=dict)
     history: list[SimulationState] = field(default_factory=list)
     history_index: int = 0
 
@@ -109,14 +110,22 @@ class PreparedSimulation:
         self.history_index = 0
 
     def set_uniform_temperature(self, temperature_K: float) -> None:
+        uniform = np.full(len(self.node_ids), float(temperature_K), dtype=float)
+        self.set_temperatures(uniform)
+
+    def set_temperatures(self, temperatures_K: np.ndarray) -> None:
+        temperatures = np.asarray(temperatures_K, dtype=float).reshape(-1)
+        if temperatures.shape[0] != len(self.node_ids):
+            raise ValueError(
+                f"Expected {len(self.node_ids)} temperatures, got {temperatures.shape[0]}."
+            )
         self._reset_pid_states()
         self.reset_controller_integrators()
-        uniform = np.full(len(self.node_ids), float(temperature_K), dtype=float)
-        self.z = np.concatenate([uniform, np.array([1.0])])
+        self.z = np.concatenate([temperatures, np.array([1.0])])
         self.history = [
             SimulationState(
                 0.0,
-                uniform.copy(),
+                temperatures.copy(),
                 self._pid_state_snapshot(),
                 dict(self.controller_integrators),
                 dict(self.controller_y_prev),
@@ -137,10 +146,12 @@ class PreparedSimulation:
         self.controller_weighted_rms_error = None
         self.controller_last_power_by_heater = {}
         self.controller_allocator_diagnostics = {}
+        self.controller_dynamic_gain_cache = {}
 
     def mark_controller_stale(self) -> None:
         self.controller_last_power_by_heater = {}
         self.controller_allocator_diagnostics = {}
+        self.controller_dynamic_gain_cache = {}
 
     def snapshot_state(self) -> PreparedSimulationSnapshot:
         return PreparedSimulationSnapshot(
@@ -308,7 +319,7 @@ class PreparedSimulation:
             self.z = expm(A_aug * float(self.params.dt_s)) @ self.z
         self.z[-1] = 1.0
 
-    def _radiation_source_vector(self) -> np.ndarray:
+    def _radiation_source_vector(self, temperatures_K: np.ndarray | None = None) -> np.ndarray:
         if (
             self.radiation_coeff_W_K4 is None
             or self.inv_C is None
@@ -318,10 +329,25 @@ class PreparedSimulation:
         coeff = np.asarray(self.radiation_coeff_W_K4, dtype=float).reshape(-1)
         if not np.any(coeff > 0.0):
             return np.zeros(len(self.node_ids), dtype=float)
-        temperatures = np.asarray(self.temperatures_K, dtype=float).reshape(-1)
+        temperatures = (
+            np.asarray(self.temperatures_K, dtype=float).reshape(-1)
+            if temperatures_K is None
+            else np.asarray(temperatures_K, dtype=float).reshape(-1)
+        )
         ambient = float(self.params.T_env_K)
         radiation_power = coeff * (ambient**4 - temperatures**4)
         return np.asarray(self.inv_C, dtype=float) * radiation_power
+
+    def _thermal_rhs(self, temperatures_K: np.ndarray, heater_power: np.ndarray) -> np.ndarray:
+        if self.A is None or self.base_b is None or self.inv_C is None:
+            return np.zeros(len(self.node_ids), dtype=float)
+        temperatures = np.asarray(temperatures_K, dtype=float).reshape(-1)
+        powers = np.asarray(heater_power, dtype=float).reshape(-1)
+        if powers.shape != temperatures.shape:
+            raise ValueError(f"Heater power vector length {powers.shape} does not match temperatures {temperatures.shape}.")
+        return np.asarray(self.A @ temperatures, dtype=float).reshape(-1) + np.asarray(self.base_b, dtype=float) + (
+            np.asarray(self.inv_C, dtype=float) * powers
+        ) + self._radiation_source_vector(temperatures)
 
     def _reset_pid_states(self) -> None:
         if self.model is None:
@@ -469,8 +495,10 @@ class PreparedSimulation:
             self.controller_allocator_diagnostics = {
                 "active_sensor_count": len(sensor_ids),
                 "active_heater_count": len(heater_ids),
-                "virtual_command_norm": 0.0,
+                "rate_command_norm": 0.0,
                 "heater_command_norm": 0.0,
+                "natural_dTdt_norm": 0.0,
+                "predicted_dTdt_residual_norm": 0.0,
                 "allocation_residual_norm": 0.0,
                 "bounds_active": False,
                 "solver_success": False,
@@ -512,8 +540,7 @@ class PreparedSimulation:
         )
         rms = weighted_rms_error(errors, weights)
         self.controller_weighted_rms_error = rms
-        if update_state:
-            self._update_controller_mode(rms)
+        mode_changed = self._update_controller_mode(rms) if update_state else False
 
         dt = max(float(self.params.dt_s), 1.0e-12)
         lambda_orders = np.array(
@@ -530,27 +557,28 @@ class PreparedSimulation:
             ],
             dtype=float,
         )
+        previous_error_history = {} if mode_changed else self.controller_error_history
         candidate_error_history = {
             int(sensor_id): tuple(
-                [float(value) for value in self.controller_error_history.get(int(sensor_id), ())]
+                [float(value) for value in previous_error_history.get(int(sensor_id), ())]
                 + [float(error)]
             )
             for sensor_id, error in zip(sensor_ids, errors)
         }
         eta = np.array(
             [
-                max(
-                    0.0,
-                    _fractional_integral(
-                        candidate_error_history[int(sensor_id)],
-                        dt,
-                        float(lambda_order),
-                    ),
+                _fractional_integral(
+                    candidate_error_history[int(sensor_id)],
+                    dt,
+                    float(lambda_order),
                 )
                 for sensor_id, lambda_order in zip(sensor_ids, lambda_orders)
             ],
             dtype=float,
         )
+        integral_abs_max = max(0.0, float(getattr(self.params, "mimo_integral_abs_max", 1.0e6)))
+        if integral_abs_max > 0.0:
+            eta = np.clip(eta, -integral_abs_max, integral_abs_max)
         error_derivative = np.array(
             [
                 _fractional_derivative(
@@ -583,71 +611,115 @@ class PreparedSimulation:
             [max(0.0, float(getattr(self.model.nodes[sensor_id], kd_key, 0.0))) for sensor_id in sensor_ids],
             dtype=float,
         )
-        virtual_power = Kp * errors + Ki * eta + Kd * error_derivative
-        virtual_power = np.maximum(0.0, virtual_power)
+        v_cmd = Kp * errors + Ki * eta + Kd * error_derivative
+        v_abs_max = max(0.0, float(getattr(self.params, "mimo_v_cmd_abs_max_K_per_s", 0.25)))
+        if v_abs_max > 0.0:
+            v_cmd = np.clip(v_cmd, -v_abs_max, v_abs_max)
 
-        G = np.array(
-            [
-                [self.model.controller_gain(sensor_id, heater_id) for heater_id in heater_ids]
-                for sensor_id in sensor_ids
-            ],
-            dtype=float,
-        )
         maxima = np.array(
             [_controller_heater_max_power(self.model.nodes[heater_id], self.params) for heater_id in heater_ids],
             dtype=float,
         )
-        u_nominal = np.zeros(len(heater_ids), dtype=float)
-        if bool(getattr(self.params, "heat_loss_feedforward_enabled", False)):
-            gamma = max(0.0, float(getattr(self.params, "heat_loss_feedforward_gain", 1.0)))
-            u_nominal = np.array(
-                [
-                    gamma * max(0.0, float(self.model.controller_feedforward(int(heater_id))))
-                    for heater_id in heater_ids
-                ],
-                dtype=float,
-            )
-            u_nominal = np.clip(np.where(np.isfinite(u_nominal), u_nominal, 0.0), 0.0, maxima)
         u_prev = np.array(
             [float(self.controller_last_power_by_heater.get(int(heater_id), 0.0)) for heater_id in heater_ids],
             dtype=float,
         )
-        allocation = allocate_bounded_weighted_least_squares(
-            G,
-            virtual_power,
+        slew_rate = max(0.0, float(getattr(self.params, "mimo_heater_slew_rate_W_per_s", 0.0)))
+        max_delta_power = np.full(len(heater_ids), slew_rate * dt, dtype=float) if slew_rate > 0.0 else None
+        natural_power = np.zeros(len(self.node_ids), dtype=float)
+        natural_power -= _cryocooler_power_vector(self.model, self.node_ids, self.temperatures_K, self.params)
+        natural_dTdt_full = self._thermal_rhs(self.temperatures_K, natural_power)
+        sensor_rows = np.array([node_index[sensor_id] for sensor_id in sensor_ids], dtype=int)
+        heater_rows = np.array([node_index[heater_id] for heater_id in heater_ids], dtype=int)
+        natural_dTdt = natural_dTdt_full[sensor_rows]
+        B_dyn = self._mimo_dynamic_gain_matrix(
+            sensor_ids,
+            heater_ids,
+            sensor_rows,
+            heater_rows,
+        )
+        allocation = allocate_thermal_rate_qp(
+            B_dyn,
+            natural_dTdt,
+            v_cmd,
             weights,
             maxima,
             u_prev,
-            float(self.params.mimo_lambda_regularization),
-            float(self.params.mimo_rho_smoothness),
-            float(self.params.mimo_coupling_cutoff_fraction),
-            u_nominal,
+            float(getattr(self.params, "mimo_lambda_u", 1.0e-3)),
+            float(getattr(self.params, "mimo_rho_du", 0.0)),
+            max_delta_power,
         )
         u = np.asarray(allocation.u, dtype=float).reshape(-1)
         u = np.clip(np.where(np.isfinite(u), u, 0.0), 0.0, maxima)
         for heater_id, command in zip(heater_ids, u):
             powers[node_index[heater_id]] += float(command)
+        achieved_dTdt = natural_dTdt + B_dyn @ u
+        residual = achieved_dTdt - v_cmd
         self.controller_warnings = list(allocation.warnings)
         self.controller_allocator_diagnostics = {
             "active_sensor_count": len(sensor_ids),
             "active_heater_count": len(heater_ids),
-            "virtual_command_norm": float(np.linalg.norm(virtual_power)),
+            "rate_command_norm": float(np.linalg.norm(v_cmd)),
             "heater_command_norm": float(np.linalg.norm(u)),
-            "feedforward_command_norm": float(np.linalg.norm(u_nominal)),
-            "allocation_residual_norm": float(np.linalg.norm(allocation.G_thresholded @ (u - u_nominal) - virtual_power)),
+            "natural_dTdt_norm": float(np.linalg.norm(natural_dTdt)),
+            "predicted_dTdt_norm": float(np.linalg.norm(achieved_dTdt)),
+            "predicted_dTdt_residual_norm": float(np.linalg.norm(residual)),
+            "allocation_residual_norm": float(np.linalg.norm(residual)),
             "target_residual_norm": float(allocation.residual_norm),
             "bounds_active": bool(allocation.bounds_active),
             "solver_success": bool(allocation.solver_success),
             "solver_message": str(allocation.solver_message),
+            "lambda_u": float(getattr(self.params, "mimo_lambda_u", 1.0e-3)),
+            "rho_du": float(getattr(self.params, "mimo_rho_du", 0.0)),
+            "slew_rate_limit_W_per_s": float(slew_rate),
+            "slew_delta_limit_W": float(slew_rate * dt) if slew_rate > 0.0 else 0.0,
+            "v_cmd_min_K_per_s": float(np.min(v_cmd)) if v_cmd.size else 0.0,
+            "v_cmd_max_K_per_s": float(np.max(v_cmd)) if v_cmd.size else 0.0,
+            "natural_dTdt_s": [float(value) for value in natural_dTdt],
+            "v_cmd_s": [float(value) for value in v_cmd],
+            "achieved_predicted_dTdt_s": [float(value) for value in achieved_dTdt],
+            "residual_s": [float(value) for value in residual],
+            "heater_commands_W": [float(value) for value in u],
+            "heater_at_lower_bound": [bool(value <= 1.0e-9) for value in u],
+            "heater_at_upper_bound": [bool(value >= max(max_power - 1.0e-9, 0.0)) for value, max_power in zip(u, maxima)],
         }
         if update_state:
+            committed_error_history = candidate_error_history
+            if bool(getattr(self.params, "mimo_freeze_integral_when_saturated", True)):
+                committed_error_history = {}
+                for row, sensor_id in enumerate(sensor_ids):
+                    relevant = np.abs(B_dyn[row, :]) > 1.0e-12
+                    freeze = False
+                    if np.any(relevant):
+                        if errors[row] < 0.0 and bool(np.all(u[relevant] <= 1.0e-9)):
+                            freeze = True
+                        elif errors[row] > 0.0 and bool(np.all(u[relevant] >= np.maximum(maxima[relevant] - 1.0e-9, 0.0))):
+                            freeze = True
+                    committed_error_history[int(sensor_id)] = (
+                        tuple(float(value) for value in previous_error_history.get(int(sensor_id), ()))
+                        if freeze
+                        else candidate_error_history[int(sensor_id)]
+                    )
+            committed_integrators = np.array(
+                [
+                    _fractional_integral(
+                        committed_error_history[int(sensor_id)],
+                        dt,
+                        float(lambda_order),
+                    )
+                    for sensor_id, lambda_order in zip(sensor_ids, lambda_orders)
+                ],
+                dtype=float,
+            )
+            if integral_abs_max > 0.0:
+                committed_integrators = np.clip(committed_integrators, -integral_abs_max, integral_abs_max)
             self.controller_last_power_by_heater = {
                 int(heater_id): float(command)
                 for heater_id, command in zip(heater_ids, u)
             }
             self.controller_integrators = {
                 int(sensor_id): float(value)
-                for sensor_id, value in zip(sensor_ids, eta)
+                for sensor_id, value in zip(sensor_ids, committed_integrators)
             }
             self.controller_y_prev = {
                 int(sensor_id): float(value)
@@ -657,8 +729,42 @@ class PreparedSimulation:
                 int(sensor_id): float(value)
                 for sensor_id, value in zip(sensor_ids, errors)
             }
-            self.controller_error_history = candidate_error_history
+            self.controller_error_history = committed_error_history
         return powers
+
+    def _mimo_dynamic_gain_matrix(
+        self,
+        sensor_ids: list[int],
+        heater_ids: list[int],
+        sensor_rows: np.ndarray,
+        heater_rows: np.ndarray,
+    ) -> np.ndarray:
+        inv_C = np.asarray(self.inv_C, dtype=float).reshape(-1) if self.inv_C is not None else np.zeros(len(self.node_ids))
+        key = (
+            tuple(int(value) for value in sensor_ids),
+            tuple(int(value) for value in heater_ids),
+            tuple(int(value) for value in sensor_rows),
+            tuple(int(value) for value in heater_rows),
+            tuple(round(float(inv_C[int(row)]), 12) for row in sensor_rows),
+        )
+        cache = self.controller_dynamic_gain_cache
+        if (
+            isinstance(cache, dict)
+            and cache.get("key") == key
+            and "B_dyn" in cache
+        ):
+            return np.asarray(cache["B_dyn"], dtype=float).copy()
+        B_dyn = np.zeros((len(sensor_rows), len(heater_rows)), dtype=float)
+        heater_col_by_row = {int(row): col for col, row in enumerate(heater_rows)}
+        for sensor_index, sensor_row in enumerate(sensor_rows):
+            heater_col = heater_col_by_row.get(int(sensor_row))
+            if heater_col is not None:
+                B_dyn[sensor_index, heater_col] = float(inv_C[int(sensor_row)])
+        self.controller_dynamic_gain_cache = {
+            "key": key,
+            "B_dyn": B_dyn.copy(),
+        }
+        return B_dyn
 
     def _update_controller_mode(self, weighted_rms: float) -> bool:
         previous_mode = self.controller_mode
@@ -982,7 +1088,7 @@ def _controlled_heater_power_vector(
                 mu_order,
                 zero_initial_integer_order=True,
             )
-            candidate_integral = max(0.0, _fractional_integral(candidate_history, dt, lambda_order))
+            candidate_integral = _fractional_integral(candidate_history, dt, lambda_order)
             raw_output = (
                 float(control.pid.kp) * error
                 + float(control.pid.ki) * candidate_integral

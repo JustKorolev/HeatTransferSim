@@ -15,10 +15,9 @@ except Exception:  # pragma: no cover
 
 from .graph_io import load_graph_folder, save_graph_folder
 from .matrix_builder import build_matrices, refresh_geometry_edges, refresh_radiation_from_exposed_faces
-from .mimo_controller import allocate_bounded_weighted_least_squares
 from .models import EdgeMode, ThermalGraphModel
 from .pyvista_widget import GraphPyVistaWidget
-from .simulation_model import PreparedSimulation, _controller_sensor_weight, prepare_simulation, save_trajectory
+from .simulation_model import PreparedSimulation, prepare_simulation, save_trajectory
 from .simulation_parameters import (
     SimulationParameters,
     apply_initial_temperature_parameter_payload,
@@ -27,7 +26,6 @@ from .simulation_parameters import (
     save_simulation_parameters,
 )
 from .sys_id_artifacts import (
-    compare_sys_id_gain_matrices,
     list_sys_id_gain_matrices,
     load_sys_id_gain_matrix,
     save_sys_id_gain_matrix,
@@ -202,24 +200,24 @@ class HeatTransferSimulationTab:
             self._add_double_parameter(cooler_form, name, label, minimum, maximum, step)
         form.addRow(cooler_box)
 
-        mimo_box, mimo_form = self._section("MIMO PID")
+        mimo_box, mimo_form = self._section("MIMO Thermal-Rate QP")
         for name, label, minimum, maximum, step in (
             ("mimo_hold_threshold_K", "enter hold below K", 0.0, 1.0e6, 0.1),
             ("mimo_coarse_threshold_K", "return coarse above K", 0.0, 1.0e6, 0.1),
-            ("mimo_coupling_cutoff_fraction", "gain cutoff fraction", 0.0, 1.0, 0.01),
-            ("mimo_lambda_regularization", "allocator lambda", 0.0, 1.0e9, 0.001),
-            ("mimo_rho_smoothness", "allocator smoothness rho", 0.0, 1.0e9, 0.01),
             ("mimo_default_heater_max_power_W", "default heater max W", 0.0, 1.0e9, 1.0),
-            ("heat_loss_feedforward_gain", "feedforward gamma", 0.0, 1.0e6, 0.1),
-            ("heat_loss_feedforward_regularization", "feedforward lambda", 0.0, 1.0e9, 0.001),
+            ("mimo_lambda_u", "lambda_u heater effort", 0.0, 1.0e9, 0.001),
+            ("mimo_rho_du", "rho_du power change", 0.0, 1.0e9, 0.01),
+            ("mimo_heater_slew_rate_W_per_s", "hard slew W/s", 0.0, 1.0e9, 1.0),
+            ("mimo_v_cmd_abs_max_K_per_s", "max rate cmd K/s", 0.0, 1.0e9, 0.01),
+            ("mimo_integral_abs_max", "integral abs max", 0.0, 1.0e12, 1.0),
         ):
             self._add_double_parameter(mimo_form, name, label, minimum, maximum, step)
-        self.inputs["heat_loss_feedforward_enabled"] = self._checkbox(
-            "Enable heat loss feedforward",
-            self.params.heat_loss_feedforward_enabled,
+        self.inputs["mimo_freeze_integral_when_saturated"] = self._checkbox(
+            "Freeze integral when saturated",
+            self.params.mimo_freeze_integral_when_saturated,
             self._handle_parameter_change,
         )
-        mimo_form.addRow(self.inputs["heat_loss_feedforward_enabled"])
+        mimo_form.addRow(self.inputs["mimo_freeze_integral_when_saturated"])
         form.addRow(mimo_box)
 
         display_box, display_form = self._section("Display")
@@ -308,7 +306,7 @@ class HeatTransferSimulationTab:
         self.sys_id_uniform_baseline = self._checkbox("Start from uniform baseline temperature", True)
         for label, widget in (
             ("step power Delta P W", self.sys_id_step_power),
-            ("global system T K", self.sys_id_global_temperature_K),
+            ("background T K", self.sys_id_global_temperature_K),
             ("experiment duration s", self.sys_id_duration_s),
             ("baseline averaging window s", self.sys_id_baseline_window_s),
             ("final averaging window s", self.sys_id_final_window_s),
@@ -333,64 +331,6 @@ class HeatTransferSimulationTab:
         sysid_form.addRow("progress", self.sys_id_progress_label)
         sysid_form.addRow(self.sys_id_status_label)
         form.addRow(box)
-
-        compare_box, compare_form = self._section("Compare Sys ID Matrices")
-        self.sys_id_compare_baseline_combo = self.QtWidgets.QComboBox()
-        self.sys_id_compare_target_combo = self.QtWidgets.QComboBox()
-        compare_refresh = self.QtWidgets.QPushButton("Refresh")
-        compare_refresh.clicked.connect(lambda: self._refresh_sys_id_matrix_list())
-        compare_button = self.QtWidgets.QPushButton("Compare")
-        compare_button.clicked.connect(self._compare_sys_id_matrices)
-        compare_row = self.QtWidgets.QHBoxLayout()
-        compare_row.addWidget(compare_button)
-        compare_row.addWidget(compare_refresh)
-        compare_form.addRow("baseline", self.sys_id_compare_baseline_combo)
-        compare_form.addRow("comparison", self.sys_id_compare_target_combo)
-        compare_form.addRow(compare_row)
-        self.sys_id_compare_metrics_label = self.QtWidgets.QLabel("Select two saved sys ID runs.")
-        self.sys_id_compare_metrics_label.setWordWrap(True)
-        compare_form.addRow(self.sys_id_compare_metrics_label)
-        self.sys_id_compare_table = self.QtWidgets.QTableWidget(0, 0)
-        self.sys_id_compare_table.setEditTriggers(self.QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.sys_id_compare_table.setSelectionBehavior(self.QtWidgets.QAbstractItemView.SelectItems)
-        self.sys_id_compare_table.setMaximumHeight(260)
-        compare_form.addRow(self.sys_id_compare_table)
-        form.addRow(compare_box)
-
-        ff_box, ff_form = self._section("Heat Loss Feedforward Sys ID")
-        self.q_loss_duration_s = self._double_spin(0.0, 1.0e9, 300.0, 10.0)
-        self.q_loss_sample_interval_s = self._double_spin(0.0, 1.0e9, 1.0, 0.1)
-        for label, widget in (
-            ("q_loss sys ID duration s", self.q_loss_duration_s),
-            ("sampling interval s", self.q_loss_sample_interval_s),
-        ):
-            ff_form.addRow(label, widget)
-        ff_buttons = self.QtWidgets.QHBoxLayout()
-        self.run_q_loss_sys_id_button = self.QtWidgets.QPushButton("Run Heat Loss Sys ID")
-        self.run_q_loss_sys_id_button.clicked.connect(self.run_heat_loss_feedforward_sys_id)
-        self.apply_q_loss_feedforward_button = self.QtWidgets.QPushButton("Apply Feedforward")
-        self.apply_q_loss_feedforward_button.clicked.connect(self.apply_heat_loss_feedforward)
-        ff_buttons.addWidget(self.run_q_loss_sys_id_button)
-        ff_buttons.addWidget(self.apply_q_loss_feedforward_button)
-        ff_form.addRow(ff_buttons)
-        self.q_loss_status_label = self.QtWidgets.QLabel("Idle.")
-        self.q_loss_status_label.setWordWrap(True)
-        ff_form.addRow("status", self.q_loss_status_label)
-        self.q_loss_sensor_table = self.QtWidgets.QTableWidget(0, 6)
-        self.q_loss_sensor_table.setHorizontalHeaderLabels(
-            ["sensor/cell", "setpoint K", "C J/K", "slope K/s", "q_loss W", "weight"]
-        )
-        self.q_loss_sensor_table.verticalHeader().setVisible(False)
-        self.q_loss_sensor_table.setEditTriggers(self.QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.q_loss_sensor_table.setMaximumHeight(180)
-        ff_form.addRow("sensor results", self.q_loss_sensor_table)
-        self.q_loss_heater_table = self.QtWidgets.QTableWidget(0, 4)
-        self.q_loss_heater_table.setHorizontalHeaderLabels(["heater/cell", "max W", "u_ff W", "bound"])
-        self.q_loss_heater_table.verticalHeader().setVisible(False)
-        self.q_loss_heater_table.setMaximumHeight(180)
-        ff_form.addRow("heater feedforward", self.q_loss_heater_table)
-        self.q_loss_last_result: dict[str, Any] | None = None
-        form.addRow(ff_box)
 
     def refresh_graph_list(self) -> None:
         self.graph_combo.clear()
@@ -419,7 +359,6 @@ class HeatTransferSimulationTab:
                 if selected is not None and info.path == selected:
                     target_index = self.sys_id_matrix_combo.count() - 1
             self.sys_id_matrix_combo.setCurrentIndex(target_index)
-            self._refresh_sys_id_compare_combos(infos)
         finally:
             self._refreshing_sys_id_matrix_combo = False
 
@@ -430,41 +369,6 @@ class HeatTransferSimulationTab:
         if not data:
             return None
         return Path(str(data))
-
-    def _refresh_sys_id_compare_combos(self, infos: list[Any]) -> None:
-        if not hasattr(self, "sys_id_compare_baseline_combo"):
-            return
-        previous_baseline = self._combo_path(self.sys_id_compare_baseline_combo)
-        previous_target = self._combo_path(self.sys_id_compare_target_combo)
-        for combo in (self.sys_id_compare_baseline_combo, self.sys_id_compare_target_combo):
-            combo.clear()
-            for info in infos:
-                label = info.name
-                if info.created_at:
-                    label = f"{info.name} ({info.created_at})"
-                combo.addItem(label, str(info.path))
-        self._restore_combo_path(self.sys_id_compare_baseline_combo, previous_baseline, default_index=0)
-        self._restore_combo_path(
-            self.sys_id_compare_target_combo,
-            previous_target,
-            default_index=1 if self.sys_id_compare_target_combo.count() > 1 else 0,
-        )
-
-    def _combo_path(self, combo: Any) -> Path | None:
-        data = combo.currentData()
-        return Path(str(data)) if data else None
-
-    def _restore_combo_path(self, combo: Any, path: Path | None, default_index: int = 0) -> None:
-        if combo.count() == 0:
-            return
-        target = max(0, min(int(default_index), combo.count() - 1))
-        if path is not None:
-            for index in range(combo.count()):
-                data = combo.itemData(index)
-                if data and Path(str(data)) == path:
-                    target = index
-                    break
-        combo.setCurrentIndex(target)
 
     def _handle_sys_id_matrix_selection(self, *_: Any) -> None:
         if self._refreshing_sys_id_matrix_combo:
@@ -487,79 +391,6 @@ class HeatTransferSimulationTab:
             self._status(f"Using saved G matrix '{run_path.name}'.")
         except Exception as exc:
             self._status(f"Could not load saved G matrix: {exc}", True)
-
-    def _compare_sys_id_matrices(self) -> None:
-        baseline_path = self._combo_path(self.sys_id_compare_baseline_combo)
-        target_path = self._combo_path(self.sys_id_compare_target_combo)
-        if baseline_path is None or target_path is None:
-            self.sys_id_compare_metrics_label.setText("Select two saved sys ID runs.")
-            self.sys_id_compare_table.setRowCount(0)
-            self.sys_id_compare_table.setColumnCount(0)
-            return
-        try:
-            comparison = compare_sys_id_gain_matrices(baseline_path, target_path)
-        except Exception as exc:
-            self.sys_id_compare_metrics_label.setText(f"Could not compare matrices: {exc}")
-            return
-        metrics = comparison["metrics"]
-        self.sys_id_compare_metrics_label.setText(
-            f"baseline: {comparison['baseline'].name}\n"
-            f"comparison: {comparison['comparison'].name}\n"
-            f"max |Delta G| = {metrics['max_abs_delta']:.6g} K/W\n"
-            f"mean |Delta G| = {metrics['mean_abs_delta']:.6g} K/W\n"
-            f"relative Frobenius error = {self._fmt_optional_float(metrics['relative_frobenius_error'])}\n"
-            f"matrix correlation = {self._fmt_optional_float(metrics['correlation'])}"
-        )
-        self._populate_sys_id_compare_table(comparison)
-
-    def _populate_sys_id_compare_table(self, comparison: dict[str, Any]) -> None:
-        sensor_ids = [int(value) for value in comparison["sensor_ids"]]
-        heater_ids = [int(value) for value in comparison["heater_ids"]]
-        delta = np.asarray(comparison["delta_G"], dtype=float)
-        relative = np.asarray(comparison["relative_delta"], dtype=float)
-        table = self.sys_id_compare_table
-        table.setRowCount(len(sensor_ids))
-        table.setColumnCount(len(heater_ids))
-        table.setVerticalHeaderLabels([f"S{sensor_id}" for sensor_id in sensor_ids])
-        table.setHorizontalHeaderLabels([f"H{heater_id}" for heater_id in heater_ids])
-        max_abs_delta = float(np.max(np.abs(delta))) if delta.size else 0.0
-        for row, sensor_id in enumerate(sensor_ids):
-            for col, heater_id in enumerate(heater_ids):
-                baseline_value = float(comparison["baseline_G"][row, col])
-                comparison_value = float(comparison["comparison_G"][row, col])
-                value = float(delta[row, col])
-                rel = float(relative[row, col])
-                if abs(baseline_value) <= 1.0e-12:
-                    rel_text = "new" if abs(comparison_value) > 1.0e-12 else "0.00%"
-                else:
-                    rel_text = f"{rel * 100.0:.2f}%"
-                item = self.QtWidgets.QTableWidgetItem(f"{value:.3g}\n({rel_text})")
-                item.setToolTip(
-                    f"sensor {sensor_id}, heater {heater_id}\n"
-                    f"baseline G = {baseline_value:.6g} K/W\n"
-                    f"comparison G = {comparison_value:.6g} K/W\n"
-                    f"Delta G = {value:.6g} K/W\n"
-                    f"relative Delta = {rel_text}"
-                )
-                item.setBackground(self._delta_brush(value, max_abs_delta))
-                table.setItem(row, col, item)
-        table.resizeColumnsToContents()
-        table.resizeRowsToContents()
-
-    def _delta_brush(self, value: float, max_abs_delta: float) -> Any:
-        if max_abs_delta <= 0.0:
-            return self.QtGui.QBrush(self.QtGui.QColor(245, 245, 245))
-        intensity = min(1.0, abs(float(value)) / max_abs_delta)
-        base = 255 - int(110 * intensity)
-        if value >= 0.0:
-            color = self.QtGui.QColor(base, 230, base)
-        else:
-            color = self.QtGui.QColor(235, base, base)
-        return self.QtGui.QBrush(color)
-
-    def _fmt_optional_float(self, value: float) -> str:
-        number = float(value)
-        return f"{number:.6g}" if np.isfinite(number) else "n/a"
 
     def _tagged_heater_node_ids(self) -> set[int]:
         if self.model is None:
@@ -956,7 +787,7 @@ class HeatTransferSimulationTab:
         original_snapshot = self.prepared.snapshot_state()
         global_temperature_K = self._sys_id_uniform_baseline_temperature()
         if self.sys_id_uniform_baseline.isChecked():
-            self.prepared.set_uniform_temperature(global_temperature_K)
+            self.prepared.set_temperatures(self._sys_id_baseline_temperatures(sensors, global_temperature_K))
             self._update_after_sys_id_step()
         global_snapshot = self.prepared.snapshot_state()
         self.sys_id_state = {
@@ -979,6 +810,12 @@ class HeatTransferSimulationTab:
             "uniform_baseline": bool(self.sys_id_uniform_baseline.isChecked()),
             "keep_cryocooler": bool(self.sys_id_keep_cryocooler_active.isChecked()),
             "global_temperature_K": float(global_temperature_K),
+            "background_temperature_K": float(global_temperature_K),
+            "sensor_setpoint_baseline": bool(self.sys_id_uniform_baseline.isChecked()),
+            "sensor_setpoints_K": [
+                float(getattr(self.model.nodes[sensor_id], "controller_setpoint_K", global_temperature_K))
+                for sensor_id in sensors
+            ],
             "requested_delta_power": float(self.sys_id_step_power.value()),
             "duration_s": max(0.0, float(self.sys_id_duration_s.value())),
             "baseline_window_s": max(0.0, float(self.sys_id_baseline_window_s.value())),
@@ -1150,215 +987,6 @@ class HeatTransferSimulationTab:
         self.sys_id_status_label.setText(status)
         self._status(message, cancelled)
 
-    def run_heat_loss_feedforward_sys_id(self) -> None:
-        self.pause()
-        if self.prepared is None:
-            self.initialize_simulation()
-        if self.prepared is None or self.model is None:
-            self._status("Initialize a simulation before running heat loss feedforward sys ID.", True)
-            return
-        sensors = self._ordered_sys_id_sensors()
-        heaters = self._ordered_sys_id_heaters()
-        if not sensors or not heaters:
-            self._status("Cannot run heat loss sys ID: tag at least one active sensor and heater.", True)
-            return
-        self.params = self._read_params()
-        self.prepared.params = self.params
-        try:
-            result = self._run_heat_loss_feedforward_experiment(sensors, heaters)
-        except Exception as exc:
-            self.q_loss_status_label.setText(f"Heat loss sys ID failed: {exc}")
-            self._status(f"Heat loss sys ID failed: {exc}", True)
-            return
-        if not result.get("solver_success", False):
-            message = str(result.get("solver_message", "feedforward QP failed"))
-            self.q_loss_status_label.setText(f"Heat loss sys ID did not update feedforward: {message}")
-            self._status(f"Heat loss feedforward QP failed: {message}", True)
-            return
-        self.q_loss_last_result = result
-        self._populate_q_loss_tables(result)
-        self.q_loss_status_label.setText(
-            f"Complete. Fit {len(result['sensor_ids'])} sensor(s), solved {len(result['heater_ids'])} heater command(s)."
-        )
-        self._status("Heat loss feedforward sys ID complete.")
-
-    def _run_heat_loss_feedforward_experiment(self, sensors: list[int], heaters: list[int]) -> dict[str, Any]:
-        assert self.prepared is not None and self.model is not None
-        duration_s = max(0.0, float(self.q_loss_duration_s.value()))
-        sample_interval_s = max(float(self.q_loss_sample_interval_s.value()), float(self.params.dt_s))
-        dt = max(float(self.params.dt_s), 1.0e-12)
-        node_index = {int(node_id): row for row, node_id in enumerate(self.prepared.node_ids)}
-        missing = [sensor_id for sensor_id in sensors if sensor_id not in node_index]
-        if missing:
-            raise ValueError(f"{len(missing)} sensor cell(s) are missing from the simulation node order.")
-        C_all = np.asarray(self.matrices.get("C", []), dtype=float).reshape(-1)
-        if C_all.shape != (len(self.prepared.node_ids),):
-            C_all = np.array(
-                [float(self.model.nodes[int(node_id)].C_J_K) for node_id in self.prepared.node_ids],
-                dtype=float,
-            )
-        capacitance = np.array([float(C_all[node_index[sensor_id]]) for sensor_id in sensors], dtype=float)
-        valid = np.isfinite(capacitance) & (capacitance > 0.0)
-        warnings: list[str] = []
-        if not np.all(valid):
-            warnings.append(f"{int(np.sum(~valid))} sensor cell(s) have invalid capacitance; q_loss set to 0.")
-        B = np.array(
-            [
-                [self.model.controller_gain(sensor_id, heater_id) for heater_id in heaters]
-                for sensor_id in sensors
-            ],
-            dtype=float,
-        )
-        if B.shape != (len(sensors), len(heaters)):
-            raise ValueError(f"B shape {B.shape} does not match {len(sensors)} sensor(s) x {len(heaters)} heater(s).")
-        if not np.any(np.abs(B) > 0.0):
-            raise ValueError("B/G_ctrl is zero; run or select a controller gain sys ID matrix first.")
-        weights = np.array([_controller_sensor_weight(self.model.nodes[sensor_id]) for sensor_id in sensors], dtype=float)
-        maxima = np.array([self._heater_max_power(heater_id) for heater_id in heaters], dtype=float)
-        snapshot = self.prepared.snapshot_state()
-        try:
-            initial = np.full(len(self.prepared.node_ids), 273.15, dtype=float)
-            for sensor_id in sensors:
-                initial[node_index[sensor_id]] = float(getattr(self.model.nodes[sensor_id], "controller_setpoint_K", 293.15))
-            self.prepared.z = np.concatenate([initial, np.array([1.0])])
-            self.prepared.history = []
-            self.prepared.history_index = 0
-            self.prepared.reset_controller_integrators()
-            samples_t: list[float] = []
-            samples_T: list[np.ndarray] = []
-            elapsed = 0.0
-            next_sample = 0.0
-            forced_zero = {int(heater_id): 0.0 for heater_id in heaters}
-            while elapsed <= duration_s + 1.0e-12:
-                if elapsed + 1.0e-12 >= next_sample:
-                    samples_t.append(float(elapsed))
-                    samples_T.append(self._collect_sensor_temperatures(sensors))
-                    next_sample += sample_interval_s
-                if elapsed >= duration_s:
-                    break
-                self.prepared.step_with_forced_heater_powers(forced_zero, keep_cryocoolers_active=False)
-                elapsed += dt
-            if len(samples_t) < 2:
-                raise ValueError("Heat loss sys ID needs at least two samples; increase duration or reduce sample interval.")
-            times = np.asarray(samples_t, dtype=float)
-            temperatures = np.vstack(samples_T)
-        finally:
-            self.prepared.restore_state(snapshot)
-            self._update_after_sys_id_step()
-        slopes = np.zeros(len(sensors), dtype=float)
-        for index in range(len(sensors)):
-            if not valid[index]:
-                continue
-            y = temperatures[:, index]
-            finite = np.isfinite(times) & np.isfinite(y)
-            if int(np.sum(finite)) < 2:
-                warnings.append(f"Sensor {sensors[index]} has fewer than two finite samples; q_loss set to 0.")
-                continue
-            fit = np.polyfit(times[finite], y[finite], 1)
-            slopes[index] = float(fit[0])
-        q_loss = np.where(valid, -capacitance * slopes, 0.0)
-        allocation = allocate_bounded_weighted_least_squares(
-            B,
-            q_loss,
-            weights,
-            maxima,
-            np.zeros(len(heaters), dtype=float),
-            float(self.params.heat_loss_feedforward_regularization),
-            0.0,
-            1.0,
-        )
-        return {
-            "sensor_ids": [int(value) for value in sensors],
-            "heater_ids": [int(value) for value in heaters],
-            "setpoints_K": [float(getattr(self.model.nodes[sensor_id], "controller_setpoint_K", 293.15)) for sensor_id in sensors],
-            "capacitance_J_K": capacitance,
-            "slopes_K_s": slopes,
-            "q_loss_W": q_loss,
-            "weights": weights,
-            "B": B,
-            "max_powers_W": maxima,
-            "u_ff_W": np.asarray(allocation.u, dtype=float),
-            "solver_success": bool(allocation.solver_success),
-            "solver_message": str(allocation.solver_message),
-            "warnings": warnings + list(allocation.warnings),
-            "times_s": times,
-            "temperatures_K": temperatures,
-        }
-
-    def _populate_q_loss_tables(self, result: dict[str, Any]) -> None:
-        sensors = [int(value) for value in result.get("sensor_ids", [])]
-        sensor_table = self.q_loss_sensor_table
-        sensor_table.setRowCount(len(sensors))
-        arrays = {
-            "setpoints_K": np.asarray(result.get("setpoints_K", []), dtype=float),
-            "capacitance_J_K": np.asarray(result.get("capacitance_J_K", []), dtype=float),
-            "slopes_K_s": np.asarray(result.get("slopes_K_s", []), dtype=float),
-            "q_loss_W": np.asarray(result.get("q_loss_W", []), dtype=float),
-            "weights": np.asarray(result.get("weights", []), dtype=float),
-        }
-        for row, sensor_id in enumerate(sensors):
-            values = [
-                str(sensor_id),
-                f"{arrays['setpoints_K'][row]:.6g}",
-                f"{arrays['capacitance_J_K'][row]:.6g}",
-                f"{arrays['slopes_K_s'][row]:.6g}",
-                f"{arrays['q_loss_W'][row]:.6g}",
-                f"{arrays['weights'][row]:.6g}",
-            ]
-            for col, text in enumerate(values):
-                item = self.QtWidgets.QTableWidgetItem(text)
-                item.setFlags(item.flags() & ~self.QtCore.Qt.ItemIsEditable)
-                sensor_table.setItem(row, col, item)
-        heaters = [int(value) for value in result.get("heater_ids", [])]
-        maxima = np.asarray(result.get("max_powers_W", []), dtype=float)
-        u_ff = np.asarray(result.get("u_ff_W", []), dtype=float)
-        heater_table = self.q_loss_heater_table
-        heater_table.setRowCount(len(heaters))
-        for row, heater_id in enumerate(heaters):
-            command = float(u_ff[row])
-            max_power = float(maxima[row])
-            bound = "lower" if command <= 1.0e-9 else "upper" if command >= max(max_power - 1.0e-9, 0.0) else ""
-            values = [str(heater_id), f"{max_power:.6g}", f"{command:.6g}", bound]
-            for col, text in enumerate(values):
-                item = self.QtWidgets.QTableWidgetItem(text)
-                if col != 2:
-                    item.setFlags(item.flags() & ~self.QtCore.Qt.ItemIsEditable)
-                heater_table.setItem(row, col, item)
-
-    def apply_heat_loss_feedforward(self) -> None:
-        if self.model is None:
-            self._status("Load a graph before applying feedforward.", True)
-            return
-        if not hasattr(self, "q_loss_heater_table") or self.q_loss_heater_table.rowCount() <= 0:
-            self._status("Run heat loss sys ID before applying feedforward.", True)
-            return
-        updated = 0
-        for row in range(self.q_loss_heater_table.rowCount()):
-            heater_item = self.q_loss_heater_table.item(row, 0)
-            value_item = self.q_loss_heater_table.item(row, 2)
-            if heater_item is None or value_item is None:
-                continue
-            try:
-                heater_id = int(heater_item.text())
-                value = max(0.0, float(value_item.text()))
-            except ValueError:
-                continue
-            max_power = self._heater_max_power(heater_id)
-            self.model.set_controller_feedforward(heater_id, min(value, max_power))
-            updated += 1
-        self.model.prune_controller_feedforward()
-        if self.prepared is not None:
-            self.prepared.mark_controller_stale()
-        try:
-            if self.folder is not None:
-                save_graph_folder(self.model, self.folder)
-        except Exception as exc:
-            self.q_loss_status_label.setText(f"Applied feedforward but graph save failed: {exc}")
-            self._status(f"Applied feedforward but graph save failed: {exc}", True)
-            return
-        self.q_loss_status_label.setText(f"Applied feedforward to {updated} heater(s).")
-        self._status(f"Applied heat loss feedforward to {updated} heater(s).")
-
     def _ordered_sys_id_sensors(self) -> list[int]:
         if self.model is None:
             return []
@@ -1409,6 +1037,9 @@ class HeatTransferSimulationTab:
             "restore_between": bool(state.get("restore_between", True)),
             "uniform_baseline": bool(state.get("uniform_baseline", True)),
             "global_temperature_K": float(state.get("global_temperature_K", np.nan)),
+            "background_temperature_K": float(state.get("background_temperature_K", np.nan)),
+            "sensor_setpoint_baseline": bool(state.get("sensor_setpoint_baseline", False)),
+            "sensor_setpoints_K": [float(value) for value in state.get("sensor_setpoints_K", [])],
             "keep_cryocooler": bool(state.get("keep_cryocooler", True)),
             "warnings": list(state.get("warnings", [])),
         }
@@ -1436,6 +1067,21 @@ class HeatTransferSimulationTab:
 
     def _sys_id_uniform_baseline_temperature(self) -> float:
         return float(self.sys_id_global_temperature_K.value())
+
+    def _sys_id_baseline_temperatures(self, sensor_ids: list[int], background_temperature_K: float) -> np.ndarray:
+        if self.prepared is None or self.model is None:
+            return np.zeros(0, dtype=float)
+        temperatures = np.full(len(self.prepared.node_ids), float(background_temperature_K), dtype=float)
+        node_index = {int(node_id): row for row, node_id in enumerate(self.prepared.node_ids)}
+        for sensor_id in sensor_ids:
+            row = node_index.get(int(sensor_id))
+            if row is None:
+                continue
+            node = self.model.nodes.get(int(sensor_id))
+            if node is None:
+                continue
+            temperatures[row] = float(getattr(node, "controller_setpoint_K", background_temperature_K))
+        return temperatures
 
     def _sys_id_run_name(self, state: dict[str, Any]) -> str:
         temp = self._name_number(float(state.get("global_temperature_K", 293.15)), precision=2)
@@ -1538,13 +1184,13 @@ class HeatTransferSimulationTab:
             mimo_controller_enabled=self._mimo_controller_should_run(),
             mimo_hold_threshold_K=float(self.inputs["mimo_hold_threshold_K"].value()),
             mimo_coarse_threshold_K=float(self.inputs["mimo_coarse_threshold_K"].value()),
-            mimo_coupling_cutoff_fraction=float(self.inputs["mimo_coupling_cutoff_fraction"].value()),
-            mimo_lambda_regularization=float(self.inputs["mimo_lambda_regularization"].value()),
-            mimo_rho_smoothness=float(self.inputs["mimo_rho_smoothness"].value()),
             mimo_default_heater_max_power_W=float(self.inputs["mimo_default_heater_max_power_W"].value()),
-            heat_loss_feedforward_enabled=bool(self.inputs["heat_loss_feedforward_enabled"].isChecked()),
-            heat_loss_feedforward_gain=float(self.inputs["heat_loss_feedforward_gain"].value()),
-            heat_loss_feedforward_regularization=float(self.inputs["heat_loss_feedforward_regularization"].value()),
+            mimo_lambda_u=float(self.inputs["mimo_lambda_u"].value()),
+            mimo_rho_du=float(self.inputs["mimo_rho_du"].value()),
+            mimo_heater_slew_rate_W_per_s=float(self.inputs["mimo_heater_slew_rate_W_per_s"].value()),
+            mimo_v_cmd_abs_max_K_per_s=float(self.inputs["mimo_v_cmd_abs_max_K_per_s"].value()),
+            mimo_integral_abs_max=float(self.inputs["mimo_integral_abs_max"].value()),
+            mimo_freeze_integral_when_saturated=bool(self.inputs["mimo_freeze_integral_when_saturated"].isChecked()),
             enabled_heater_node_ids=(
                 tuple(sorted(int(node_id) for node_id in self.enabled_heater_node_ids))
                 if self._enabled_io_initialized
@@ -1703,16 +1349,16 @@ class HeatTransferSimulationTab:
                 allocation_text = ""
                 if diagnostics:
                     allocation_text = (
-                        f"\nallocator: sensors={diagnostics.get('active_sensor_count', '?')}, "
+                        f"\nthermal-rate QP: sensors={diagnostics.get('active_sensor_count', '?')}, "
                         f"heaters={diagnostics.get('active_heater_count', '?')}, "
-                        f"||v||={float(diagnostics.get('virtual_command_norm', 0.0)):.4g}, "
+                        f"||v_cmd||={float(diagnostics.get('rate_command_norm', 0.0)):.4g} K/s, "
                         f"||u||={float(diagnostics.get('heater_command_norm', 0.0)):.4g}, "
-                        f"resid={float(diagnostics.get('allocation_residual_norm', 0.0)):.4g}"
+                        f"rate_resid={float(diagnostics.get('predicted_dTdt_residual_norm', 0.0)):.4g} K/s"
                     )
                     if diagnostics.get("bounds_active"):
                         allocation_text += ", bounds active"
                 self.controller_status_label.setText(
-                    f"MIMO mode = {self.prepared.controller_mode}, weighted RMS error = {rms_text}"
+                    f"MIMO thermal-rate QP mode = {self.prepared.controller_mode}, weighted RMS error = {rms_text}"
                     + allocation_text
                     + (f"\n{warnings}" if warnings else "")
                 )
@@ -1917,7 +1563,11 @@ class HeatTransferSimulationTab:
         form.addRow(label, widget)
 
     def _double_spin(self, minimum: float, maximum: float, value: float, step: float) -> Any:
-        widget = self.QtWidgets.QDoubleSpinBox()
+        class NoWheelDoubleSpinBox(self.QtWidgets.QDoubleSpinBox):
+            def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802 - Qt override name.
+                event.ignore()
+
+        widget = NoWheelDoubleSpinBox()
         widget.setDecimals(8)
         widget.setRange(minimum, maximum)
         widget.setSingleStep(step)

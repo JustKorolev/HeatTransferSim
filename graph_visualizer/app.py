@@ -1694,13 +1694,21 @@ class GraphVisualizerApp:
         return widget
 
     def _int_spin(self, minimum: int, maximum: int, value: int) -> Any:
-        widget = self.QtWidgets.QSpinBox()
+        class NoWheelSpinBox(self.QtWidgets.QSpinBox):
+            def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802 - Qt override name.
+                event.ignore()
+
+        widget = NoWheelSpinBox()
         widget.setRange(minimum, maximum)
         widget.setValue(value)
         return widget
 
     def _double_spin(self, minimum: float, maximum: float, value: float, step: float) -> Any:
-        widget = self.QtWidgets.QDoubleSpinBox()
+        class NoWheelDoubleSpinBox(self.QtWidgets.QDoubleSpinBox):
+            def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802 - Qt override name.
+                event.ignore()
+
+        widget = NoWheelDoubleSpinBox()
         widget.setDecimals(8)
         widget.setRange(minimum, maximum)
         widget.setSingleStep(step)

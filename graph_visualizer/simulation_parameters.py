@@ -22,13 +22,13 @@ class SimulationParameters:
     mimo_controller_enabled: bool = False
     mimo_hold_threshold_K: float = 1.0
     mimo_coarse_threshold_K: float = 3.0
-    mimo_coupling_cutoff_fraction: float = 0.95
-    mimo_lambda_regularization: float = 1.0e-3
-    mimo_rho_smoothness: float = 1.0e-2
     mimo_default_heater_max_power_W: float = 30.0
-    heat_loss_feedforward_enabled: bool = False
-    heat_loss_feedforward_gain: float = 1.0
-    heat_loss_feedforward_regularization: float = 1.0e-3
+    mimo_lambda_u: float = 1.0e-3
+    mimo_rho_du: float = 0.0
+    mimo_heater_slew_rate_W_per_s: float = 0.0
+    mimo_v_cmd_abs_max_K_per_s: float = 0.25
+    mimo_integral_abs_max: float = 1.0e6
+    mimo_freeze_integral_when_saturated: bool = True
     enabled_heater_node_ids: tuple[int, ...] | None = None
     enabled_sensor_node_ids: tuple[int, ...] | None = None
     autoscale_temperature: bool = True
@@ -56,7 +56,9 @@ def load_simulation_parameters(path: Path) -> tuple[SimulationParameters, dict[s
         "mimo_Kp_hold",
         "mimo_Ki_hold",
         "mimo_decoupling_lambda",
-        "mimo_heater_slew_rate_W_per_s",
+        "mimo_lambda_regularization",
+        "mimo_rho_smoothness",
+        "mimo_coupling_cutoff_fraction",
         "mimo_control_deadband_K",
         "mimo_hold_control_deadband_K",
         "mimo_negative_error_bleed_per_s",
@@ -116,6 +118,11 @@ def _migrate_legacy_fields(raw: dict[str, Any]) -> dict[str, Any]:
         data["t_final_s"] = data["simulation_duration"]
     if "display_update_interval_ms" not in data and "display_update_interval_ms" in raw:
         data["display_update_interval_ms"] = raw["display_update_interval_ms"]
-    if "mimo_lambda_regularization" not in data and "mimo_decoupling_lambda" in data:
-        data["mimo_lambda_regularization"] = data["mimo_decoupling_lambda"]
+    if "mimo_lambda_u" not in data:
+        if "mimo_lambda_regularization" in data:
+            data["mimo_lambda_u"] = data["mimo_lambda_regularization"]
+        elif "mimo_decoupling_lambda" in data:
+            data["mimo_lambda_u"] = data["mimo_decoupling_lambda"]
+    if "mimo_rho_du" not in data and "mimo_rho_smoothness" in data:
+        data["mimo_rho_du"] = data["mimo_rho_smoothness"]
     return data
