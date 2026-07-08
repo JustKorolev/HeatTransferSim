@@ -14,24 +14,43 @@ from octree_graph.load_gltf import _PLACEHOLDER_IMAGE_URI, _prepare_gltf_for_loa
 
 
 class GltfResourceResolutionTests(unittest.TestCase):
-    def test_mesh_dir_selects_single_gltf_file(self) -> None:
+    def test_mesh_dir_selects_single_glb_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            gltf = root / "Assembly.gltf"
-            gltf.write_text("{}", encoding="utf-8")
+            glb = root / "Assembly.glb"
+            glb.write_bytes(b"glb")
+            args = build_parser().parse_args(["--mesh-dir", str(root), "--graph-name", "test"])
+
+            self.assertEqual(_resolve_gltf_path(args), glb)
+
+    def test_mesh_dir_rejects_gltf_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Assembly.gltf").write_text("{}", encoding="utf-8")
             (root / "Assembly.bin").write_bytes(b"abc")
             args = build_parser().parse_args(["--mesh-dir", str(root), "--graph-name", "test"])
 
-            self.assertEqual(_resolve_gltf_path(args), gltf)
+            with self.assertRaisesRegex(ValueError, "no longer accepted"):
+                _resolve_gltf_path(args)
 
-    def test_mesh_dir_rejects_multiple_gltf_files(self) -> None:
+    def test_mesh_dir_rejects_multiple_glb_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "a.gltf").write_text("{}", encoding="utf-8")
-            (root / "b.gltf").write_text("{}", encoding="utf-8")
+            (root / "a.glb").write_bytes(b"a")
+            (root / "b.glb").write_bytes(b"b")
             args = build_parser().parse_args(["--mesh-dir", str(root), "--graph-name", "test"])
 
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "multiple .glb"):
+                _resolve_gltf_path(args)
+
+    def test_mesh_dir_rejects_gltf_even_when_glb_is_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Assembly.gltf").write_text("{}", encoding="utf-8")
+            (root / "Assembly.glb").write_bytes(b"glb")
+            args = build_parser().parse_args(["--mesh-dir", str(root), "--graph-name", "test"])
+
+            with self.assertRaisesRegex(ValueError, "External-buffer .gltf"):
                 _resolve_gltf_path(args)
 
     def test_cli_module_entrypoint_runs_help(self) -> None:

@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mesh-dir", required=True, help="Directory containing exactly one .gltf/.glb and its .bin resources.")
+    parser.add_argument("--mesh-dir", required=True, help="Directory containing exactly one embedded .glb scene file.")
     parser.add_argument("--materials", default="materials.json")
     parser.add_argument("--graph-name", required=True)
     parser.add_argument("--output-root", default="graphs")
@@ -177,22 +177,38 @@ def _resolve_gltf_path(args: argparse.Namespace) -> Path:
     path = Path(args.mesh_dir)
     if not path.is_dir():
         raise ValueError(f"Expected --mesh-dir to be a directory, got {path}.")
+    gltf_files = sorted(
+        [
+            child
+            for child in path.iterdir()
+            if child.is_file() and child.suffix.lower() == ".gltf"
+        ],
+        key=lambda item: item.name.lower(),
+    )
+    if gltf_files:
+        names = ", ".join(candidate.name for candidate in gltf_files[:8])
+        extra = "" if len(gltf_files) <= 8 else f", ... and {len(gltf_files) - 8} more"
+        raise ValueError(
+            f"Mesh directory {path} contains .gltf file(s): {names}{extra}. "
+            "External-buffer .gltf exports are no longer accepted for octree conversion; "
+            "export exactly one embedded .glb file instead."
+        )
     candidates = sorted(
         [
             child
             for child in path.iterdir()
-            if child.is_file() and child.suffix.lower() in {".gltf", ".glb"}
+            if child.is_file() and child.suffix.lower() == ".glb"
         ],
         key=lambda item: item.name.lower(),
     )
     if not candidates:
-        raise FileNotFoundError(f"No .gltf or .glb file found in mesh directory {path}.")
+        raise FileNotFoundError(f"No .glb file found in mesh directory {path}. Export exactly one embedded .glb.")
     if len(candidates) > 1:
         names = ", ".join(candidate.name for candidate in candidates[:8])
         extra = "" if len(candidates) <= 8 else f", ... and {len(candidates) - 8} more"
         raise ValueError(
-            f"Mesh directory {path} contains multiple .gltf/.glb files: {names}{extra}. "
-            "Keep one mesh scene file in the directory before running the generator."
+            f"Mesh directory {path} contains multiple .glb files: {names}{extra}. "
+            "Keep one embedded .glb scene file in the directory before running the generator."
         )
     return candidates[0]
 

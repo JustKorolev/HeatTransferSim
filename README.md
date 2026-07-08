@@ -83,7 +83,7 @@ select cells in the 3D cuboid view or 2D network view, then edit heater/sensor
 tags and notes. Autosave writes tag changes back to `graph.json` and
 `ui_state.json`.
 
-## Build an octree graph from SolidWorks glTF exports
+## Build an octree graph from SolidWorks GLB exports
 
 ```powershell
 python build_octree_graph.py `
@@ -100,11 +100,12 @@ python build_octree_graph.py `
   --samples-per-cell 9
 ```
 
-The converter assumes glTF coordinates are millimeters, finds the single
-`.gltf`/`.glb` file in `--mesh-dir`, uses glTF material names from the
-`.gltf`/`.bin` export, and reads material properties from the project-level
-`materials.json` file by default. The mesh directory should contain exactly one
-`.gltf` or `.glb` scene file.
+The converter assumes glTF/GLB coordinates are millimeters, finds the single
+embedded `.glb` file in `--mesh-dir`, uses glTF material names from that scene,
+and reads material properties from the project-level `materials.json` file by
+default. The mesh directory must contain exactly one `.glb` scene file.
+External-buffer `.gltf`/`.bin` exports are rejected because missing or mismatched
+buffers can collapse CAD geometry during loading.
 If `materials.xlsx` exists in `--mesh-dir`, it maps SolidWorks part instance
 names to material names. Contact checking is handled separately in Python by
 exact shared voxel faces plus a voxel-surface contact-distance pass.
@@ -137,7 +138,7 @@ W/K, zeros for non-edges, and the Laplacian is built as
 
 Run `tools/ExportAssemblyMaterialsToExcel.bas` from SolidWorks with the assembly
 open to create a two-column workbook. Save it as `materials.xlsx` in the same
-folder as the exported `.gltf`/`.glb` mesh:
+folder as the exported `.glb` mesh:
 
 - `Part Name`: SolidWorks component instance name.
 - `Material Name`: SolidWorks material assigned to that part/configuration.

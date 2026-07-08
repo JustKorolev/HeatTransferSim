@@ -924,6 +924,41 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertTrue(restored.nodes[4].has_cryocooler)
         self.assertTrue(bool(matrices["has_cryocooler"][0]))
 
+    def test_physical_device_octree_node_metadata_is_ignored_on_load(self) -> None:
+        node = NodeProperties.from_dict(
+            {
+                "node_id": 12,
+                "cell_id": "physical_heater_12",
+                "coord": [12, 0, 0],
+                "center_mm": [5.0, 0.0, 0.0],
+                "size_mm": [2.0, 4.0, 4.0],
+                "level": -1,
+                "node_type": "physical_heater",
+                "component_name": "heater_strip",
+                "material_name": "Copper",
+                "mass_kg": 0.01,
+                "C_J_K": 3.85,
+                "tags": {
+                    "heater": True,
+                    "sensor": True,
+                    "heater_id": 12,
+                    "sensor_id": 12,
+                },
+                "physical_device": {
+                    "kind": "heater",
+                    "source_components": ["heater_strip_1"],
+                },
+            }
+        )
+
+        self.assertEqual(node.node_id, 12)
+        self.assertEqual(node.cell_id, "physical_heater_12")
+        self.assertEqual(node.component_name, "heater_strip")
+        self.assertTrue(node.has_heater)
+        self.assertTrue(node.has_sensor)
+        self.assertEqual(node.heater.heater_id, 12)
+        self.assertEqual(node.sensor.sensor_id, 12)
+
     def test_mimo_controller_metadata_and_gain_matrix_round_trip(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_round_trip"))
         sensor = NodeProperties.with_material(1, (0, 0, 0), material="copper")

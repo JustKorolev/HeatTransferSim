@@ -327,6 +327,8 @@ class NodeProperties:
         copied.setdefault("initial_temperature_K", float(copied.get("initial_temperature_K", 293.15)))
         copied.pop("dominant_component", None)
         copied.pop("dominant_material", None)
+        copied.pop("node_type", None)
+        copied.pop("physical_device", None)
         copied.pop("pos", None)
         if size_mm is not None and "side_length_m" not in copied:
             copied["side_length_m"] = max(float(v) for v in size_mm) / 1000.0
