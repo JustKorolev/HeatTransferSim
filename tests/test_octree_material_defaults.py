@@ -482,6 +482,69 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(diagnostics.cells_surface_hit, 1)
         self.assertEqual(diagnostics.leaf_records[0]["acceptance_reason"], "triangle_surface_intersection")
 
+    def test_parallel_octree_classification_matches_sequential_for_surface_mesh(self) -> None:
+        materials = self.make_materials()
+        triangle = np.array(
+            [
+                [[-4.0, -4.0, 0.0], [4.0, -4.0, 0.0], [0.0, 4.0, 0.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(
+            vertices=triangle.reshape(-1, 3),
+            faces=np.array([[0, 1, 2]]),
+            triangles=triangle,
+            is_watertight=False,
+        )
+        obj = MeshObject(
+            name="thin_panel",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangle.reshape(-1, 3),
+            bounds_mm=(np.array([-4.0, -4.0, 0.0]), np.array([4.0, 4.0, 0.0])),
+            watertight=False,
+        )
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[obj],
+            bounds_mm=(np.array([-5.0, -5.0, -1.0]), np.array([5.0, 5.0, 1.0])),
+            warnings=[],
+        )
+        sequential_params = OctreeParams(
+            min_cell_size_mm=5.0,
+            max_cell_size_mm=20.0,
+            max_depth=2,
+            samples_per_cell=4,
+            voxel_workers=1,
+        )
+        parallel_params = OctreeParams(
+            min_cell_size_mm=5.0,
+            max_cell_size_mm=20.0,
+            max_depth=2,
+            samples_per_cell=4,
+            voxel_workers=2,
+            voxel_batch_size=2,
+        )
+
+        sequential = build_octree(scene, ContactReport(), materials, sequential_params, warnings=[])
+        parallel = build_octree(scene, ContactReport(), materials, parallel_params, warnings=[])
+
+        def signature(cells: list[OctreeCell]) -> list[tuple]:
+            return [
+                (
+                    cell.cell_id,
+                    cell.level,
+                    cell.center_mm,
+                    cell.size_mm,
+                    cell.dominant_component,
+                    cell.dominant_material,
+                    dict(cell.occupancy),
+                )
+                for cell in cells
+            ]
+
+        self.assertEqual(signature(parallel), signature(sequential))
+
     def test_sample_points_are_symmetric_for_low_sample_counts(self) -> None:
         points = _sample_points(np.zeros(3), np.array([10.0, 10.0, 10.0]), 4)
 

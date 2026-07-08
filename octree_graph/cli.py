@@ -59,6 +59,8 @@ def main(argv: list[str] | None = None) -> None:
         samples_per_cell=args.samples_per_cell,
         min_solid_fraction=args.min_solid_fraction,
         bbox_fallback=args.bbox_fallback,
+        voxel_workers=args.voxel_workers,
+        voxel_batch_size=args.voxel_batch_size,
     )
     leaves, graph_result, diagnostics = _build_graph_with_optional_fallback(
         scene,
@@ -130,6 +132,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples-per-cell", type=int, default=9)
     parser.add_argument("--min-solid-fraction", type=float, default=0.12)
     parser.add_argument("--bbox-fallback", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--voxel-workers",
+        type=int,
+        default=1,
+        help=(
+            "Worker processes for octree cell classification. "
+            "Use 1 for sequential execution, or 0 for conservative auto selection capped at 4."
+        ),
+    )
+    parser.add_argument(
+        "--voxel-batch-size",
+        type=int,
+        default=64,
+        help="Maximum queued octree cells classified per multiprocessing batch.",
+    )
     parser.add_argument(
         "--contact-detection-distance-mm",
         type=float,
@@ -348,6 +365,7 @@ class ConsoleProgress:
         queue = int(event.get("queue", 0))
         subdivided = int(event.get("cells_subdivided", 0))
         depth = int(event.get("max_depth_reached", 0))
+        workers = int(event.get("voxel_workers", 1))
         max_leaf_cells = event.get("max_leaf_cells")
         active_total = max(1, cells + queue)
         ratio = min(1.0, cells / float(active_total))
@@ -362,6 +380,8 @@ class ConsoleProgress:
             f"Voxelizing octree [{bar}] active={ratio * 100:5.1f}% "
             f"tested={cells} {leaf_text} queue={queue} subdivided={subdivided} depth={depth}"
         )
+        if workers > 1:
+            line += f" workers={workers}"
         if self.is_tty:
             padded = line.ljust(self._last_line_len)
             print(f"\r{padded}", end="", file=sys.stderr, flush=True)

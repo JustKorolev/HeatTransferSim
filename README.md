@@ -97,7 +97,8 @@ python build_octree_graph.py `
   --minority-fraction-ignore 0.02 `
   --material-contrast-refine-threshold 5 `
   --contact-refine-distance-mm 10 `
-  --samples-per-cell 9
+  --samples-per-cell 9 `
+  --voxel-workers 0
 ```
 
 The converter assumes glTF/GLB coordinates are millimeters, finds the single
@@ -109,6 +110,12 @@ buffers can collapse CAD geometry during loading.
 If `materials.xlsx` exists in `--mesh-dir`, it maps SolidWorks part instance
 names to material names. Contact checking is handled separately in Python by
 exact shared voxel faces plus a voxel-surface contact-distance pass.
+`--voxel-workers` enables multiprocessing for octree cell classification:
+`1` is sequential, `0` uses conservative auto-selection capped at 4 worker
+processes, and an explicit integer uses that many workers. Large CAD assemblies
+copy triangle data into each worker process, so increase this gradually if
+memory pressure is high. `--voxel-batch-size` controls how many queued octree
+cells are classified per worker batch.
 For bbox-fallback graphs, `--contact-detection-distance-mm` defaults to
 `--min-cell-size-mm` so near but non-face-adjacent cells can still be connected.
 The builder writes:

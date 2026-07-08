@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections import Counter, deque
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from itertools import product
 import math
+import os
 from typing import Callable
 
 import numpy as np
@@ -24,6 +26,11 @@ from .materials import (
 _TRIMESH_CONTAINS_AVAILABLE: bool | None = None
 _TRIANGLE_CACHE: dict[int, np.ndarray] = {}
 _TRIANGLE_INDEX_CACHE: dict[int, "TriangleSpatialIndex"] = {}
+_WORKER_OBJECTS: list[MeshObject] = []
+_WORKER_TRIANGLE_INDICES: dict[int, "TriangleSpatialIndex"] = {}
+_WORKER_CONTACT_REPORT: ContactReport | None = None
+_WORKER_PARAMS: "OctreeParams | None" = None
+_WORKER_KNOWN_MATERIALS: set[str] = set()
 
 
 @dataclass
@@ -40,6 +47,8 @@ class OctreeParams:
     samples_per_cell: int = 9
     min_solid_fraction: float = 0.12
     bbox_fallback: bool = False
+    voxel_workers: int = 1
+    voxel_batch_size: int = 64
 
 
 @dataclass
@@ -87,6 +96,22 @@ class CellClassification:
     volume_fraction: float | None
     acceptance_reason: str
     warnings: list[str] = field(default_factory=list)
+    triangle_candidate_tests: int = 0
+    triangle_intersection_tests: int = 0
+
+
+@dataclass
+class _CellWorkItem:
+    cell_id: str
+    center_mm: tuple[float, float, float]
+    size_mm: tuple[float, float, float]
+    level: int
+    parent_id: str | None
+
+
+@dataclass
+class _TriangleMesh:
+    triangles: np.ndarray
 
 
 @dataclass
@@ -215,7 +240,7 @@ def build_octree(
         diagnostics.root_bounds_mm = {"min": mins.astype(float).tolist(), "max": maxs.astype(float).tolist()}
         diagnostics.root_cell_size_mm = root[1].astype(float).tolist()
 
-    queue = deque([("cell_0", root[0], root[1], 0, None)])
+    queue = deque([_CellWorkItem("cell_0", tuple(float(v) for v in root[0]), tuple(float(v) for v in root[1]), 0, None)])
     counter = 1
 
     def append_leaf(
@@ -246,11 +271,23 @@ def build_octree(
             )
         )
 
-    while queue:
-        cell_id, center_mm, size_mm, level, parent = queue.popleft()
+    worker_count = _resolve_voxel_worker_count(params)
+    batch_size = max(1, int(params.voxel_batch_size))
+
+    def handle_classified_cell(
+        work_item: _CellWorkItem,
+        classification: CellClassification,
+        remaining_batch_items: int,
+    ) -> None:
+        nonlocal counter
+        center_mm = np.asarray(work_item.center_mm, dtype=float)
+        size_mm = np.asarray(work_item.size_mm, dtype=float)
+        level = int(work_item.level)
         if diagnostics is not None:
             diagnostics.cells_tested += 1
-            diagnostics.max_depth_reached = max(diagnostics.max_depth_reached, int(level))
+            diagnostics.max_depth_reached = max(diagnostics.max_depth_reached, level)
+            diagnostics.triangle_candidate_tests += int(classification.triangle_candidate_tests)
+            diagnostics.triangle_intersection_tests += int(classification.triangle_intersection_tests)
         if progress_callback is not None and diagnostics is not None:
             progress_callback(
                 {
@@ -258,21 +295,12 @@ def build_octree(
                     "cells_tested": diagnostics.cells_tested,
                     "cells_subdivided": diagnostics.cells_subdivided,
                     "leaves": len(leaves),
-                    "queue": len(queue),
+                    "queue": len(queue) + int(remaining_batch_items),
                     "max_leaf_cells": params.max_leaf_cells,
                     "max_depth_reached": diagnostics.max_depth_reached,
+                    "voxel_workers": worker_count,
                 }
             )
-        classification = _classify_cell(
-            scene.objects,
-            triangle_indices,
-            center_mm,
-            size_mm,
-            contact_report,
-            params,
-            set(materials),
-            diagnostics,
-        )
         meaningful_materials = [
             resolve_material(name, materials, warnings)
             for name, frac in classification.material_fractions.items()
@@ -287,9 +315,10 @@ def build_octree(
         needs_surface_refinement = params.boundary_refine and (
             classification.surface_hit or classification.near_surface_hit
         )
+        effective_queue_len = len(queue) + int(remaining_batch_items)
         budget_allows_children = (
             params.max_leaf_cells is None
-            or len(leaves) + len(queue) + 8 <= params.max_leaf_cells
+            or len(leaves) + effective_queue_len + 8 <= params.max_leaf_cells
         )
         if diagnostics is not None and params.max_leaf_cells is not None and not budget_allows_children:
             diagnostics.max_leaf_cells_reached = True
@@ -319,15 +348,15 @@ def build_octree(
                 child_id = f"cell_{counter}"
                 counter += 1
                 queue.append(
-                    (
+                    _CellWorkItem(
                         child_id,
-                        center_mm + quarter * np.array(signs),
-                        child_size,
+                        tuple(float(v) for v in center_mm + quarter * np.array(signs)),
+                        tuple(float(v) for v in child_size),
                         level + 1,
-                        cell_id,
+                        work_item.cell_id,
                     )
                 )
-            continue
+            return
 
         confidence = _classification_confidence(classification, params)
         if classification.occupied and float(max(size_mm)) > params.max_cell_size_mm:
@@ -340,7 +369,54 @@ def build_octree(
             classification.warnings.append(
                 "Ignored legacy bbox fallback request; AABB overlap is not used as physical occupancy."
             )
-        append_leaf(cell_id, center_mm, size_mm, level, parent, classification, confidence)
+        append_leaf(
+            work_item.cell_id,
+            center_mm,
+            size_mm,
+            level,
+            work_item.parent_id,
+            classification,
+            confidence,
+        )
+
+    if worker_count <= 1:
+        while queue:
+            work_item = queue.popleft()
+            classification = _classify_cell(
+                scene.objects,
+                triangle_indices,
+                np.asarray(work_item.center_mm, dtype=float),
+                np.asarray(work_item.size_mm, dtype=float),
+                contact_report,
+                params,
+                set(materials),
+                None,
+            )
+            handle_classified_cell(work_item, classification, remaining_batch_items=0)
+    else:
+        worker_objects = _prepare_worker_objects(scene.objects)
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            initializer=_init_octree_worker,
+            initargs=(worker_objects, contact_report, params, set(materials)),
+        ) as executor:
+            while queue:
+                batch: list[_CellWorkItem] = []
+                while queue and len(batch) < batch_size:
+                    batch.append(queue.popleft())
+                classifications = list(
+                    executor.map(
+                        _classify_cell_work_item,
+                        batch,
+                        chunksize=max(1, min(8, batch_size // max(worker_count, 1))),
+                    )
+                )
+                for index, (work_item, classification) in enumerate(zip(batch, classifications)):
+                    handle_classified_cell(
+                        work_item,
+                        classification,
+                        remaining_batch_items=len(batch) - index - 1,
+                    )
     if progress_callback is not None and diagnostics is not None:
         progress_callback(
             {
@@ -351,10 +427,78 @@ def build_octree(
                 "queue": 0,
                 "max_leaf_cells": params.max_leaf_cells,
                 "max_depth_reached": diagnostics.max_depth_reached,
+                "voxel_workers": worker_count,
                 "done": True,
             }
         )
     return leaves
+
+
+def _resolve_voxel_worker_count(params: OctreeParams) -> int:
+    requested = int(getattr(params, "voxel_workers", 1))
+    if requested == 0:
+        cpu_count = os.cpu_count() or 2
+        return max(1, min(4, cpu_count - 1))
+    return max(1, requested)
+
+
+def _prepare_worker_objects(objects: list[MeshObject]) -> list[MeshObject]:
+    worker_objects: list[MeshObject] = []
+    for obj in objects:
+        triangles = np.asarray(_mesh_triangles(obj), dtype=float)
+        bounds_min, bounds_max = obj.bounds_mm
+        worker_objects.append(
+            MeshObject(
+                name=obj.name,
+                material_name=obj.material_name,
+                mesh=_TriangleMesh(triangles=triangles),
+                vertices_mm=np.empty((0, 3), dtype=float),
+                bounds_mm=(np.asarray(bounds_min, dtype=float), np.asarray(bounds_max, dtype=float)),
+                watertight=bool(obj.watertight),
+                scene_path=getattr(obj, "scene_path", None),
+            )
+        )
+    return worker_objects
+
+
+def _init_octree_worker(
+    objects: list[MeshObject],
+    contact_report: ContactReport,
+    params: OctreeParams,
+    known_materials: set[str],
+) -> None:
+    global _TRIMESH_CONTAINS_AVAILABLE
+    global _TRIANGLE_CACHE
+    global _TRIANGLE_INDEX_CACHE
+    global _WORKER_OBJECTS
+    global _WORKER_TRIANGLE_INDICES
+    global _WORKER_CONTACT_REPORT
+    global _WORKER_PARAMS
+    global _WORKER_KNOWN_MATERIALS
+
+    _TRIMESH_CONTAINS_AVAILABLE = False
+    _TRIANGLE_CACHE = {}
+    _TRIANGLE_INDEX_CACHE = {}
+    _WORKER_OBJECTS = objects
+    _WORKER_CONTACT_REPORT = contact_report
+    _WORKER_PARAMS = params
+    _WORKER_KNOWN_MATERIALS = set(known_materials)
+    _WORKER_TRIANGLE_INDICES = _build_triangle_indices(_WORKER_OBJECTS, params)
+
+
+def _classify_cell_work_item(work_item: _CellWorkItem) -> CellClassification:
+    if _WORKER_PARAMS is None or _WORKER_CONTACT_REPORT is None:
+        raise RuntimeError("Octree worker was not initialized.")
+    return _classify_cell(
+        _WORKER_OBJECTS,
+        _WORKER_TRIANGLE_INDICES,
+        np.asarray(work_item.center_mm, dtype=float),
+        np.asarray(work_item.size_mm, dtype=float),
+        _WORKER_CONTACT_REPORT,
+        _WORKER_PARAMS,
+        _WORKER_KNOWN_MATERIALS,
+        None,
+    )
 
 
 def _record_leaf_diagnostics(
@@ -539,6 +683,8 @@ def _classify_cell(
         volume_fraction=volume_fraction,
         acceptance_reason=acceptance_reason,
         warnings=warnings[:5],
+        triangle_candidate_tests=triangle_candidate_tests,
+        triangle_intersection_tests=triangle_intersection_tests,
     )
 
 
