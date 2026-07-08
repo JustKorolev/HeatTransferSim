@@ -4,12 +4,58 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+import re
+from typing import Any
 
 import numpy as np
 
+from .load_gltf import MeshObject
 from .load_contact_report import ContactReport
-from .materials import Material, resolve_material
-from .octree import OctreeCell
+from .materials import DEFAULT_ASSIGNED_MATERIAL_NAME, Material, resolve_material
+from .octree import OctreeCell, _physical_material_name
+
+
+_DEFAULT_DEVICE_CONTACT_G_W_K = 0.1
+DEFAULT_HEATER_NAME_PATTERNS = [
+    r"heater",
+    r"heat[_\s-]*strip",
+    r"cartridge",
+    r"kapton",
+    r"resistor[_\s-]*heater",
+]
+DEFAULT_SENSOR_NAME_PATTERNS = [
+    r"sensor",
+    r"thermistor",
+    r"\brtd\b",
+    r"\bdiode\b",
+    r"thermometer",
+    r"temperature[_\s-]*probe",
+    r"temp[_\s-]*sensor",
+]
+
+
+@dataclass
+class PhysicalDevice:
+    name: str
+    kind: str
+    objects: list[MeshObject]
+    material_name: str | None = None
+
+    @property
+    def bounds_mm(self) -> tuple[np.ndarray, np.ndarray]:
+        mins = np.min([np.asarray(obj.bounds_mm[0], dtype=float) for obj in self.objects], axis=0)
+        maxs = np.max([np.asarray(obj.bounds_mm[1], dtype=float) for obj in self.objects], axis=0)
+        return mins, maxs
+
+    @property
+    def center_mm(self) -> np.ndarray:
+        mins, maxs = self.bounds_mm
+        return (mins + maxs) * 0.5
+
+    @property
+    def size_mm(self) -> np.ndarray:
+        mins, maxs = self.bounds_mm
+        return np.maximum(maxs - mins, 0.0)
 
 
 @dataclass
@@ -21,20 +67,18 @@ class GraphBuildResult:
 
 def build_graph(
     leaves: list[OctreeCell],
-    contact_report: ContactReport,
+    contact_report: ContactReport | None,
     materials: dict[str, Material],
     warnings: list[str],
     default_contact_G_W_K: float = 0.1,
     radiation_reference_temperature_K: float = 293.15,
+    contact_detection_distance_mm: float = 0.0,
+    component_bounds_mm: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+    physical_devices: list[PhysicalDevice] | None = None,
 ) -> GraphBuildResult:
+    contact_report = contact_report or ContactReport()
     solid = [cell for cell in leaves if not cell.is_empty]
     exposed_areas_m2 = _exposed_areas_m2(solid)
-    volumes_by_component: dict[str, float] = {}
-    for cell in solid:
-        if cell.dominant_component:
-            volumes_by_component[cell.dominant_component] = (
-                volumes_by_component.get(cell.dominant_component, 0.0) + cell.volume_m3
-            )
     nodes: list[dict] = []
     for node_id, cell in enumerate(solid):
         material = resolve_material(cell.dominant_material, materials, warnings)
@@ -47,10 +91,8 @@ def build_graph(
             * float(radiation_reference_temperature_K) ** 3
         )
         component = cell.dominant_component or ""
-        if component in contact_report.component_masses_kg and volumes_by_component.get(component, 0.0) > 0:
-            mass = contact_report.component_masses_kg[component] * cell.volume_m3 / volumes_by_component[component]
-        else:
-            mass = material.density_kg_m3 * cell.volume_m3
+        occupancy_fraction = max(cell.occupancy.values(), default=0.0)
+        mass = material.density_kg_m3 * cell.volume_m3 * occupancy_fraction
         nodes.append(
             {
                 "node_id": node_id,
@@ -64,7 +106,7 @@ def build_graph(
                 "mass_kg": mass,
                 "C_J_K": mass * material.cp_J_kgK,
                 "initial_temperature_K": 293.15,
-                "occupancy_fraction": max(cell.occupancy.values(), default=0.0),
+                "occupancy_fraction": occupancy_fraction,
                 "confidence": cell.confidence,
                 "warnings": list(cell.warnings),
                 "radiation": {
@@ -78,8 +120,18 @@ def build_graph(
             }
         )
     cell_to_node = {node["cell_id"]: node for node in nodes}
+    device_nodes = _append_physical_device_nodes(
+        nodes,
+        physical_devices or [],
+        contact_report,
+        materials,
+        warnings,
+    )
     edges: list[dict] = []
-    for edge_index, (a, b) in enumerate(combinations(solid, 2)):
+    edge_index = 0
+    connected_pairs: set[tuple[str, str]] = set()
+    connected_node_pairs: set[tuple[int, int]] = set()
+    for a, b in _candidate_cell_pairs(solid, 0.0):
         area_mm2, distance_mm = _shared_face_area_and_distance(a, b)
         if area_mm2 <= 0.0:
             continue
@@ -88,18 +140,12 @@ def build_graph(
         material_a = resolve_material(str(node_a["material_name"]), materials, warnings)
         material_b = resolve_material(str(node_b["material_name"]), materials, warnings)
         same_component = node_a["component_name"] == node_b["component_name"]
-        excel_contact = contact_report.has_pair(str(node_a["component_name"]), str(node_b["component_name"]))
         if same_component:
             edge_type = "internal_conduction"
             k_eff = harmonic_mean(material_a.k_W_mK, material_b.k_W_mK)
             G = k_eff * (area_mm2 * 1.0e-6) / max(distance_mm * 1.0e-3, 1.0e-12)
             source = "geometry"
             confidence = "high"
-        elif excel_contact:
-            edge_type = "excel_contact"
-            G = default_contact_G_W_K
-            source = "both"
-            confidence = "medium"
         elif node_a["material_name"] == node_b["material_name"]:
             edge_type = "same_material_spatial"
             k_eff = material_a.k_W_mK
@@ -122,10 +168,297 @@ def build_graph(
                 "distance_m": float(distance_mm * 1.0e-3),
                 "contact_confidence": confidence,
                 "source": source,
-                "warnings": [] if confidence != "low" else ["Geometry adjacency is not confirmed by Excel contact metadata."],
+                "warnings": [] if confidence != "low" else ["Inter-part geometry adjacency has not been contact-classified."],
             }
         )
+        connected_pairs.add(_cell_pair_key(a, b))
+        connected_node_pairs.add(_node_pair_key(node_a, node_b))
+        edge_index += 1
+    if contact_detection_distance_mm > 0.0:
+        edge_index = _add_near_contact_edges(
+            solid,
+            cell_to_node,
+            connected_pairs,
+            edges,
+            edge_index,
+            materials,
+            warnings,
+            default_contact_G_W_K,
+            contact_detection_distance_mm,
+            connected_node_pairs,
+        )
+    edge_index = _add_physical_device_contact_edges(
+        solid,
+        cell_to_node,
+        device_nodes,
+        edges,
+        edge_index,
+        contact_detection_distance_mm,
+        connected_node_pairs,
+    )
     return GraphBuildResult(nodes=nodes, edges=edges, warnings=warnings)
+
+
+def classify_physical_device_name(name: str, heater_patterns: list[str], sensor_patterns: list[str]) -> str | None:
+    normalized = _normalize_device_name(name)
+    heater = any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in heater_patterns)
+    sensor = any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in sensor_patterns)
+    if heater and sensor:
+        return "heater_sensor"
+    if heater:
+        return "heater"
+    if sensor:
+        return "sensor"
+    return None
+
+
+def collapse_physical_devices(
+    objects: list[MeshObject],
+    heater_patterns: list[str],
+    sensor_patterns: list[str],
+) -> tuple[list[MeshObject], list[PhysicalDevice]]:
+    body_objects: list[MeshObject] = []
+    groups: dict[tuple[str, str], list[MeshObject]] = {}
+    for obj in objects:
+        kind = classify_physical_device_name(_object_search_text(obj), heater_patterns, sensor_patterns)
+        if kind is None:
+            body_objects.append(obj)
+            continue
+        groups.setdefault((kind, _device_group_name(obj.name)), []).append(obj)
+    devices = [
+        PhysicalDevice(name=name, kind=kind, objects=members)
+        for (kind, name), members in sorted(groups.items(), key=lambda item: (item[0][0], item[0][1]))
+    ]
+    return body_objects, devices
+
+
+def _normalize_device_name(name: str) -> str:
+    return str(name).replace("\\", "/").replace("-", "_").replace(" ", "_")
+
+
+def _object_search_text(obj: MeshObject) -> str:
+    scene_path = getattr(obj, "scene_path", None)
+    if scene_path and scene_path != obj.name:
+        return f"{scene_path} {obj.name}"
+    return obj.name
+
+
+def _device_group_name(name: str) -> str:
+    normalized = _normalize_device_name(name)
+    normalized = re.sub(r"(_?\d+)?(_geometry|_mesh|_body|_solid)?$", "", normalized, flags=re.IGNORECASE)
+    return normalized or str(name)
+
+
+def _append_physical_device_nodes(
+    nodes: list[dict],
+    devices: list[PhysicalDevice],
+    contact_report: ContactReport,
+    materials: dict[str, Material],
+    warnings: list[str],
+) -> list[dict]:
+    device_nodes: list[dict] = []
+    known_materials = set(materials)
+    for device in devices:
+        node_id = len(nodes)
+        material_name = _device_material_name(device, contact_report, known_materials)
+        material = resolve_material(material_name, materials, warnings)
+        center_mm = device.center_mm
+        size_mm = device.size_mm
+        volume_m3 = _device_volume_m3(device)
+        mass_kg = material.density_kg_m3 * volume_m3
+        is_heater = device.kind in {"heater", "heater_sensor"}
+        is_sensor = device.kind in {"sensor", "heater_sensor"}
+        if is_heater:
+            # Existing graph_visualizer semantics treat heater nodes as readable controller cells.
+            is_sensor = True
+        node = {
+            "node_id": node_id,
+            "cell_id": f"physical_{device.kind}_{node_id}",
+            "coord": [node_id, 0, 0],
+            "center_mm": [float(value) for value in center_mm],
+            "size_mm": [float(max(value, 1.0e-6)) for value in size_mm],
+            "level": -1,
+            "node_type": f"physical_{device.kind}",
+            "component_name": device.name,
+            "material_name": material.name,
+            "volume_m3": float(volume_m3),
+            "mass_kg": float(mass_kg),
+            "C_J_K": float(mass_kg * material.cp_J_kgK),
+            "initial_temperature_K": 293.15,
+            "occupancy_fraction": 1.0,
+            "confidence": "high",
+            "warnings": [f"Physical {device.kind} CAD component collapsed into a dedicated graph node."],
+            "radiation": {
+                "is_exposed": False,
+                "radiating_area_m2": 0.0,
+                "emissivity": float(material.emissivity),
+                "G_rad_W_K": 0.0,
+                "R_rad_K_W": None,
+            },
+            "tags": {
+                "heater": bool(is_heater),
+                "sensor": bool(is_sensor),
+                "heater_id": int(node_id) if is_heater else None,
+                "sensor_id": int(node_id) if is_sensor else None,
+                "notes": f"Detected from CAD component {device.name!r}.",
+            },
+            "physical_device": {
+                "kind": device.kind,
+                "source_components": [obj.name for obj in device.objects],
+                "bounds_mm": {
+                    "min": [float(value) for value in device.bounds_mm[0]],
+                    "max": [float(value) for value in device.bounds_mm[1]],
+                },
+            },
+        }
+        nodes.append(node)
+        device_nodes.append(node)
+    return device_nodes
+
+
+def _device_material_name(
+    device: PhysicalDevice,
+    contact_report: ContactReport,
+    known_materials: set[str],
+) -> str:
+    for obj in device.objects:
+        material = _physical_material_name(obj, contact_report, known_materials)
+        if material != DEFAULT_ASSIGNED_MATERIAL_NAME:
+            return material
+    return _physical_material_name(device.objects[0], contact_report, known_materials)
+
+
+def _device_volume_m3(device: PhysicalDevice) -> float:
+    volume = 0.0
+    for obj in device.objects:
+        mesh_volume = getattr(obj.mesh, "volume", 0.0)
+        try:
+            mesh_volume = abs(float(mesh_volume))
+        except (TypeError, ValueError):
+            mesh_volume = 0.0
+        if mesh_volume > 0.0:
+            # Mesh coordinates are millimeters in this pipeline.
+            volume += mesh_volume * 1.0e-9
+    if volume > 0.0:
+        return float(volume)
+    size_mm = np.maximum(device.size_mm, 0.0)
+    effective_size_mm = np.maximum(size_mm, 1.0)
+    return float(np.prod(effective_size_mm) * 1.0e-9)
+
+
+def _add_physical_device_contact_edges(
+    cells: list[OctreeCell],
+    cell_to_node: dict[str, dict],
+    device_nodes: list[dict],
+    edges: list[dict],
+    edge_index: int,
+    max_gap_mm: float,
+    connected_node_pairs: set[tuple[int, int]],
+) -> int:
+    if not cells or not device_nodes:
+        return edge_index
+    search_gap_mm = max(0.0, float(max_gap_mm))
+    for device_node in device_nodes:
+        contacts: list[tuple[OctreeCell, float, float, float]] = []
+        for cell in cells:
+            contact = _node_cell_contact(device_node, cell, search_gap_mm)
+            if contact is None:
+                continue
+            area_mm2, gap_mm, distance_mm = contact
+            contacts.append((cell, area_mm2, gap_mm, distance_mm))
+        if not contacts:
+            nearest = min(cells, key=lambda cell: _node_cell_gap_mm(device_node, cell))
+            gap_mm = _node_cell_gap_mm(device_node, nearest)
+            distance_mm = _node_cell_center_distance_mm(device_node, nearest)
+            contacts = [(nearest, 0.0, gap_mm, distance_mm)]
+        for cell, area_mm2, gap_mm, distance_mm in contacts:
+            body_node = cell_to_node.get(cell.cell_id)
+            if body_node is None:
+                continue
+            node_pair = _node_pair_key(device_node, body_node)
+            if node_pair in connected_node_pairs:
+                continue
+            conductance = _DEFAULT_DEVICE_CONTACT_G_W_K
+            if area_mm2 > 0.0 and distance_mm > 0.0 and device_node["material_name"] == body_node["material_name"]:
+                conductance = max(_DEFAULT_DEVICE_CONTACT_G_W_K, area_mm2 * 1.0e-6 / max(distance_mm * 1.0e-3, 1.0e-12))
+            edges.append(
+                {
+                    "edge_id": f"edge_{edge_index}",
+                    "node_i": int(device_node["node_id"]),
+                    "node_j": int(body_node["node_id"]),
+                    "edge_type": "physical_device_contact",
+                    "G_W_K": float(conductance),
+                    "shared_area_m2": float(area_mm2 * 1.0e-6),
+                    "distance_m": float(distance_mm * 1.0e-3),
+                    "contact_confidence": "medium" if gap_mm <= search_gap_mm else "low",
+                    "source": "physical_device_cad_contact",
+                    "warnings": [
+                        f"Physical device node connected to nearby body cell with gap {gap_mm:.3g} mm."
+                    ],
+                }
+            )
+            connected_node_pairs.add(node_pair)
+            edge_index += 1
+    return edge_index
+
+
+def _node_cell_contact(
+    node: dict,
+    cell: OctreeCell,
+    max_gap_mm: float,
+) -> tuple[float, float, float] | None:
+    node_min, node_max = _node_bounds_mm(node)
+    cell_min, cell_max = _cell_bounds_mm(cell)
+    gaps = _aabb_gaps_mm(node_min, node_max, cell_min, cell_max)
+    gap_mm = float(np.linalg.norm(gaps))
+    if gap_mm > max_gap_mm:
+        return None
+    overlaps = np.minimum(node_max, cell_max) - np.maximum(node_min, cell_min)
+    separated_axes = [axis for axis, gap in enumerate(gaps) if gap > 1.0e-7]
+    if len(separated_axes) > 1:
+        return None
+    if len(separated_axes) == 1:
+        face_axis = separated_axes[0]
+    else:
+        touch_axes = [axis for axis, overlap in enumerate(overlaps) if abs(overlap) <= 1.0e-7]
+        face_axis = touch_axes[0] if len(touch_axes) == 1 else int(np.argmin(np.maximum(overlaps, 0.0)))
+    other_axes = [axis for axis in range(3) if axis != face_axis]
+    if overlaps[other_axes[0]] <= 0.0 or overlaps[other_axes[1]] <= 0.0:
+        return None
+    area_mm2 = float(overlaps[other_axes[0]] * overlaps[other_axes[1]])
+    distance_mm = _node_cell_center_distance_mm(node, cell)
+    return max(0.0, area_mm2), gap_mm, distance_mm
+
+
+def _node_cell_gap_mm(node: dict, cell: OctreeCell) -> float:
+    node_min, node_max = _node_bounds_mm(node)
+    cell_min, cell_max = _cell_bounds_mm(cell)
+    return float(np.linalg.norm(_aabb_gaps_mm(node_min, node_max, cell_min, cell_max)))
+
+
+def _node_cell_center_distance_mm(node: dict, cell: OctreeCell) -> float:
+    return float(np.linalg.norm(np.asarray(node["center_mm"], dtype=float) - np.asarray(cell.center_mm, dtype=float)))
+
+
+def _node_bounds_mm(node: dict) -> tuple[np.ndarray, np.ndarray]:
+    center = np.asarray(node["center_mm"], dtype=float)
+    size = np.maximum(np.asarray(node["size_mm"], dtype=float), 1.0e-9)
+    return center - size * 0.5, center + size * 0.5
+
+
+def _cell_bounds_mm(cell: OctreeCell) -> tuple[np.ndarray, np.ndarray]:
+    center = np.asarray(cell.center_mm, dtype=float)
+    size = np.maximum(np.asarray(cell.size_mm, dtype=float), 1.0e-9)
+    return center - size * 0.5, center + size * 0.5
+
+
+def _aabb_gaps_mm(
+    amin: np.ndarray,
+    amax: np.ndarray,
+    bmin: np.ndarray,
+    bmax: np.ndarray,
+) -> np.ndarray:
+    return np.maximum(np.maximum(bmin - amax, amin - bmax), 0.0)
 
 
 def harmonic_mean(a: float, b: float) -> float:
@@ -159,6 +492,153 @@ def _shared_face_area_and_distance(a: OctreeCell, b: OctreeCell) -> tuple[float,
     area = overlaps[other[0]] * overlaps[other[1]]
     distance = float(np.linalg.norm(ca - cb))
     return float(max(0.0, area)), distance
+
+
+def _add_near_contact_edges(
+    cells: list[OctreeCell],
+    cell_to_node: dict[str, dict],
+    connected_pairs: set[tuple[str, str]],
+    edges: list[dict],
+    edge_index: int,
+    materials: dict[str, Material],
+    warnings: list[str],
+    default_contact_G_W_K: float,
+    max_gap_mm: float,
+    connected_node_pairs: set[tuple[int, int]],
+) -> int:
+    for cell, other in _candidate_cell_pairs(cells, max_gap_mm):
+        pair_key = _cell_pair_key(cell, other)
+        if pair_key in connected_pairs:
+            continue
+        contact = _near_contact_area_gap_and_distance(cell, other, max_gap_mm)
+        if contact is None:
+            continue
+        area_mm2, gap_mm, distance_mm = contact
+        node_a = cell_to_node[cell.cell_id]
+        node_b = cell_to_node[other.cell_id]
+        node_pair = _node_pair_key(node_a, node_b)
+        if node_pair in connected_node_pairs:
+            continue
+        material_a = resolve_material(str(node_a["material_name"]), materials, warnings)
+        material_b = resolve_material(str(node_b["material_name"]), materials, warnings)
+        same_component = node_a["component_name"] == node_b["component_name"]
+        same_material = node_a["material_name"] == node_b["material_name"]
+        if same_component:
+            edge_type = "near_internal_conduction"
+            k_eff = harmonic_mean(material_a.k_W_mK, material_b.k_W_mK)
+            G = k_eff * (area_mm2 * 1.0e-6) / max(distance_mm * 1.0e-3, 1.0e-12)
+            confidence = "medium"
+        elif same_material and area_mm2 > 0.0:
+            edge_type = "near_same_material_contact"
+            k_eff = material_a.k_W_mK
+            G = k_eff * (area_mm2 * 1.0e-6) / max(distance_mm * 1.0e-3, 1.0e-12)
+            confidence = "medium"
+        else:
+            edge_type = "near_component_contact"
+            G = default_contact_G_W_K
+            confidence = "low"
+        edges.append(
+            {
+                "edge_id": f"edge_{edge_index}",
+                "node_i": int(node_a["node_id"]),
+                "node_j": int(node_b["node_id"]),
+                "edge_type": edge_type,
+                "G_W_K": float(G),
+                "shared_area_m2": float(area_mm2 * 1.0e-6),
+                "distance_m": float(distance_mm * 1.0e-3),
+                "contact_confidence": confidence,
+                "source": "geometry_contact_distance",
+                "warnings": [
+                    f"Added by voxel-surface contact pass with gap {gap_mm:.3g} mm."
+                ],
+            }
+        )
+        connected_pairs.add(pair_key)
+        connected_node_pairs.add(node_pair)
+        edge_index += 1
+    return edge_index
+
+
+def _node_pair_key(node_a: dict, node_b: dict) -> tuple[int, int]:
+    return tuple(sorted((int(node_a["node_id"]), int(node_b["node_id"]))))
+
+
+def _candidate_cell_pairs(cells: list[OctreeCell], max_gap_mm: float) -> list[tuple[OctreeCell, OctreeCell]]:
+    max_size = max((float(max(cell.size_mm)) for cell in cells), default=0.0)
+    bucket_size = max(max_gap_mm + max_size, 1.0e-9)
+    buckets: dict[tuple[int, int, int], list[OctreeCell]] = {}
+    for cell in cells:
+        key = _bucket_key(cell.center_mm, bucket_size)
+        buckets.setdefault(key, []).append(cell)
+    pairs: list[tuple[OctreeCell, OctreeCell]] = []
+    neighbor_offsets = [
+        (dx, dy, dz)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dz in (-1, 0, 1)
+    ]
+    seen: set[tuple[str, str]] = set()
+    for cell in cells:
+        key = _bucket_key(cell.center_mm, bucket_size)
+        for offset in neighbor_offsets:
+            neighbor_key = (key[0] + offset[0], key[1] + offset[1], key[2] + offset[2])
+            for other in buckets.get(neighbor_key, []):
+                if other.cell_id <= cell.cell_id:
+                    continue
+                pair_key = _cell_pair_key(cell, other)
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+                pairs.append((cell, other))
+    return pairs
+
+
+def _bucket_key(center_mm: tuple[float, float, float], bucket_size_mm: float) -> tuple[int, int, int]:
+    center = np.asarray(center_mm, dtype=float)
+    return tuple(np.floor(center / bucket_size_mm).astype(int))
+
+
+def _cell_pair_key(a: OctreeCell, b: OctreeCell) -> tuple[str, str]:
+    return tuple(sorted((a.cell_id, b.cell_id)))
+
+
+def _near_contact_area_gap_and_distance(
+    a: OctreeCell, b: OctreeCell, max_gap_mm: float
+) -> tuple[float, float, float] | None:
+    ca = np.asarray(a.center_mm, dtype=float)
+    cb = np.asarray(b.center_mm, dtype=float)
+    sa = np.asarray(a.size_mm, dtype=float)
+    sb = np.asarray(b.size_mm, dtype=float)
+    amin, amax = ca - sa * 0.5, ca + sa * 0.5
+    bmin, bmax = cb - sb * 0.5, cb + sb * 0.5
+    gaps = np.maximum(np.maximum(bmin - amax, amin - bmax), 0.0)
+    gap_mm = float(np.linalg.norm(gaps))
+    if gap_mm > max_gap_mm:
+        return None
+    near_axes = [axis for axis, gap in enumerate(gaps) if gap > 1.0e-7]
+    if len(near_axes) > 1:
+        return None
+    overlaps = [
+        min(amax[axis], bmax[axis]) - max(amin[axis], bmin[axis])
+        for axis in range(3)
+    ]
+    if len(near_axes) == 1:
+        face_axis = near_axes[0]
+        other = [axis for axis in range(3) if axis != face_axis]
+        if overlaps[other[0]] <= 0.0 or overlaps[other[1]] <= 0.0:
+            return None
+        area_mm2 = overlaps[other[0]] * overlaps[other[1]]
+    else:
+        touch_axes = [axis for axis, overlap in enumerate(overlaps) if abs(overlap) <= 1.0e-7]
+        if len(touch_axes) != 1:
+            return None
+        face_axis = touch_axes[0]
+        other = [axis for axis in range(3) if axis != face_axis]
+        if overlaps[other[0]] <= 0.0 or overlaps[other[1]] <= 0.0:
+            return None
+        area_mm2 = overlaps[other[0]] * overlaps[other[1]]
+    distance_mm = float(np.linalg.norm(ca - cb))
+    return float(max(0.0, area_mm2)), gap_mm, distance_mm
 
 
 def _exposed_areas_m2(cells: list[OctreeCell]) -> dict[str, float]:

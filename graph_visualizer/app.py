@@ -1419,7 +1419,7 @@ class GraphVisualizerApp:
         contact_nodes = {
             endpoint
             for edge in self.model.edges.values()
-            if edge.edge_type not in {"internal_conduction", "same_material_spatial"}
+            if edge.edge_type not in {"internal_conduction", "near_internal_conduction", "same_material_spatial"}
             for endpoint in (edge.source, edge.target)
         }
         visible: set[int] = set()

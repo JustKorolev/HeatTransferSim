@@ -87,8 +87,7 @@ tags and notes. Autosave writes tag changes back to `graph.json` and
 
 ```powershell
 python build_octree_graph.py `
-  --gltf assembly.gltf `
-  --contact-report ContactReport.xlsx `
+  --mesh-dir meshes\assembly_export `
   --graph-name hispec_test_octree `
   --output-root graphs `
   --min-cell-size-mm 5 `
@@ -101,10 +100,17 @@ python build_octree_graph.py `
   --samples-per-cell 9
 ```
 
-The converter assumes glTF coordinates are millimeters, uses glTF material
-names first and Excel material names as fallback, exact-matches glTF node names
-to `ContactReport.xlsx` component names, and reads material properties from the
-project-level `materials.json` file by default. It writes:
+The converter assumes glTF coordinates are millimeters, finds the single
+`.gltf`/`.glb` file in `--mesh-dir`, uses glTF material names from the
+`.gltf`/`.bin` export, and reads material properties from the project-level
+`materials.json` file by default. The mesh directory should contain exactly one
+`.gltf` or `.glb` scene file.
+If `materials.xlsx` exists in `--mesh-dir`, it maps SolidWorks part instance
+names to material names. Contact checking is handled separately in Python by
+exact shared voxel faces plus a voxel-surface contact-distance pass.
+For bbox-fallback graphs, `--contact-detection-distance-mm` defaults to
+`--min-cell-size-mm` so near but non-face-adjacent cells can still be connected.
+The builder writes:
 
 ```text
 graphs/<graph_name>/
@@ -126,3 +132,21 @@ Matrix rows and columns follow `node_ids`. `G` stores symmetric conductances in
 W/K, zeros for non-edges, and the Laplacian is built as
 `L[i, i] = sum_j G[i, j]`, `L[i, j] = -G[i, j]`. The optional dynamics matrix is
 `A = -C^{-1}L`.
+
+### Export SolidWorks materials for octree lookup
+
+Run `tools/ExportAssemblyMaterialsToExcel.bas` from SolidWorks with the assembly
+open to create a two-column workbook. Save it as `materials.xlsx` in the same
+folder as the exported `.gltf`/`.glb` mesh:
+
+- `Part Name`: SolidWorks component instance name.
+- `Material Name`: SolidWorks material assigned to that part/configuration.
+
+Use the generated workbook during graph construction:
+
+```powershell
+python build_octree_graph.py `
+  --mesh-dir meshes\assembly_export `
+  --graph-name hispec_test_octree `
+  --output-root graphs
+```

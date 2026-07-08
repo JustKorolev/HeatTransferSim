@@ -2,16 +2,73 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
+import numpy as np
+
+from octree_graph.cli import (
+    _build_graph_with_optional_fallback,
+    _raise_if_empty_graph,
+    _resolve_material_lookup_path,
+    _split_physical_devices,
+)
 from octree_graph.load_contact_report import ContactReport
+from octree_graph.graph_builder import (
+    DEFAULT_HEATER_NAME_PATTERNS,
+    DEFAULT_SENSOR_NAME_PATTERNS,
+    PhysicalDevice,
+    build_graph,
+    collapse_physical_devices,
+)
+from octree_graph.load_gltf import GltfScene, MeshObject
+from octree_graph.load_contact_report import load_contact_report
 from octree_graph.materials import (
     DEFAULT_ASSIGNED_MATERIAL_NAME,
     Material,
+    infer_material_name_from_text,
     resolve_material,
 )
-from octree_graph.octree import _physical_material_name
+from octree_graph.octree import (
+    OctreeCell,
+    OctreeDiagnostics,
+    OctreeParams,
+    _physical_material_name,
+    _sample_points,
+    _triangle_intersects_aabb,
+    TriangleSpatialIndex,
+    build_octree,
+)
+
+
+def _mesh_object(
+    name: str,
+    material_name: str | None,
+    bounds_min: list[float],
+    bounds_max: list[float],
+) -> MeshObject:
+    bounds_min_array = np.asarray(bounds_min, dtype=float)
+    bounds_max_array = np.asarray(bounds_max, dtype=float)
+    size = np.maximum(bounds_max_array - bounds_min_array, 0.0)
+    mesh = SimpleNamespace(
+        vertices=np.empty((0, 3)),
+        faces=np.empty((0, 3), dtype=int),
+        triangles=np.empty((0, 3, 3)),
+        is_watertight=False,
+        volume=float(np.prod(np.maximum(size, 1.0))),
+    )
+    return MeshObject(
+        name=name,
+        material_name=material_name,
+        mesh=mesh,
+        vertices_mm=np.empty((0, 3)),
+        bounds_mm=(bounds_min_array, bounds_max_array),
+        watertight=False,
+        scene_path=name,
+    )
 
 
 class OctreeMaterialDefaultTests(unittest.TestCase):
@@ -45,6 +102,11 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         material = resolve_material("Not assigned", self.make_materials(), warnings)
         self.assertEqual(material.name, DEFAULT_ASSIGNED_MATERIAL_NAME)
 
+    def test_resolve_material_maps_unknown_material_placeholder_to_aluminum(self) -> None:
+        warnings: list[str] = []
+        material = resolve_material("unknown material", self.make_materials(), warnings)
+        self.assertEqual(material.name, DEFAULT_ASSIGNED_MATERIAL_NAME)
+
     def test_physical_material_uses_aluminum_for_unknown_mesh_and_report_materials(self) -> None:
         materials = self.make_materials()
         known = set(materials)
@@ -62,6 +124,515 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         obj = SimpleNamespace(name="part_1", material_name="Copper")
 
         self.assertEqual(_physical_material_name(obj, report, set(materials)), "Copper")
+
+    def test_infers_material_from_solidworks_component_tokens(self) -> None:
+        materials = self.make_materials()
+        materials["18-8 Stainless Steel"] = Material(
+            name="18-8 Stainless Steel",
+            density_kg_m3=8000.0,
+            cp_J_kgK=500.0,
+            k_W_mK=16.2,
+            emissivity=0.35,
+        )
+        materials["AISI 304 Stainless Steel"] = Material(
+            name="AISI 304 Stainless Steel",
+            density_kg_m3=8000.0,
+            cp_J_kgK=500.0,
+            k_W_mK=16.2,
+            emissivity=0.35,
+        )
+        materials["17-7PH Stainless Steel"] = Material(
+            name="17-7PH Stainless Steel",
+            density_kg_m3=7800.0,
+            cp_J_kgK=460.0,
+            k_W_mK=16.0,
+            emissivity=0.35,
+        )
+
+        self.assertEqual(
+            infer_material_name_from_text("V_MMC_METRIC_SHCS_18-8SS_1530", materials),
+            "18-8 Stainless Steel",
+        )
+        self.assertEqual(
+            infer_material_name_from_text("V_MISUMI_METRIC_DISC SPRING_304SS_483", materials),
+            "AISI 304 Stainless Steel",
+        )
+        self.assertEqual(
+            infer_material_name_from_text("SOME_PART_17-7PH_22", materials),
+            "17-7PH Stainless Steel",
+        )
+
+    def test_physical_material_infers_from_component_name_before_aluminum_fallback(self) -> None:
+        materials = self.make_materials()
+        materials["18-8 Stainless Steel"] = Material(
+            name="18-8 Stainless Steel",
+            density_kg_m3=8000.0,
+            cp_J_kgK=500.0,
+            k_W_mK=16.2,
+            emissivity=0.35,
+        )
+        obj = SimpleNamespace(name="V_MMC_METRIC_SHCS_18-8SS_1530", material_name=None)
+
+        self.assertEqual(
+            _physical_material_name(obj, ContactReport(), set(materials)),
+            "18-8 Stainless Steel",
+        )
+
+    def test_missing_contact_report_loads_empty_report_without_excel_dependency(self) -> None:
+        report = load_contact_report(None)
+
+        self.assertEqual(report.component_materials, {})
+
+    def test_macro_style_material_lookup_loads_part_and_material_names_only(self) -> None:
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            self.skipTest("openpyxl is required for Excel material-lookup tests")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "macro_material_lookup.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Materials"
+            sheet.append(["Part Name", "Material Name"])
+            sheet.append(["PartA-1", "Copper"])
+            workbook.save(path)
+            workbook.close()
+
+            report = load_contact_report(path)
+
+        self.assertEqual(report.component_materials["PartA-1"], "Copper")
+        self.assertEqual(report.component_materials["PartA"], "Copper")
+        self.assertEqual(report.warnings, [])
+
+    def test_cli_uses_materials_xlsx_in_mesh_directory_when_present(self) -> None:
+        with TemporaryDirectory() as directory:
+            mesh_dir = Path(directory)
+            lookup = mesh_dir / "materials.xlsx"
+            lookup.write_bytes(b"placeholder")
+
+            self.assertEqual(_resolve_material_lookup_path(mesh_dir), lookup)
+
+    def test_cli_material_lookup_is_optional_when_materials_xlsx_is_absent(self) -> None:
+        with TemporaryDirectory() as directory:
+            self.assertIsNone(_resolve_material_lookup_path(directory))
+
+    def test_graph_build_accepts_no_contact_report(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"part_1": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_1",
+                dominant_material="Copper",
+                confidence="high",
+            )
+        ]
+
+        result = build_graph(leaves, None, materials, warnings=[])
+
+        self.assertEqual(len(result.nodes), 1)
+        self.assertEqual(result.nodes[0]["component_name"], "part_1")
+        self.assertGreater(result.nodes[0]["C_J_K"], 0.0)
+
+    def test_physical_device_detection_removes_heaters_and_sensors_from_body_objects(self) -> None:
+        body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        heater = _mesh_object("kapton_heater_1", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
+        sensor = _mesh_object("assembly/temperature_probe_A", "Copper", [-6.0, -1.0, -1.0], [-5.0, 1.0, 1.0])
+
+        body_objects, devices = collapse_physical_devices(
+            [body, heater, sensor],
+            DEFAULT_HEATER_NAME_PATTERNS,
+            DEFAULT_SENSOR_NAME_PATTERNS,
+        )
+
+        self.assertEqual([obj.name for obj in body_objects], ["body_panel"])
+        self.assertEqual([device.kind for device in devices], ["heater", "sensor"])
+        self.assertEqual({device.name for device in devices}, {"assembly/temperature_probe_A", "kapton_heater"})
+
+    def test_cli_physical_device_split_excludes_devices_from_voxel_scene(self) -> None:
+        body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        heater = _mesh_object("heater_strip_1", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[body, heater],
+            bounds_mm=(np.array([-5.0, -5.0, -5.0]), np.array([6.0, 5.0, 5.0])),
+            warnings=[],
+        )
+        args = SimpleNamespace(
+            no_detect_physical_devices=False,
+            heater_name_pattern=None,
+            sensor_name_pattern=None,
+        )
+        warnings: list[str] = []
+
+        voxel_scene, devices = _split_physical_devices(scene, args, warnings)
+
+        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel"])
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0].kind, "heater")
+        self.assertEqual(args.physical_devices, devices)
+        self.assertIn("excluded them from voxelization", warnings[0])
+
+    def test_graph_build_adds_physical_heater_node_and_contact_edge(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"body_panel": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="body_panel",
+                dominant_material="Copper",
+                confidence="high",
+            )
+        ]
+        heater_obj = _mesh_object("heater_strip_1", "Copper", [5.0, -2.0, -2.0], [7.0, 2.0, 2.0])
+        device = PhysicalDevice(name="heater_strip", kind="heater", objects=[heater_obj])
+
+        result = build_graph(
+            leaves,
+            ContactReport(),
+            materials,
+            warnings=[],
+            physical_devices=[device],
+        )
+
+        self.assertEqual(len(result.nodes), 2)
+        heater_node = result.nodes[1]
+        self.assertEqual(heater_node["node_type"], "physical_heater")
+        self.assertTrue(heater_node["tags"]["heater"])
+        self.assertTrue(heater_node["tags"]["sensor"])
+        self.assertGreater(heater_node["C_J_K"], 0.0)
+        self.assertEqual(len(result.edges), 1)
+        self.assertEqual(result.edges[0]["edge_type"], "physical_device_contact")
+        self.assertEqual(result.edges[0]["source"], "physical_device_cad_contact")
+
+    def test_graph_build_adds_near_contact_edges_for_near_face_cells(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"part_1": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_1",
+                dominant_material="Copper",
+                confidence="low",
+            ),
+            OctreeCell(
+                cell_id="cell_2",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(12.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"part_2": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_2",
+                dominant_material="Copper",
+                confidence="low",
+            ),
+        ]
+
+        result = build_graph(leaves, None, materials, warnings=[], contact_detection_distance_mm=3.0)
+
+        self.assertEqual(len(result.edges), 1)
+        self.assertEqual(result.edges[0]["edge_type"], "near_same_material_contact")
+        self.assertAlmostEqual(result.edges[0]["shared_area_m2"], 100.0e-6)
+        self.assertAlmostEqual(result.edges[0]["distance_m"], 0.012)
+
+    def test_graph_build_ignores_near_diagonal_cells_without_face_overlap(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"part_1": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_1",
+                dominant_material="Copper",
+                confidence="low",
+            ),
+            OctreeCell(
+                cell_id="cell_2",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(12.0, 12.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"part_2": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_2",
+                dominant_material="Copper",
+                confidence="low",
+            ),
+        ]
+
+        result = build_graph(leaves, None, materials, warnings=[], contact_detection_distance_mm=3.0)
+
+        self.assertEqual(result.edges, [])
+
+    def test_graph_build_does_not_add_loose_component_bounds_contact_when_voxels_do_not_touch(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(4.0, 4.0, 4.0),
+                occupancy={"part_1": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_1",
+                dominant_material="Copper",
+                confidence="low",
+            ),
+            OctreeCell(
+                cell_id="cell_2",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(30.0, 0.0, 0.0),
+                size_mm=(4.0, 4.0, 4.0),
+                occupancy={"part_2": 1.0},
+                material_fractions={"Not assigned": 1.0},
+                dominant_component="part_2",
+                dominant_material="Not assigned",
+                confidence="low",
+            ),
+        ]
+
+        result = build_graph(
+            leaves,
+            None,
+            materials,
+            warnings=[],
+            contact_detection_distance_mm=2.0,
+            component_bounds_mm={
+                "part_1": (np.array([0.0, 0.0, 0.0]), np.array([10.0, 10.0, 10.0])),
+                "part_2": (np.array([11.0, 0.0, 0.0]), np.array([20.0, 10.0, 10.0])),
+            },
+        )
+
+        self.assertEqual(result.edges, [])
+
+    def test_surface_triangle_assigns_open_non_watertight_leaf(self) -> None:
+        materials = self.make_materials()
+        triangle = np.array(
+            [
+                [[-4.0, -4.0, 0.0], [4.0, -4.0, 0.0], [0.0, 4.0, 0.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(
+            vertices=triangle.reshape(-1, 3),
+            faces=np.array([[0, 1, 2]]),
+            triangles=triangle,
+            is_watertight=False,
+        )
+        obj = MeshObject(
+            name="thin_panel",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangle.reshape(-1, 3),
+            bounds_mm=(np.array([-4.0, -4.0, 0.0]), np.array([4.0, 4.0, 0.0])),
+            watertight=False,
+        )
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[obj],
+            bounds_mm=(np.array([-5.0, -5.0, -1.0]), np.array([5.0, 5.0, 1.0])),
+            warnings=[],
+        )
+        params = OctreeParams(
+            min_cell_size_mm=20.0,
+            max_cell_size_mm=20.0,
+            max_depth=0,
+            samples_per_cell=4,
+        )
+        diagnostics = OctreeDiagnostics(debug_leaves=True)
+
+        leaves = build_octree(scene, ContactReport(), materials, params, warnings=[], diagnostics=diagnostics)
+
+        solid = [leaf for leaf in leaves if not leaf.is_empty]
+        self.assertEqual(len(solid), 1)
+        self.assertEqual(solid[0].dominant_component, "thin_panel")
+        self.assertEqual(solid[0].dominant_material, "Copper")
+        self.assertGreater(solid[0].occupancy["thin_panel"], 0.0)
+        self.assertEqual(diagnostics.cells_surface_hit, 1)
+        self.assertEqual(diagnostics.leaf_records[0]["acceptance_reason"], "triangle_surface_intersection")
+
+    def test_sample_points_are_symmetric_for_low_sample_counts(self) -> None:
+        points = _sample_points(np.zeros(3), np.array([10.0, 10.0, 10.0]), 4)
+
+        self.assertEqual(points.shape, (4, 3))
+        self.assertTrue(np.any(points[:, 0] < 0.0))
+        self.assertTrue(np.any(points[:, 0] > 0.0))
+        self.assertTrue(np.any(points[:, 1] < 0.0))
+        self.assertTrue(np.any(points[:, 1] > 0.0))
+        self.assertTrue(np.any(points[:, 2] < 0.0))
+        self.assertTrue(np.any(points[:, 2] > 0.0))
+
+    def test_triangle_box_intersection_rejects_aabb_only_overlap(self) -> None:
+        triangle = np.array(
+            [
+                [0.4, 1.0, 0.0],
+                [1.0, 0.4, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            dtype=float,
+        )
+
+        self.assertFalse(_triangle_intersects_aabb(triangle, np.zeros(3), np.array([0.5, 0.5, 0.5])))
+
+    def test_triangle_index_large_query_uses_bounds_fallback(self) -> None:
+        triangles = np.array(
+            [
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[100.0, 100.0, 0.0], [101.0, 100.0, 0.0], [100.0, 101.0, 0.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(triangles=triangles)
+        obj = MeshObject(
+            name="part",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangles.reshape(-1, 3),
+            bounds_mm=(np.array([0.0, 0.0, 0.0]), np.array([101.0, 101.0, 0.0])),
+            watertight=False,
+        )
+        index = TriangleSpatialIndex.from_mesh(obj, target_bucket_size_mm=0.01)
+
+        matches = index.query(np.array([-1000.0, -1000.0, -1000.0]), np.array([1000.0, 1000.0, 1000.0]))
+
+        self.assertEqual(matches.tolist(), [0, 1])
+
+    def test_bbox_fallback_does_not_assign_aabb_only_leaf_when_refinement_budget_stops(self) -> None:
+        materials = self.make_materials()
+        mesh = SimpleNamespace(vertices=[], faces=[], triangles=np.empty((0, 3, 3)), is_watertight=False)
+        obj = MeshObject(
+            name="part_1",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=np.empty((0, 3)),
+            bounds_mm=(np.array([-5.0, -5.0, -5.0]), np.array([5.0, 5.0, 5.0])),
+            watertight=False,
+        )
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[obj],
+            bounds_mm=(np.array([-5.0, -5.0, -5.0]), np.array([5.0, 5.0, 5.0])),
+            warnings=[],
+        )
+        params = OctreeParams(
+            min_cell_size_mm=1.0,
+            max_cell_size_mm=2.0,
+            max_leaf_cells=1,
+            bbox_fallback=True,
+            samples_per_cell=3,
+        )
+
+        diagnostics = OctreeDiagnostics()
+
+        leaves = build_octree(scene, ContactReport(), materials, params, warnings=[], diagnostics=diagnostics)
+
+        self.assertEqual(len(leaves), 1)
+        self.assertIsNone(leaves[0].dominant_component)
+        self.assertEqual(leaves[0].occupancy, {})
+        self.assertIn("AABB overlap", " ".join(leaves[0].warnings))
+        self.assertEqual(diagnostics.cells_subdivided, 0)
+
+    def test_empty_graph_guard_reports_actionable_failure(self) -> None:
+        args = SimpleNamespace(bbox_fallback=False, max_leaf_cells=15000)
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={},
+                material_fractions={},
+                dominant_component=None,
+                dominant_material=None,
+                confidence="low",
+            )
+        ]
+
+        with self.assertRaises(SystemExit) as context:
+            _raise_if_empty_graph([], leaves, args)
+
+        message = str(context.exception)
+        self.assertIn("none were classified as solid graph nodes", message)
+        self.assertIn("triangle-box surface intersections", message)
+
+    def test_empty_first_pass_does_not_retry_with_bbox_fallback(self) -> None:
+        args = SimpleNamespace(
+            bbox_fallback=False,
+            max_leaf_cells=15000,
+            contact_detection_distance_mm=None,
+            proximity_contact_distance_mm=None,
+            radiation_reference_temperature_K=293.15,
+        )
+        params = OctreeParams(bbox_fallback=False)
+        empty_leaf = OctreeCell(
+            cell_id="cell_empty",
+            parent_id=None,
+            children_ids=[],
+            level=0,
+            center_mm=(0.0, 0.0, 0.0),
+            size_mm=(10.0, 10.0, 10.0),
+            occupancy={},
+            material_fractions={},
+            dominant_component=None,
+            dominant_material=None,
+            confidence="low",
+        )
+        with (
+            patch("octree_graph.cli.build_octree", return_value=[empty_leaf]) as build_octree_mock,
+            patch(
+                "octree_graph.cli.build_graph",
+                return_value=SimpleNamespace(nodes=[], edges=[], warnings=[]),
+            ) as build_graph_mock,
+        ):
+            leaves, graph_result = _build_graph_with_optional_fallback(
+                scene=SimpleNamespace(),
+                voxel_scene=SimpleNamespace(),
+                contact_report=ContactReport(),
+                materials=self.make_materials(),
+                params=params,
+                args=args,
+                warnings=[],
+            )
+
+        self.assertEqual(build_octree_mock.call_count, 1)
+        self.assertFalse(args.bbox_fallback)
+        self.assertFalse(params.bbox_fallback)
+        self.assertEqual(leaves, [empty_leaf])
+        self.assertEqual(graph_result.nodes, [])
+        self.assertEqual(build_graph_mock.call_args.kwargs["contact_detection_distance_mm"], 0.0)
 
 
 if __name__ == "__main__":

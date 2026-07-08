@@ -1,4 +1,4 @@
-"""Excel ContactReport.xlsx loader."""
+"""Excel part-material lookup loader."""
 
 from __future__ import annotations
 
@@ -11,16 +11,7 @@ from typing import Any
 @dataclass
 class ContactReport:
     component_materials: dict[str, str] = field(default_factory=dict)
-    component_masses_kg: dict[str, float] = field(default_factory=dict)
-    contact_pairs: set[tuple[str, str]] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
-
-    def has_pair(self, a: str, b: str) -> bool:
-        for alias_a in _component_aliases(a):
-            for alias_b in _component_aliases(b):
-                if tuple(sorted((alias_a, alias_b))) in self.contact_pairs:
-                    return True
-        return False
 
     def material_for_component(self, name: str) -> str | None:
         for alias in _component_aliases(name):
@@ -37,16 +28,14 @@ def load_contact_report(path: str | Path | None) -> ContactReport:
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
-        raise RuntimeError("openpyxl is required to read ContactReport.xlsx.") from exc
+        raise RuntimeError("openpyxl is required to read Excel material lookups.") from exc
 
     workbook = load_workbook(Path(path), data_only=True, read_only=True)
-    for sheet_name in ("Contact Summary", "Contact Pairs"):
-        if sheet_name not in workbook.sheetnames:
-            report.warnings.append(f"Missing sheet {sheet_name!r}.")
-    if "Contact Summary" in workbook.sheetnames:
-        _read_summary(workbook["Contact Summary"], report)
-    if "Contact Pairs" in workbook.sheetnames:
-        _read_pairs(workbook["Contact Pairs"], report)
+    try:
+        sheet = _find_material_lookup_sheet(workbook)
+        _read_material_lookup(sheet, report)
+    finally:
+        workbook.close()
     _add_component_aliases(report)
     return report
 
@@ -67,38 +56,22 @@ def _pick(row: tuple[Any, ...], headers: dict[str, int], names: tuple[str, ...])
     return None
 
 
-def _read_summary(sheet: Any, report: ContactReport) -> None:
-    headers, header_row = _header_map(sheet, ("instance name", "material"))
+def _find_material_lookup_sheet(workbook: Any) -> Any:
+    if "Materials" in workbook.sheetnames:
+        return workbook["Materials"]
+    return workbook[workbook.sheetnames[0]]
+
+
+def _read_material_lookup(sheet: Any, report: ContactReport) -> None:
+    headers, header_row = _header_map(sheet, ("part name", "material name"))
     for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
-        component = _pick(row, headers, ("component", "component name", "name", "part"))
-        component = component or _pick(row, headers, ("instance name",))
+        component = _pick(row, headers, ("part name",))
         if not component:
             continue
         name = str(component).strip()
-        material = _pick(row, headers, ("material", "material name"))
+        material = _pick(row, headers, ("material name",))
         if material:
             report.component_materials[name] = str(material).strip()
-        mass = _pick(row, headers, ("mass_kg", "mass kg", "mass"))
-        if mass not in (None, ""):
-            try:
-                report.component_masses_kg[name] = float(mass)
-            except (TypeError, ValueError):
-                report.warnings.append(f"Invalid mass for {name}: {mass!r}")
-
-
-def _read_pairs(sheet: Any, report: ContactReport) -> None:
-    headers, header_row = _header_map(sheet, ("part a name", "part b name"))
-    for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
-        a = _pick(row, headers, ("component a", "part a", "source", "component_1", "component1"))
-        b = _pick(row, headers, ("component b", "part b", "target", "component_2", "component2"))
-        a = a or _pick(row, headers, ("part a name",))
-        b = b or _pick(row, headers, ("part b name",))
-        if a and b:
-            a_name = str(a).strip()
-            b_name = str(b).strip()
-            for alias_a in _component_aliases(a_name):
-                for alias_b in _component_aliases(b_name):
-                    report.contact_pairs.add(tuple(sorted((alias_a, alias_b))))
 
 
 def _add_component_aliases(report: ContactReport) -> None:

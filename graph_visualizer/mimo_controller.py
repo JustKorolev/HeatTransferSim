@@ -35,7 +35,7 @@ def weighted_rms_error(errors: np.ndarray, weights: np.ndarray) -> float:
 
 def allocate_thermal_rate_qp(
     B_dyn: np.ndarray,
-    natural_dTdt: np.ndarray,
+    drift_dTdt: np.ndarray,
     v_cmd: np.ndarray,
     weights: np.ndarray,
     max_powers: np.ndarray,
@@ -48,7 +48,7 @@ def allocate_thermal_rate_qp(
     if raw_B.ndim != 2:
         raise ValueError("MIMO dynamic gain matrix B_dyn must be two-dimensional.")
     ns, nh = raw_B.shape
-    natural = np.asarray(natural_dTdt, dtype=float).reshape(-1)
+    drift = np.asarray(drift_dTdt, dtype=float).reshape(-1)
     command = np.asarray(v_cmd, dtype=float).reshape(-1)
     maxima = np.asarray(max_powers, dtype=float).reshape(-1)
     previous = np.asarray(u_prev, dtype=float).reshape(-1)
@@ -57,8 +57,8 @@ def allocate_thermal_rate_qp(
         if max_delta_power is None
         else np.asarray(max_delta_power, dtype=float).reshape(-1)
     )
-    if natural.shape != (ns,):
-        raise ValueError(f"Natural dT/dt vector length {natural.shape} does not match B_dyn rows {ns}.")
+    if drift.shape != (ns,):
+        raise ValueError(f"Drift dT/dt vector length {drift.shape} does not match B_dyn rows {ns}.")
     if command.shape != (ns,):
         raise ValueError(f"Rate command vector length {command.shape} does not match B_dyn rows {ns}.")
     if maxima.shape != (nh,):
@@ -83,7 +83,7 @@ def allocate_thermal_rate_qp(
         raise ValueError(f"Sensor weight vector length {q.shape} does not match B_dyn rows {ns}.")
     q = np.where(np.isfinite(q), np.maximum(q, 0.0), 0.0)
     B = np.where(np.isfinite(raw_B), raw_B, 0.0)
-    natural = np.where(np.isfinite(natural), natural, 0.0)
+    drift = np.where(np.isfinite(drift), drift, 0.0)
     command = np.where(np.isfinite(command), command, 0.0)
     maxima = np.where(np.isfinite(maxima), np.maximum(maxima, 0.0), 0.0)
     previous = np.clip(np.where(np.isfinite(previous), previous, 0.0), 0.0, maxima)
@@ -94,7 +94,7 @@ def allocate_thermal_rate_qp(
         return AllocationResult(
             np.zeros(nh, dtype=float),
             B,
-            float(np.linalg.norm(natural - command)),
+            float(np.linalg.norm(drift - command)),
             0.0,
             True,
             False,
@@ -105,7 +105,7 @@ def allocate_thermal_rate_qp(
         warnings.append(f"{int(np.sum(~positive_power))} MIMO heater(s) have zero max power.")
         sub_result = allocate_thermal_rate_qp(
             B[:, positive_power],
-            natural,
+            drift,
             command,
             q,
             maxima[positive_power],
@@ -116,7 +116,7 @@ def allocate_thermal_rate_qp(
         )
         u = np.zeros(nh, dtype=float)
         u[positive_power] = sub_result.u
-        residual = natural + B @ u - command
+        residual = drift + B @ (u - previous) - command
         return AllocationResult(
             u,
             B,
@@ -132,12 +132,12 @@ def allocate_thermal_rate_qp(
     if zero_rows:
         warnings.append(f"{len(zero_rows)} MIMO sensor row(s) have zero dynamic heater authority.")
     if not np.any(np.abs(B) > 0.0):
-        if np.linalg.norm(natural - command) > 1.0e-12:
+        if np.linalg.norm(drift - command) > 1.0e-12:
             warnings.append("MIMO allocation failed safely because the active dynamic gain matrix is zero.")
         return AllocationResult(
             np.zeros(nh, dtype=float),
             B,
-            float(np.linalg.norm(natural - command)),
+            float(np.linalg.norm(drift - command)),
             0.0,
             False,
             False,
@@ -147,7 +147,7 @@ def allocate_thermal_rate_qp(
 
     sqrt_weights = np.sqrt(q)
     A_parts = [sqrt_weights[:, None] * B]
-    b_parts = [sqrt_weights * (command - natural)]
+    b_parts = [sqrt_weights * (command - drift + B @ previous)]
     lam = max(0.0, float(lambda_u))
     if lam > 0.0:
         scale = float(np.sqrt(lam))
@@ -170,7 +170,7 @@ def allocate_thermal_rate_qp(
         return AllocationResult(
             np.zeros(nh, dtype=float),
             B,
-            float(np.linalg.norm(natural - command)),
+            float(np.linalg.norm(drift - command)),
             0.0,
             False,
             False,
@@ -183,7 +183,7 @@ def allocate_thermal_rate_qp(
     else:
         u = np.asarray(result.x, dtype=float).reshape(-1)
     u = np.clip(np.where(np.isfinite(u), u, 0.0), 0.0, maxima)
-    residual = natural + B @ u - command
+    residual = drift + B @ (u - previous) - command
     bounds_active = bool(np.any(u <= lower_bounds + 1.0e-9) or np.any(u >= upper_bounds - 1.0e-9))
     return AllocationResult(
         u,

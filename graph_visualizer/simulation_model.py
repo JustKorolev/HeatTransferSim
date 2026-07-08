@@ -29,6 +29,7 @@ class SimulationState:
     pid_states: dict[int, tuple[float, float | None, tuple[float, ...]]] = field(default_factory=dict)
     controller_integrators: dict[int, float] = field(default_factory=dict)
     controller_y_prev: dict[int, float] = field(default_factory=dict)
+    controller_dTdt_hat_by_sensor: dict[int, float] = field(default_factory=dict)
     controller_error_prev: dict[int, float] = field(default_factory=dict)
     controller_error_history: dict[int, tuple[float, ...]] = field(default_factory=dict)
     controller_last_power_by_heater: dict[int, float] = field(default_factory=dict)
@@ -43,6 +44,7 @@ class PreparedSimulationSnapshot:
     pid_states: dict[int, tuple[float, float | None, tuple[float, ...]]]
     controller_integrators: dict[int, float]
     controller_y_prev: dict[int, float]
+    controller_dTdt_hat_by_sensor: dict[int, float]
     controller_error_prev: dict[int, float]
     controller_error_history: dict[int, tuple[float, ...]]
     controller_mode: str
@@ -69,6 +71,7 @@ class PreparedSimulation:
     warnings: list[str] = field(default_factory=list)
     controller_integrators: dict[int, float] = field(default_factory=dict)
     controller_y_prev: dict[int, float] = field(default_factory=dict)
+    controller_dTdt_hat_by_sensor: dict[int, float] = field(default_factory=dict)
     controller_error_prev: dict[int, float] = field(default_factory=dict)
     controller_error_history: dict[int, tuple[float, ...]] = field(default_factory=dict)
     controller_mode: str = "coarse"
@@ -101,6 +104,7 @@ class PreparedSimulation:
                 self._pid_state_snapshot(),
                 dict(self.controller_integrators),
                 dict(self.controller_y_prev),
+                dict(self.controller_dTdt_hat_by_sensor),
                 dict(self.controller_error_prev),
                 dict(self.controller_error_history),
                 dict(self.controller_last_power_by_heater),
@@ -129,6 +133,7 @@ class PreparedSimulation:
                 self._pid_state_snapshot(),
                 dict(self.controller_integrators),
                 dict(self.controller_y_prev),
+                dict(self.controller_dTdt_hat_by_sensor),
                 dict(self.controller_error_prev),
                 dict(self.controller_error_history),
                 dict(self.controller_last_power_by_heater),
@@ -140,6 +145,7 @@ class PreparedSimulation:
     def reset_controller_integrators(self) -> None:
         self.controller_integrators = {}
         self.controller_y_prev = {}
+        self.controller_dTdt_hat_by_sensor = {}
         self.controller_error_prev = {}
         self.controller_error_history = {}
         self.controller_mode = "coarse"
@@ -149,6 +155,7 @@ class PreparedSimulation:
         self.controller_dynamic_gain_cache = {}
 
     def mark_controller_stale(self) -> None:
+        self.controller_dTdt_hat_by_sensor = {}
         self.controller_last_power_by_heater = {}
         self.controller_allocator_diagnostics = {}
         self.controller_dynamic_gain_cache = {}
@@ -163,6 +170,7 @@ class PreparedSimulation:
                     dict(state.pid_states),
                     dict(state.controller_integrators),
                     dict(state.controller_y_prev),
+                    dict(state.controller_dTdt_hat_by_sensor),
                     dict(state.controller_error_prev),
                     dict(state.controller_error_history),
                     dict(state.controller_last_power_by_heater),
@@ -174,6 +182,7 @@ class PreparedSimulation:
             pid_states=self._pid_state_snapshot(),
             controller_integrators=dict(self.controller_integrators),
             controller_y_prev=dict(self.controller_y_prev),
+            controller_dTdt_hat_by_sensor=dict(self.controller_dTdt_hat_by_sensor),
             controller_error_prev=dict(self.controller_error_prev),
             controller_error_history=dict(self.controller_error_history),
             controller_mode=str(self.controller_mode),
@@ -192,6 +201,7 @@ class PreparedSimulation:
                 dict(state.pid_states),
                 dict(state.controller_integrators),
                 dict(state.controller_y_prev),
+                dict(state.controller_dTdt_hat_by_sensor),
                 dict(state.controller_error_prev),
                 dict(state.controller_error_history),
                 dict(state.controller_last_power_by_heater),
@@ -203,6 +213,7 @@ class PreparedSimulation:
         self._restore_pid_state_snapshot(snapshot.pid_states)
         self.controller_integrators = dict(snapshot.controller_integrators)
         self.controller_y_prev = dict(snapshot.controller_y_prev)
+        self.controller_dTdt_hat_by_sensor = dict(snapshot.controller_dTdt_hat_by_sensor)
         self.controller_error_prev = dict(snapshot.controller_error_prev)
         self.controller_error_history = dict(snapshot.controller_error_history)
         self.controller_mode = str(snapshot.controller_mode)
@@ -230,6 +241,7 @@ class PreparedSimulation:
             self._pid_state_snapshot(),
             dict(self.controller_integrators),
             dict(self.controller_y_prev),
+            dict(self.controller_dTdt_hat_by_sensor),
             dict(self.controller_error_prev),
             dict(self.controller_error_history),
             dict(self.controller_last_power_by_heater),
@@ -272,6 +284,7 @@ class PreparedSimulation:
         self._restore_pid_state_snapshot(state.pid_states)
         self.controller_integrators = dict(state.controller_integrators)
         self.controller_y_prev = dict(state.controller_y_prev)
+        self.controller_dTdt_hat_by_sensor = dict(state.controller_dTdt_hat_by_sensor)
         self.controller_error_prev = dict(state.controller_error_prev)
         self.controller_error_history = dict(state.controller_error_history)
         self.controller_last_power_by_heater = dict(state.controller_last_power_by_heater)
@@ -497,7 +510,7 @@ class PreparedSimulation:
                 "active_heater_count": len(heater_ids),
                 "rate_command_norm": 0.0,
                 "heater_command_norm": 0.0,
-                "natural_dTdt_norm": 0.0,
+                "measured_drift_dTdt_norm": 0.0,
                 "predicted_dTdt_residual_norm": 0.0,
                 "allocation_residual_norm": 0.0,
                 "bounds_active": False,
@@ -626,21 +639,18 @@ class PreparedSimulation:
         )
         slew_rate = max(0.0, float(getattr(self.params, "mimo_heater_slew_rate_W_per_s", 0.0)))
         max_delta_power = np.full(len(heater_ids), slew_rate * dt, dtype=float) if slew_rate > 0.0 else None
-        natural_power = np.zeros(len(self.node_ids), dtype=float)
-        natural_power -= _cryocooler_power_vector(self.model, self.node_ids, self.temperatures_K, self.params)
-        natural_dTdt_full = self._thermal_rhs(self.temperatures_K, natural_power)
         sensor_rows = np.array([node_index[sensor_id] for sensor_id in sensor_ids], dtype=int)
         heater_rows = np.array([node_index[heater_id] for heater_id in heater_ids], dtype=int)
-        natural_dTdt = natural_dTdt_full[sensor_rows]
-        B_dyn = self._mimo_dynamic_gain_matrix(
+        raw_dTdt, dTdt_hat = self._mimo_sensor_drift_estimate(sensor_ids, y, dt)
+        B_s = self._mimo_dynamic_gain_matrix(
             sensor_ids,
             heater_ids,
             sensor_rows,
             heater_rows,
         )
         allocation = allocate_thermal_rate_qp(
-            B_dyn,
-            natural_dTdt,
+            B_s,
+            dTdt_hat,
             v_cmd,
             weights,
             maxima,
@@ -653,16 +663,18 @@ class PreparedSimulation:
         u = np.clip(np.where(np.isfinite(u), u, 0.0), 0.0, maxima)
         for heater_id, command in zip(heater_ids, u):
             powers[node_index[heater_id]] += float(command)
-        achieved_dTdt = natural_dTdt + B_dyn @ u
-        residual = achieved_dTdt - v_cmd
-        self.controller_warnings = list(allocation.warnings)
+        heater_delta_dTdt = B_s @ (u - u_prev)
+        predicted_dTdt = dTdt_hat + heater_delta_dTdt
+        residual = predicted_dTdt - v_cmd
+        gain_warnings = list((self.controller_dynamic_gain_cache or {}).get("warnings", ()))
+        self.controller_warnings = gain_warnings + list(allocation.warnings)
         self.controller_allocator_diagnostics = {
             "active_sensor_count": len(sensor_ids),
             "active_heater_count": len(heater_ids),
             "rate_command_norm": float(np.linalg.norm(v_cmd)),
             "heater_command_norm": float(np.linalg.norm(u)),
-            "natural_dTdt_norm": float(np.linalg.norm(natural_dTdt)),
-            "predicted_dTdt_norm": float(np.linalg.norm(achieved_dTdt)),
+            "measured_drift_dTdt_norm": float(np.linalg.norm(dTdt_hat)),
+            "predicted_dTdt_norm": float(np.linalg.norm(predicted_dTdt)),
             "predicted_dTdt_residual_norm": float(np.linalg.norm(residual)),
             "allocation_residual_norm": float(np.linalg.norm(residual)),
             "target_residual_norm": float(allocation.residual_norm),
@@ -675,11 +687,16 @@ class PreparedSimulation:
             "slew_delta_limit_W": float(slew_rate * dt) if slew_rate > 0.0 else 0.0,
             "v_cmd_min_K_per_s": float(np.min(v_cmd)) if v_cmd.size else 0.0,
             "v_cmd_max_K_per_s": float(np.max(v_cmd)) if v_cmd.size else 0.0,
-            "natural_dTdt_s": [float(value) for value in natural_dTdt],
+            "raw_dTdt_s": [float(value) for value in raw_dTdt],
+            "filtered_dTdt_hat_s": [float(value) for value in dTdt_hat],
+            "B_s": [[float(value) for value in row] for row in B_s],
+            "B_s_delta_u_dTdt_s": [float(value) for value in heater_delta_dTdt],
             "v_cmd_s": [float(value) for value in v_cmd],
-            "achieved_predicted_dTdt_s": [float(value) for value in achieved_dTdt],
+            "predicted_dTdt_s": [float(value) for value in predicted_dTdt],
+            "achieved_predicted_dTdt_s": [float(value) for value in predicted_dTdt],
             "residual_s": [float(value) for value in residual],
             "heater_commands_W": [float(value) for value in u],
+            "u_prev_W": [float(value) for value in u_prev],
             "heater_at_lower_bound": [bool(value <= 1.0e-9) for value in u],
             "heater_at_upper_bound": [bool(value >= max(max_power - 1.0e-9, 0.0)) for value, max_power in zip(u, maxima)],
         }
@@ -688,7 +705,7 @@ class PreparedSimulation:
             if bool(getattr(self.params, "mimo_freeze_integral_when_saturated", True)):
                 committed_error_history = {}
                 for row, sensor_id in enumerate(sensor_ids):
-                    relevant = np.abs(B_dyn[row, :]) > 1.0e-12
+                    relevant = np.abs(B_s[row, :]) > 1.0e-12
                     freeze = False
                     if np.any(relevant):
                         if errors[row] < 0.0 and bool(np.all(u[relevant] <= 1.0e-9)):
@@ -725,12 +742,45 @@ class PreparedSimulation:
                 int(sensor_id): float(value)
                 for sensor_id, value in zip(sensor_ids, y)
             }
+            self.controller_dTdt_hat_by_sensor = {
+                int(sensor_id): float(value)
+                for sensor_id, value in zip(sensor_ids, dTdt_hat)
+            }
             self.controller_error_prev = {
                 int(sensor_id): float(value)
                 for sensor_id, value in zip(sensor_ids, errors)
             }
             self.controller_error_history = committed_error_history
         return powers
+
+    def _mimo_sensor_drift_estimate(
+        self,
+        sensor_ids: list[int],
+        sensor_temperatures_K: np.ndarray,
+        dt: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        temperatures = np.asarray(sensor_temperatures_K, dtype=float).reshape(-1)
+        dt_floor = max(0.0, float(getattr(self.params, "derivative_dt_floor_s", 1.0e-9)))
+        tau = max(0.0, float(getattr(self.params, "drift_lpf_tau_s", 0.0)))
+        use_update = bool(np.isfinite(dt) and dt > dt_floor)
+        raw = np.zeros(len(sensor_ids), dtype=float)
+        filtered = np.zeros(len(sensor_ids), dtype=float)
+        alpha = float(dt / (tau + dt)) if use_update else 0.0
+        alpha = min(1.0, max(0.0, alpha)) if np.isfinite(alpha) else 0.0
+        for index, (sensor_id, temperature) in enumerate(zip(sensor_ids, temperatures)):
+            previous_hat = float(self.controller_dTdt_hat_by_sensor.get(int(sensor_id), 0.0))
+            if not np.isfinite(previous_hat):
+                previous_hat = 0.0
+            previous_temperature = self.controller_y_prev.get(int(sensor_id))
+            if not use_update or previous_temperature is None:
+                raw_value = previous_hat
+            else:
+                raw_value = (float(temperature) - float(previous_temperature)) / float(dt)
+            if not np.isfinite(raw_value):
+                raw_value = previous_hat
+            raw[index] = float(raw_value)
+            filtered[index] = (1.0 - alpha) * previous_hat + alpha * float(raw_value)
+        return raw, filtered
 
     def _mimo_dynamic_gain_matrix(
         self,
@@ -756,13 +806,21 @@ class PreparedSimulation:
             return np.asarray(cache["B_dyn"], dtype=float).copy()
         B_dyn = np.zeros((len(sensor_rows), len(heater_rows)), dtype=float)
         heater_col_by_row = {int(row): col for col, row in enumerate(heater_rows)}
+        warnings: list[str] = []
         for sensor_index, sensor_row in enumerate(sensor_rows):
             heater_col = heater_col_by_row.get(int(sensor_row))
             if heater_col is not None:
-                B_dyn[sensor_index, heater_col] = float(inv_C[int(sensor_row)])
+                inverse_capacitance = float(inv_C[int(sensor_row)])
+                if np.isfinite(inverse_capacitance) and inverse_capacitance > 0.0:
+                    B_dyn[sensor_index, heater_col] = inverse_capacitance
+                else:
+                    warnings.append(
+                        f"MIMO sensor cell {int(sensor_ids[sensor_index])} has invalid capacitance; B_s row set to zero."
+                    )
         self.controller_dynamic_gain_cache = {
             "key": key,
             "B_dyn": B_dyn.copy(),
+            "warnings": tuple(warnings),
         }
         return B_dyn
 

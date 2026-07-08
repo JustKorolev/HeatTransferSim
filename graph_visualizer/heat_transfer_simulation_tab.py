@@ -209,6 +209,8 @@ class HeatTransferSimulationTab:
             ("mimo_rho_du", "rho_du power change", 0.0, 1.0e9, 0.01),
             ("mimo_heater_slew_rate_W_per_s", "hard slew W/s", 0.0, 1.0e9, 1.0),
             ("mimo_v_cmd_abs_max_K_per_s", "max rate cmd K/s", 0.0, 1.0e9, 0.01),
+            ("drift_lpf_tau_s", "drift LPF tau s", 0.0, 1.0e9, 0.1),
+            ("derivative_dt_floor_s", "derivative dt floor s", 0.0, 1.0e9, 1.0e-6),
             ("mimo_integral_abs_max", "integral abs max", 0.0, 1.0e12, 1.0),
         ):
             self._add_double_parameter(mimo_form, name, label, minimum, maximum, step)
@@ -1189,6 +1191,8 @@ class HeatTransferSimulationTab:
             mimo_rho_du=float(self.inputs["mimo_rho_du"].value()),
             mimo_heater_slew_rate_W_per_s=float(self.inputs["mimo_heater_slew_rate_W_per_s"].value()),
             mimo_v_cmd_abs_max_K_per_s=float(self.inputs["mimo_v_cmd_abs_max_K_per_s"].value()),
+            drift_lpf_tau_s=float(self.inputs["drift_lpf_tau_s"].value()),
+            derivative_dt_floor_s=float(self.inputs["derivative_dt_floor_s"].value()),
             mimo_integral_abs_max=float(self.inputs["mimo_integral_abs_max"].value()),
             mimo_freeze_integral_when_saturated=bool(self.inputs["mimo_freeze_integral_when_saturated"].isChecked()),
             enabled_heater_node_ids=(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 import json
 from pathlib import Path
+import re
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ UNASSIGNED_MATERIAL_NAMES = {
     "none",
     "null",
     "unknown",
+    "unknown material",
     "unassigned",
 }
 PROJECT_MATERIALS_FILE = Path(__file__).resolve().parents[1] / "materials.json"
@@ -86,9 +88,51 @@ def resolve_material(
     return fallback
 
 
+def infer_material_name_from_text(text: str | None, materials: dict[str, Material]) -> str | None:
+    if not text:
+        return None
+    normalized = _normalize_material_text(text)
+    exact = _case_insensitive_material_lookup(str(text).strip(), materials)
+    if exact and not is_unassigned_material_name(exact):
+        return exact
+    aliases = [
+        (r"\b18\s*[-_]?\s*8\s*SS\b", "18-8 Stainless Steel"),
+        (r"\b18\s*[-_]?\s*8\s*STAINLESS\b", "18-8 Stainless Steel"),
+        (r"\b304\s*SS\b", "AISI 304 Stainless Steel"),
+        (r"\bAISI\s*304\b", "AISI 304 Stainless Steel"),
+        (r"\b17\s*[-_]?\s*7\s*PH\b", "17-7PH Stainless Steel"),
+        (r"\b17\s*[-_]?\s*7\b", "17-7PH Stainless Steel"),
+        (r"\b6061\s*[-_]?\s*T6\b", "6061-T6 Aluminum"),
+        (r"\b6061\b", "6061-T6 Aluminum"),
+        (r"\bAL(?:UMINUM)?\b", "6061-T6 Aluminum"),
+        (r"\bCOPPER\b", "Copper"),
+        (r"\bCU\b", "Copper"),
+        (r"\bINVAR\s*36\b", "Invar36"),
+        (r"\bINVAR\b", "Invar, AL 36"),
+        (r"\bDELRIN\b", "Delrin 2700 NC010, Low Viscosity Acetal Copolymer (SS)"),
+        (r"\bPHENOLIC\b", "Phenolic"),
+    ]
+    for pattern, material_name in aliases:
+        if re.search(pattern, normalized) and material_name in materials:
+            return material_name
+    return None
+
+
 def default_assigned_material(materials: dict[str, Material]) -> Material:
     """Return the material used when cells have missing/unknown material metadata."""
     return materials.get(DEFAULT_ASSIGNED_MATERIAL_NAME, DEFAULT_MATERIAL)
+
+
+def _case_insensitive_material_lookup(name: str, materials: dict[str, Material]) -> str | None:
+    wanted = name.casefold()
+    for material_name in materials:
+        if material_name.casefold() == wanted:
+            return material_name
+    return None
+
+
+def _normalize_material_text(text: str) -> str:
+    return re.sub(r"[^A-Z0-9-]+", " ", text.upper())
 
 
 def is_unassigned_material_name(name: str | None) -> bool:

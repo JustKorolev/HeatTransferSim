@@ -27,6 +27,8 @@ class SimulationParameters:
     mimo_rho_du: float = 0.0
     mimo_heater_slew_rate_W_per_s: float = 0.0
     mimo_v_cmd_abs_max_K_per_s: float = 0.25
+    drift_lpf_tau_s: float = 2.0
+    derivative_dt_floor_s: float = 1.0e-9
     mimo_integral_abs_max: float = 1.0e6
     mimo_freeze_integral_when_saturated: bool = True
     enabled_heater_node_ids: tuple[int, ...] | None = None

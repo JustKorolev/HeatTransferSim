@@ -1,8 +1,8 @@
 Octree Thermal Graph Validation
 ================================
 leaf cells: 14995
-graph nodes: 10161
-graph edges: 28816
+graph nodes: 5212
+graph edges: 12875
 
 Errors:
 - none

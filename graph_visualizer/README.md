@@ -145,13 +145,12 @@ edges, and rebuilds `G` and `L`.
 
 ## Octree Graph Conversion
 
-Use the project-level wrapper to convert a SolidWorks-exported glTF/GLB plus a
-contact report and material table:
+Use the project-level wrapper to convert a SolidWorks-exported glTF/GLB by
+pointing at the one directory containing the `.gltf`/`.glb` and `.bin` files:
 
 ```powershell
 python build_octree_graph.py `
-  --gltf assembly.gltf `
-  --contact-report ContactReport.xlsx `
+  --mesh-dir meshes\assembly_export `
   --graph-name hispec_test_octree `
   --output-root graphs
 ```
@@ -160,4 +159,8 @@ The converter preserves millimeter coordinates for visualization, computes
 thermal quantities in SI units, generates `C`, `G`, `L`, and `A`, and writes a
 validation report with unknown materials, non-watertight mesh warnings, matrix
 checks, and tolerance-accepted boundary cells. Material properties are read from
-the project-level `materials.json` by default.
+the project-level `materials.json` by default. The mesh directory should contain
+exactly one `.gltf` or `.glb` scene file.
+If `materials.xlsx` exists in the mesh directory, it is used as a two-column
+Excel lookup for part names and material names. Contact checking is handled in
+Python by exact shared voxel faces plus a voxel-surface contact-distance pass.

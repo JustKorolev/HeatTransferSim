@@ -1,0 +1,23 @@
+{
+  "mesh_dir": "meshes\\HISPEC-CRYOSTAT-SMALL",
+  "materials": "materials.json",
+  "graph_name": "HISPEC-CRYOSTAT-TEST",
+  "output_root": "graphs",
+  "min_cell_size_mm": 4.0,
+  "max_cell_size_mm": 10.0,
+  "max_depth": 8,
+  "dominant_fraction_accept": 0.95,
+  "minority_fraction_ignore": 0.02,
+  "material_contrast_refine_threshold": 5.0,
+  "contact_refine_distance_mm": 10.0,
+  "boundary_refine": true,
+  "max_leaf_cells": 150000,
+  "samples_per_cell": 16,
+  "min_solid_fraction": 0.12,
+  "bbox_fallback": false,
+  "contact_detection_distance_mm": 10.0,
+  "proximity_contact_distance_mm": null,
+  "radiation_reference_temperature_K": 293.15,
+  "octree_debug_leaves": false,
+  "no_progress": false
+}
