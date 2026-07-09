@@ -545,6 +545,65 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual(signature(parallel), signature(sequential))
 
+    def test_parallel_octree_worker_failure_falls_back_to_sequential(self) -> None:
+        materials = self.make_materials()
+        triangle = np.array(
+            [
+                [[-4.0, -4.0, 0.0], [4.0, -4.0, 0.0], [0.0, 4.0, 0.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(
+            vertices=triangle.reshape(-1, 3),
+            faces=np.array([[0, 1, 2]]),
+            triangles=triangle,
+            is_watertight=False,
+        )
+        obj = MeshObject(
+            name="thin_panel",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangle.reshape(-1, 3),
+            bounds_mm=(np.array([-4.0, -4.0, 0.0]), np.array([4.0, 4.0, 0.0])),
+            watertight=False,
+        )
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[obj],
+            bounds_mm=(np.array([-5.0, -5.0, -1.0]), np.array([5.0, 5.0, 1.0])),
+            warnings=[],
+        )
+        params = OctreeParams(
+            min_cell_size_mm=20.0,
+            max_cell_size_mm=20.0,
+            max_depth=0,
+            samples_per_cell=4,
+            voxel_workers=2,
+        )
+        warnings: list[str] = []
+
+        class FailingExecutor:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+            def map(self, *args, **kwargs):
+                raise AttributeError("'range_iterator' object has no attribute 'get'")
+
+        with patch("octree_graph.octree.ProcessPoolExecutor", FailingExecutor):
+            leaves = build_octree(scene, ContactReport(), materials, params, warnings=warnings)
+
+        solid = [leaf for leaf in leaves if not leaf.is_empty]
+        self.assertEqual(len(solid), 1)
+        self.assertEqual(solid[0].dominant_component, "thin_panel")
+        self.assertIn("falling back to sequential", " ".join(warnings))
+        self.assertIn("range_iterator", " ".join(warnings))
+
     def test_sample_points_are_symmetric_for_low_sample_counts(self) -> None:
         points = _sample_points(np.zeros(3), np.array([10.0, 10.0, 10.0]), 4)
 

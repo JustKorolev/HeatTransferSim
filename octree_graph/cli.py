@@ -138,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help=(
             "Worker processes for octree cell classification. "
-            "Use 1 for sequential execution, or 0 for conservative auto selection capped at 4."
+            "Use 1 for sequential execution, or 0 for conservative auto selection capped at 2."
         ),
     )
     parser.add_argument(

@@ -165,6 +165,7 @@ are rejected for octree conversion.
 If `materials.xlsx` exists in the mesh directory, it is used as a two-column
 Excel lookup for part names and material names. Contact checking is handled in
 Python by exact shared voxel faces plus a voxel-surface contact-distance pass.
-Use `--voxel-workers 0` for conservative auto-capped multiprocessing during
-octree classification, or pass an explicit worker count. Large CAD assemblies
-copy triangle data into each worker process, so increase the count gradually.
+Use `--voxel-workers 0` for conservative multiprocessing capped at 2 worker
+processes during octree classification, or pass an explicit worker count. Large
+CAD assemblies copy triangle data into each worker process, so increase the
+count gradually.

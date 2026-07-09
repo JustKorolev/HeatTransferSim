@@ -111,7 +111,7 @@ If `materials.xlsx` exists in `--mesh-dir`, it maps SolidWorks part instance
 names to material names. Contact checking is handled separately in Python by
 exact shared voxel faces plus a voxel-surface contact-distance pass.
 `--voxel-workers` enables multiprocessing for octree cell classification:
-`1` is sequential, `0` uses conservative auto-selection capped at 4 worker
+`1` is sequential, `0` uses conservative auto-selection capped at 2 worker
 processes, and an explicit integer uses that many workers. Large CAD assemblies
 copy triangle data into each worker process, so increase this gradually if
 memory pressure is high. `--voxel-batch-size` controls how many queued octree

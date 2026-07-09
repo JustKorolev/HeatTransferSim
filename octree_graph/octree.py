@@ -395,28 +395,65 @@ def build_octree(
             handle_classified_cell(work_item, classification, remaining_batch_items=0)
     else:
         worker_objects = _prepare_worker_objects(scene.objects)
-        with ProcessPoolExecutor(
-            max_workers=worker_count,
-            initializer=_init_octree_worker,
-            initargs=(worker_objects, contact_report, params, set(materials)),
-        ) as executor:
-            while queue:
-                batch: list[_CellWorkItem] = []
-                while queue and len(batch) < batch_size:
-                    batch.append(queue.popleft())
-                classifications = list(
-                    executor.map(
-                        _classify_cell_work_item,
-                        batch,
-                        chunksize=max(1, min(8, batch_size // max(worker_count, 1))),
+        batch: list[_CellWorkItem] = []
+        try:
+            with ProcessPoolExecutor(
+                max_workers=worker_count,
+                initializer=_init_octree_worker,
+                initargs=(worker_objects, contact_report, params, set(materials)),
+            ) as executor:
+                while queue:
+                    batch: list[_CellWorkItem] = []
+                    while queue and len(batch) < batch_size:
+                        batch.append(queue.popleft())
+                    classifications = list(
+                        executor.map(
+                            _classify_cell_work_item,
+                            batch,
+                            chunksize=max(1, min(8, batch_size // max(worker_count, 1))),
+                        )
                     )
+                    for index, (work_item, classification) in enumerate(zip(batch, classifications)):
+                        handle_classified_cell(
+                            work_item,
+                            classification,
+                            remaining_batch_items=len(batch) - index - 1,
+                        )
+        except Exception as exc:
+            warnings.append(
+                "Multiprocessing octree classification failed; falling back to sequential classification "
+                f"for the remaining cells. Worker error: {type(exc).__name__}: {exc}"
+            )
+            worker_count = 1
+            for index, work_item in enumerate(batch):
+                classification = _classify_cell(
+                    scene.objects,
+                    triangle_indices,
+                    np.asarray(work_item.center_mm, dtype=float),
+                    np.asarray(work_item.size_mm, dtype=float),
+                    contact_report,
+                    params,
+                    set(materials),
+                    None,
                 )
-                for index, (work_item, classification) in enumerate(zip(batch, classifications)):
-                    handle_classified_cell(
-                        work_item,
-                        classification,
-                        remaining_batch_items=len(batch) - index - 1,
-                    )
+                handle_classified_cell(
+                    work_item,
+                    classification,
+                    remaining_batch_items=len(batch) - index - 1,
+                )
+            while queue:
+                work_item = queue.popleft()
+                classification = _classify_cell(
+                    scene.objects,
+                    triangle_indices,
+                    np.asarray(work_item.center_mm, dtype=float),
+                    np.asarray(work_item.size_mm, dtype=float),
+                    contact_report,
+                    params,
+                    set(materials),
+                    None,
+                )
+                handle_classified_cell(work_item, classification, remaining_batch_items=0)
     if progress_callback is not None and diagnostics is not None:
         progress_callback(
             {
@@ -438,7 +475,7 @@ def _resolve_voxel_worker_count(params: OctreeParams) -> int:
     requested = int(getattr(params, "voxel_workers", 1))
     if requested == 0:
         cpu_count = os.cpu_count() or 2
-        return max(1, min(4, cpu_count - 1))
+        return max(1, min(2, cpu_count - 1))
     return max(1, requested)
 
 
