@@ -12,12 +12,14 @@ import numpy as np
 
 from octree_graph.cli import (
     _build_graph_with_optional_fallback,
+    _log_scene_memory_risk,
     _raise_if_empty_graph,
     _resolve_material_lookup_path,
     _split_physical_devices,
 )
 from octree_graph.load_contact_report import ContactReport
 from octree_graph.graph_builder import (
+    DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS,
     DEFAULT_HEATER_NAME_PATTERNS,
     DEFAULT_SENSOR_NAME_PATTERNS,
     PhysicalDevice,
@@ -217,6 +219,27 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             self.assertIsNone(_resolve_material_lookup_path(directory))
 
+    def test_cli_memory_guard_disables_parallel_voxel_workers_when_payload_is_too_large(self) -> None:
+        triangle = np.zeros((100, 3, 3), dtype=float)
+        obj = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        obj.mesh.triangles = triangle
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[obj],
+            bounds_mm=(np.array([-5.0, -5.0, -5.0]), np.array([5.0, 5.0, 5.0])),
+            warnings=[],
+        )
+        args = SimpleNamespace(voxel_workers=2)
+        warnings: list[str] = []
+        logger = SimpleNamespace(messages=[], log=lambda message: logger.messages.append(message))
+
+        with patch("octree_graph.cli._available_memory_bytes", return_value=1024):
+            _log_scene_memory_risk(scene, args, logger, warnings)
+
+        self.assertEqual(args.voxel_workers, 1)
+        self.assertIn("Disabled multiprocessing", warnings[0])
+        self.assertTrue(any("Scene memory estimate" in message for message in logger.messages))
+
     def test_graph_build_accepts_no_contact_report(self) -> None:
         materials = self.make_materials()
         leaves = [
@@ -256,6 +279,49 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual([device.kind for device in devices], ["heater", "sensor"])
         self.assertEqual({device.name for device in devices}, {"assembly/temperature_probe_A", "kapton_heater"})
 
+    def test_physical_device_detection_excludes_cables_and_breakout_boards_by_default(self) -> None:
+        flex = _mesh_object(
+            "V_GUUTZ_SENSOR-HEATER-FLEX-CABLE_HISPEC_36",
+            "Copper",
+            [-20.0, -2.0, -1.0],
+            [20.0, 2.0, 1.0],
+        )
+        breakout = _mesh_object(
+            "Copy_of_FX23_100P_Male_Component_2_1^V_GUUTZ_EXTERNAL-SENSOR-HEATER-BREAKOUT-PCB_HISPEC",
+            "Copper",
+            [-10.0, -10.0, -1.0],
+            [10.0, 10.0, 1.0],
+        )
+        heater = _mesh_object("kapton_heater_1", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
+
+        body_objects, devices = collapse_physical_devices(
+            [flex, breakout, heater],
+            DEFAULT_HEATER_NAME_PATTERNS,
+            DEFAULT_SENSOR_NAME_PATTERNS,
+            exclude_patterns=DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS,
+        )
+
+        self.assertEqual([obj.name for obj in body_objects], [flex.name, breakout.name])
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0].name, "kapton_heater")
+
+    def test_physical_device_detection_splits_distant_same_named_instances(self) -> None:
+        left = _mesh_object("safe_heater_1", "Copper", [0.0, 0.0, 0.0], [5.0, 5.0, 1.0])
+        right = _mesh_object("safe_heater_2", "Copper", [100.0, 0.0, 0.0], [105.0, 5.0, 1.0])
+        bridge = _mesh_object("safe_heater_3", "Copper", [108.0, 0.0, 0.0], [112.0, 5.0, 1.0])
+
+        body_objects, devices = collapse_physical_devices(
+            [left, right, bridge],
+            DEFAULT_HEATER_NAME_PATTERNS,
+            DEFAULT_SENSOR_NAME_PATTERNS,
+            exclude_patterns=DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS,
+            group_gap_mm=10.0,
+        )
+
+        self.assertEqual(body_objects, [])
+        self.assertEqual([device.name for device in devices], ["safe_heater_1", "safe_heater_2"])
+        self.assertEqual([len(device.objects) for device in devices], [1, 2])
+
     def test_cli_physical_device_split_excludes_devices_from_voxel_scene(self) -> None:
         body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
         heater = _mesh_object("heater_strip_1", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
@@ -269,6 +335,9 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             no_detect_physical_devices=False,
             heater_name_pattern=None,
             sensor_name_pattern=None,
+            device_exclude_name_pattern=None,
+            no_default_device_excludes=False,
+            physical_device_group_gap_mm=10.0,
         )
         warnings: list[str] = []
 

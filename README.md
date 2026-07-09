@@ -116,6 +116,9 @@ processes, and an explicit integer uses that many workers. Large CAD assemblies
 copy triangle data into each worker process, so increase this gradually if
 memory pressure is high. `--voxel-batch-size` controls how many queued octree
 cells are classified per worker batch.
+Each run writes `conversion.log` in the graph output folder with phase changes,
+periodic voxelization progress, memory estimates, and Python tracebacks. If a
+run exits without a terminal error, inspect that log first.
 For bbox-fallback graphs, `--contact-detection-distance-mm` defaults to
 `--min-cell-size-mm` so near but non-face-adjacent cells can still be connected.
 The builder writes:
@@ -129,6 +132,7 @@ graphs/<graph_name>/
   materials_used.json
   material_warnings.csv
   validation_report.txt
+  conversion.log
   C.npy
   G.npy
   L.npy

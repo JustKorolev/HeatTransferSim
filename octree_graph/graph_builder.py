@@ -32,6 +32,17 @@ DEFAULT_SENSOR_NAME_PATTERNS = [
     r"temperature[_\s-]*probe",
     r"temp[_\s-]*sensor",
 ]
+DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS = [
+    r"flex[_\s-]*cable",
+    r"(?:^|_)cable(?:_|$)",
+    r"(?:^|_)wire(?:_|$)",
+    r"(?:^|_)harness(?:_|$)",
+    r"(?:^|_)connector(?:_|$)",
+    r"(?:^|_)breakout(?:_|$)",
+    r"(?:^|_)pcb(?:_|$)",
+    r"(?:^|_)board(?:_|$)",
+]
+DEFAULT_DEVICE_GROUP_GAP_MM = 10.0
 
 
 @dataclass
@@ -199,8 +210,15 @@ def build_graph(
     return GraphBuildResult(nodes=nodes, edges=edges, warnings=warnings)
 
 
-def classify_physical_device_name(name: str, heater_patterns: list[str], sensor_patterns: list[str]) -> str | None:
+def classify_physical_device_name(
+    name: str,
+    heater_patterns: list[str],
+    sensor_patterns: list[str],
+    exclude_patterns: list[str] | None = None,
+) -> str | None:
     normalized = _normalize_device_name(name)
+    if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in exclude_patterns or []):
+        return None
     heater = any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in heater_patterns)
     sensor = any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in sensor_patterns)
     if heater and sensor:
@@ -216,19 +234,28 @@ def collapse_physical_devices(
     objects: list[MeshObject],
     heater_patterns: list[str],
     sensor_patterns: list[str],
+    exclude_patterns: list[str] | None = None,
+    group_gap_mm: float = DEFAULT_DEVICE_GROUP_GAP_MM,
 ) -> tuple[list[MeshObject], list[PhysicalDevice]]:
     body_objects: list[MeshObject] = []
     groups: dict[tuple[str, str], list[MeshObject]] = {}
     for obj in objects:
-        kind = classify_physical_device_name(_object_search_text(obj), heater_patterns, sensor_patterns)
+        kind = classify_physical_device_name(
+            _object_search_text(obj),
+            heater_patterns,
+            sensor_patterns,
+            exclude_patterns,
+        )
         if kind is None:
             body_objects.append(obj)
             continue
         groups.setdefault((kind, _device_group_name(obj.name)), []).append(obj)
-    devices = [
-        PhysicalDevice(name=name, kind=kind, objects=members)
-        for (kind, name), members in sorted(groups.items(), key=lambda item: (item[0][0], item[0][1]))
-    ]
+    devices: list[PhysicalDevice] = []
+    for (kind, name), members in sorted(groups.items(), key=lambda item: (item[0][0], item[0][1])):
+        clusters = _spatial_device_clusters(members, group_gap_mm)
+        for cluster_index, cluster in enumerate(clusters, start=1):
+            device_name = name if len(clusters) == 1 else f"{name}_{cluster_index}"
+            devices.append(PhysicalDevice(name=device_name, kind=kind, objects=cluster))
     return body_objects, devices
 
 
@@ -247,6 +274,42 @@ def _device_group_name(name: str) -> str:
     normalized = _normalize_device_name(name)
     normalized = re.sub(r"(_?\d+)?(_geometry|_mesh|_body|_solid)?$", "", normalized, flags=re.IGNORECASE)
     return normalized or str(name)
+
+
+def _spatial_device_clusters(members: list[MeshObject], group_gap_mm: float) -> list[list[MeshObject]]:
+    if len(members) <= 1:
+        return [list(members)]
+    max_gap_mm = max(0.0, float(group_gap_mm))
+    parent = list(range(len(members)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left = find(left)
+        root_right = find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    bounds = [(np.asarray(obj.bounds_mm[0], dtype=float), np.asarray(obj.bounds_mm[1], dtype=float)) for obj in members]
+    for left in range(len(members)):
+        for right in range(left + 1, len(members)):
+            gap_mm = float(np.linalg.norm(_aabb_gaps_mm(bounds[left][0], bounds[left][1], bounds[right][0], bounds[right][1])))
+            if gap_mm <= max_gap_mm:
+                union(left, right)
+    clusters_by_root: dict[int, list[MeshObject]] = {}
+    for index, obj in enumerate(members):
+        clusters_by_root.setdefault(find(index), []).append(obj)
+    return sorted(
+        clusters_by_root.values(),
+        key=lambda cluster: (
+            float(np.min([np.asarray(obj.bounds_mm[0], dtype=float)[0] for obj in cluster])),
+            min(obj.name for obj in cluster),
+        ),
+    )
 
 
 def _append_physical_device_nodes(

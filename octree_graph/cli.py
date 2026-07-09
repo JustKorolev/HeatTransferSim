@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
+import faulthandler
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import time
+import traceback
 from typing import Any
 
 import numpy as np
 
 from .graph_builder import (
+    DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS,
+    DEFAULT_DEVICE_GROUP_GAP_MM,
     DEFAULT_HEATER_NAME_PATTERNS,
     DEFAULT_SENSOR_NAME_PATTERNS,
     build_graph,
@@ -30,12 +35,29 @@ from .validation import format_validation_report, validate_graph
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    progress = ConsoleProgress(enabled=not args.no_progress)
+    output = Path(args.output_root) / args.graph_name
+    output.mkdir(parents=True, exist_ok=True)
+    with RunLogger(output / "conversion.log") as run_log:
+        progress = ConsoleProgress(enabled=not args.no_progress, logger=run_log.log)
+        try:
+            _run_conversion(args, progress, run_log)
+        except SystemExit as exc:
+            run_log.log(f"Exiting: {exc}")
+            raise
+        except BaseException as exc:
+            run_log.log(f"Unhandled exception: {type(exc).__name__}: {exc}")
+            traceback.print_exc(file=run_log.handle)
+            run_log.flush()
+            raise
+
+
+def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_log: "RunLogger") -> None:
     warnings: list[str] = []
     try:
         progress.phase("Loading glTF scene")
         gltf_path = _resolve_gltf_path(args)
         scene = load_gltf_scene(gltf_path)
+        _log_scene_memory_risk(scene, args, run_log, warnings)
         progress.phase("Loading materials")
         material_lookup_path = _resolve_material_lookup_path(args.mesh_dir)
         contact_report = load_contact_report(material_lookup_path)
@@ -77,7 +99,6 @@ def main(argv: list[str] | None = None) -> None:
     progress.phase("Building matrices")
     matrices = build_matrices(graph_result.nodes, graph_result.edges)
     output = Path(args.output_root) / args.graph_name
-    output.mkdir(parents=True, exist_ok=True)
     input_files = {
         "gltf": str(gltf_path),
         "materials": str(Path(args.materials)),
@@ -111,6 +132,7 @@ def main(argv: list[str] | None = None) -> None:
     if errors:
         raise SystemExit(f"Graph written with validation errors; see {output / 'validation_report.txt'}")
     progress.done()
+    run_log.log(f"Completed graph with {len(graph_result.nodes)} nodes and {len(graph_result.edges)} edges.")
     print(f"Wrote octree graph with {len(graph_result.nodes)} nodes and {len(graph_result.edges)} edges to {output}")
 
 
@@ -180,6 +202,29 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Regex pattern for CAD component names/paths that should become physical sensor nodes. "
             "Repeat to add multiple patterns. Defaults cover common sensor names."
+        ),
+    )
+    parser.add_argument(
+        "--device-exclude-name-pattern",
+        action="append",
+        default=None,
+        help=(
+            "Regex pattern for CAD component names/paths that should not become physical heater/sensor nodes, "
+            "even if they match heater or sensor words. Repeat to add multiple patterns."
+        ),
+    )
+    parser.add_argument(
+        "--no-default-device-excludes",
+        action="store_true",
+        help="Disable default physical-device exclusions for cables, connectors, breakout boards, and PCBs.",
+    )
+    parser.add_argument(
+        "--physical-device-group-gap-mm",
+        type=float,
+        default=DEFAULT_DEVICE_GROUP_GAP_MM,
+        help=(
+            "Maximum AABB gap for collapsing same-named heater/sensor mesh pieces into one physical node. "
+            "Larger gaps keep more repeated instances grouped; smaller gaps split them apart."
         ),
     )
     parser.add_argument(
@@ -289,7 +334,16 @@ def _split_physical_devices(
         return scene, []
     heater_patterns = list(getattr(args, "heater_name_pattern", None) or DEFAULT_HEATER_NAME_PATTERNS)
     sensor_patterns = list(getattr(args, "sensor_name_pattern", None) or DEFAULT_SENSOR_NAME_PATTERNS)
-    body_objects, devices = collapse_physical_devices(scene.objects, heater_patterns, sensor_patterns)
+    exclude_patterns = [] if getattr(args, "no_default_device_excludes", False) else list(DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS)
+    exclude_patterns.extend(getattr(args, "device_exclude_name_pattern", None) or [])
+    group_gap_mm = float(getattr(args, "physical_device_group_gap_mm", DEFAULT_DEVICE_GROUP_GAP_MM))
+    body_objects, devices = collapse_physical_devices(
+        scene.objects,
+        heater_patterns,
+        sensor_patterns,
+        exclude_patterns=exclude_patterns,
+        group_gap_mm=group_gap_mm,
+    )
     args.physical_devices = devices
     if not devices:
         return scene, []
@@ -309,6 +363,91 @@ def _bounds_for_objects(objects: list) -> tuple[np.ndarray, np.ndarray] | None:
     mins = np.min([np.asarray(obj.bounds_mm[0], dtype=float) for obj in objects], axis=0)
     maxs = np.max([np.asarray(obj.bounds_mm[1], dtype=float) for obj in objects], axis=0)
     return mins, maxs
+
+
+def _log_scene_memory_risk(scene: GltfScene, args: argparse.Namespace, run_log: "RunLogger", warnings: list[str]) -> None:
+    worker_count = _resolved_cli_voxel_workers(args.voxel_workers)
+    triangle_count = 0
+    triangle_bytes = 0
+    for obj in getattr(scene, "objects", []):
+        triangles = np.asarray(getattr(getattr(obj, "mesh", None), "triangles", []), dtype=float)
+        if triangles.ndim == 3 and triangles.shape[1:] == (3, 3):
+            triangle_count += int(triangles.shape[0])
+            triangle_bytes += int(triangles.nbytes)
+    index_bytes = triangle_count * 2 * 3 * np.dtype(float).itemsize
+    estimated_per_worker_bytes = triangle_bytes + index_bytes
+    available_bytes = _available_memory_bytes()
+    run_log.log(
+        "Scene memory estimate: "
+        f"objects={len(getattr(scene, 'objects', []))}, triangles={triangle_count}, "
+        f"triangle_bytes={_format_bytes(triangle_bytes)}, "
+        f"estimated_worker_payload={_format_bytes(estimated_per_worker_bytes)}, "
+        f"requested_workers={args.voxel_workers}, resolved_workers={worker_count}, "
+        f"available_memory={_format_bytes(available_bytes) if available_bytes is not None else 'unknown'}"
+    )
+    if worker_count <= 1 or available_bytes is None:
+        return
+    estimated_parallel_bytes = estimated_per_worker_bytes * worker_count
+    if estimated_parallel_bytes <= available_bytes * 0.35:
+        return
+    message = (
+        "Disabled multiprocessing because the estimated copied triangle/index payload "
+        f"({_format_bytes(estimated_parallel_bytes)} across {worker_count} workers) is too large for "
+        f"available memory ({_format_bytes(available_bytes)}). Using --voxel-workers 1."
+    )
+    warnings.append(message)
+    run_log.log(message)
+    args.voxel_workers = 1
+
+
+def _resolved_cli_voxel_workers(requested: int) -> int:
+    value = int(requested)
+    if value == 0:
+        cpu_count = os.cpu_count() or 2
+        return max(1, min(2, cpu_count - 1))
+    return max(1, value)
+
+
+def _available_memory_bytes() -> int | None:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullAvailPhys)
+        except Exception:
+            return None
+    try:
+        pages = os.sysconf("SC_AVPHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return int(pages) * int(page_size)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _format_bytes(value: int | None) -> str:
+    if value is None:
+        return "unknown"
+    number = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if number < 1024.0 or unit == "TiB":
+            return f"{number:.1f} {unit}"
+        number /= 1024.0
 
 
 def _parameters_payload(args: argparse.Namespace) -> dict:
@@ -337,16 +476,63 @@ def _physical_devices_payload(devices: list) -> list[dict]:
     return payload
 
 
+class RunLogger:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.handle = None
+
+    def __enter__(self) -> "RunLogger":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("a", encoding="utf-8")
+        self.log("")
+        self.log("Starting octree graph conversion")
+        try:
+            faulthandler.enable(file=self.handle, all_threads=True)
+        except Exception as exc:
+            self.log(f"Could not enable faulthandler: {type(exc).__name__}: {exc}")
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            faulthandler.disable()
+        except Exception:
+            pass
+        self.log("Conversion process closing")
+        self.flush()
+        if self.handle is not None:
+            self.handle.close()
+
+    def log(self, message: str) -> None:
+        if self.handle is None:
+            return
+        timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        self.handle.write(f"[{timestamp}] {message}\n")
+        self.flush()
+
+    def flush(self) -> None:
+        if self.handle is None:
+            return
+        self.handle.flush()
+        try:
+            os.fsync(self.handle.fileno())
+        except OSError:
+            pass
+
+
 class ConsoleProgress:
-    def __init__(self, enabled: bool = True) -> None:
+    def __init__(self, enabled: bool = True, logger=None) -> None:
         self.enabled = enabled
         self.is_tty = bool(getattr(sys.stderr, "isatty", lambda: False)())
         self._last_update = 0.0
+        self._last_log = 0.0
         self._last_line_len = 0
         self._spinner_index = 0
         self._phase = ""
+        self._logger = logger
 
     def phase(self, label: str) -> None:
+        if self._logger is not None:
+            self._logger(f"Phase: {label}")
         if not self.enabled:
             return
         self._finish_line()
@@ -382,6 +568,9 @@ class ConsoleProgress:
         )
         if workers > 1:
             line += f" workers={workers}"
+        if self._logger is not None and (event.get("done") or now - self._last_log >= 10.0):
+            self._logger(line)
+            self._last_log = now
         if self.is_tty:
             padded = line.ljust(self._last_line_len)
             print(f"\r{padded}", end="", file=sys.stderr, flush=True)

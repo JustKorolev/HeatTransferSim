@@ -168,4 +168,5 @@ Python by exact shared voxel faces plus a voxel-surface contact-distance pass.
 Use `--voxel-workers 0` for conservative multiprocessing capped at 2 worker
 processes during octree classification, or pass an explicit worker count. Large
 CAD assemblies copy triangle data into each worker process, so increase the
-count gradually.
+count gradually. Conversion runs write `conversion.log` in the graph output
+folder with phase changes, progress, memory estimates, and Python tracebacks.
