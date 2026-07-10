@@ -43,6 +43,9 @@ class TwoDGraphWidget:
         controls.addWidget(refresh_button)
         controls.addStretch(1)
         layout.addLayout(controls)
+        self.selection_label = self.QtWidgets.QLabel("Selected node: none")
+        self.selection_label.setWordWrap(True)
+        layout.addWidget(self.selection_label)
 
         self.figure = self.Figure(figsize=(5, 4), tight_layout=True)
         self.canvas = self.FigureCanvas(self.figure)
@@ -93,6 +96,7 @@ class TwoDGraphWidget:
         self.edge_lines = []
         model = self.model
         visible = self.visible_node_ids if self.visible_node_ids is not None else set(model.nodes) if model is not None else set()
+        self._refresh_selection_label(model, visible)
         if model is None or not visible:
             self.ax.set_title("No graph nodes", color=self._text_color())
             self.ax.axis("off")
@@ -383,6 +387,20 @@ class TwoDGraphWidget:
         except Exception:
             pass
 
+    def _refresh_selection_label(self, model: ThermalGraphModel | None, visible: set[int]) -> None:
+        if model is None or not self.selected_node_ids:
+            self.selection_label.setText("Selected node: none")
+            return
+        active_node_id = next((node_id for node_id in sorted(self.selected_node_ids) if node_id in model.nodes), None)
+        if active_node_id is None:
+            self.selection_label.setText("Selected node: none")
+            return
+        total, visible_count = node_connection_counts(model, active_node_id, visible)
+        visible_note = "" if visible_count == total else f", {visible_count} visible"
+        self.selection_label.setText(
+            f"Selected node {active_node_id}: {total} connection{'s' if total != 1 else ''}{visible_note}"
+        )
+
 
 def safe_ratio(value: Any, maximum: float) -> float:
     try:
@@ -392,6 +410,28 @@ def safe_ratio(value: Any, maximum: float) -> float:
     if maximum <= 0.0:
         return 0.0
     return max(0.0, min(1.0, number / maximum))
+
+
+def node_connection_counts(
+    model: ThermalGraphModel,
+    node_id: int,
+    visible_node_ids: set[int] | None = None,
+) -> tuple[int, int]:
+    visible = visible_node_ids if visible_node_ids is not None else set(model.nodes)
+    neighbors: set[int] = set()
+    visible_neighbors: set[int] = set()
+    for edge in model.edges.values():
+        neighbor: int | None = None
+        if edge.source == node_id:
+            neighbor = edge.target
+        elif edge.target == node_id:
+            neighbor = edge.source
+        if neighbor is None:
+            continue
+        neighbors.add(int(neighbor))
+        if node_id in visible and neighbor in visible:
+            visible_neighbors.add(int(neighbor))
+    return len(neighbors), len(visible_neighbors)
 
 
 def point_to_segment_distance(point: np.ndarray, start: np.ndarray, end: np.ndarray) -> float:

@@ -59,6 +59,7 @@ from graph_visualizer.tooltip_formatters import format_edge_tooltip, format_node
 from graph_visualizer.two_d_graph_widget import (
     edge_curve_for_positions,
     expand_positions,
+    node_connection_counts,
 )
 
 
@@ -535,6 +536,17 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertTrue(node_has_heater_sensor_role(sensor))
         self.assertFalse(node_has_heater_sensor_role(cooler))
         self.assertFalse(node_has_heater_sensor_role(body))
+
+    def test_node_connection_counts_reports_total_and_visible_neighbors(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="connection_counts"))
+        for node_id in (1, 2, 3, 4):
+            model.add_node(NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper"))
+        model.set_edge(1, 2, 0.5)
+        model.set_edge(1, 3, 0.25)
+        model.set_edge(2, 4, 0.1)
+
+        self.assertEqual(node_connection_counts(model, 1), (2, 2))
+        self.assertEqual(node_connection_counts(model, 1, {1, 2}), (2, 1))
 
     def test_mimo_dynamic_rate_gain_is_static_direct_capacitance(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_static_bdyn"))
