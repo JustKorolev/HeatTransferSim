@@ -83,6 +83,13 @@ class GraphVisualizerApp:
         self.autosave_timer = self.QtCore.QTimer(self.window)
         self.autosave_timer.setSingleShot(True)
         self.autosave_timer.timeout.connect(self._autosave_now)
+        self.editor_sync_timer = self.QtCore.QTimer(self.window)
+        self.editor_sync_timer.setSingleShot(True)
+        self.editor_sync_timer.timeout.connect(self._flush_deferred_editor_sync)
+        self._editor_sync_reinitialize = False
+        self.component_temperature_timer = self.QtCore.QTimer(self.window)
+        self.component_temperature_timer.setSingleShot(True)
+        self.component_temperature_timer.timeout.connect(self.apply_component_initial_temperature)
         self._build_layout()
         self._apply_theme()
         self._refresh_all(reset_camera=True)
@@ -532,11 +539,12 @@ class GraphVisualizerApp:
             visual_tags_changed = visual_tags_before != self._visual_tag_snapshot(target_ids)
             if lightweight and not visual_tags_changed:
                 self._refresh_details()
-                self._refresh_simulation_readouts_from_editor()
+                self._schedule_deferred_editor_sync(reinitialize=False)
             else:
                 self._refresh_all(reset_camera=False)
                 self._sync_simulation_from_editor(reinitialize=visual_tags_changed or not lightweight)
-            self._rebuild_controller_gain_fields()
+            if visual_tags_changed or not lightweight:
+                self._rebuild_controller_gain_fields()
             if show_status:
                 if len(target_ids) == 1:
                     self._set_status(f"Saved tags for cell {target_ids[0]}.")
@@ -660,6 +668,18 @@ class GraphVisualizerApp:
     def _refresh_simulation_readouts_from_editor(self) -> None:
         if hasattr(self, "simulation_tab"):
             self.simulation_tab.refresh_live_readouts_from_editor(self.model, self.current_folder)
+
+    def _schedule_deferred_editor_sync(self, reinitialize: bool = False) -> None:
+        self._editor_sync_reinitialize = bool(self._editor_sync_reinitialize or reinitialize)
+        self.editor_sync_timer.start(250)
+
+    def _flush_deferred_editor_sync(self) -> None:
+        reinitialize = bool(self._editor_sync_reinitialize)
+        self._editor_sync_reinitialize = False
+        if reinitialize:
+            self._sync_simulation_from_editor(reinitialize=True)
+        else:
+            self._refresh_simulation_readouts_from_editor()
 
     def _rebuild_controller_gain_fields(self) -> None:
         if not hasattr(self, "controller_gain_form"):
@@ -1595,7 +1615,7 @@ class GraphVisualizerApp:
     def _handle_component_initial_temperature_changed(self, *_: Any) -> None:
         if self._building_form:
             return
-        self.apply_component_initial_temperature()
+        self.component_temperature_timer.start(300)
 
     def _handle_theme_toggle(self, *_: Any) -> None:
         self.dark_mode = bool(self.theme_toggle.isChecked())
@@ -1626,6 +1646,8 @@ class GraphVisualizerApp:
 
     def _handle_close_event(self, event: Any) -> None:
         self.autosave_timer.stop()
+        self.editor_sync_timer.stop()
+        self.component_temperature_timer.stop()
         if hasattr(self, "simulation_tab"):
             self.simulation_tab.shutdown()
         if hasattr(self, "viewer"):
