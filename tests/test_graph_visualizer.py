@@ -35,7 +35,7 @@ from graph_visualizer.matrix_builder import (
     refresh_radiation_from_exposed_faces,
 )
 from graph_visualizer.models import EdgeMode, GraphMetadata, NodeProperties, ThermalGraphModel
-from graph_visualizer.role_assignment import assign_matching_nodes_to_role
+from graph_visualizer.role_assignment import assign_matching_nodes_to_role, node_has_heater_sensor_role
 from graph_visualizer.simulation_model import prepare_simulation
 from graph_visualizer.simulation_parameters import (
     SimulationParameters,
@@ -498,6 +498,20 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertFalse(model.nodes[4].is_heater)
         self.assertTrue(model.nodes[4].is_sensor)
         self.assertEqual(model.nodes[4].sensor.sensor_id, 4)
+
+    def test_heater_sensor_filter_excludes_cryocooler_only_nodes(self) -> None:
+        heater = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        heater.is_heater = True
+        sensor = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        sensor.is_sensor = True
+        cooler = NodeProperties.with_material(3, (2, 0, 0), material="copper")
+        cooler.has_cryocooler = True
+        body = NodeProperties.with_material(4, (3, 0, 0), material="copper")
+
+        self.assertTrue(node_has_heater_sensor_role(heater))
+        self.assertTrue(node_has_heater_sensor_role(sensor))
+        self.assertFalse(node_has_heater_sensor_role(cooler))
+        self.assertFalse(node_has_heater_sensor_role(body))
 
     def test_mimo_dynamic_rate_gain_is_static_direct_capacitance(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_static_bdyn"))

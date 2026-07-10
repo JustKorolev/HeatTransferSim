@@ -39,7 +39,7 @@ from .models import (
     ThermalGraphModel,
 )
 from .pyvista_widget import GraphPyVistaWidget
-from .role_assignment import assign_matching_nodes_to_role
+from .role_assignment import assign_matching_nodes_to_role, node_has_heater_sensor_role
 from .tooltip_formatters import format_node_tooltip
 from .two_d_graph_widget import TwoDGraphWidget
 from .validation import raise_if_errors, validate_model
@@ -1411,6 +1411,7 @@ class GraphVisualizerApp:
     def _refresh_all(self, reset_camera: bool = False) -> None:
         self._sync_filter_options()
         visible_node_ids = self._filtered_node_ids()
+        self._sync_selection_to_visible_nodes(visible_node_ids)
         self.viewer.set_hover_tooltips_enabled(
             not (hasattr(self, "filter_heater_sensor") and self.filter_heater_sensor.isChecked())
         )
@@ -1433,6 +1434,16 @@ class GraphVisualizerApp:
         )
         self._sync_simulation_from_editor()
         self._refresh_details()
+
+    def _sync_selection_to_visible_nodes(self, visible_node_ids: set[int]) -> None:
+        if not hasattr(self, "filter_heater_sensor") or not self.filter_heater_sensor.isChecked():
+            return
+        visible_selection = {node_id for node_id in self.selected_node_ids if node_id in visible_node_ids}
+        active_id = self.selected_node_id if self.selected_node_id in visible_selection else None
+        if active_id is None and visible_selection:
+            active_id = next(iter(sorted(visible_selection)))
+        self.selected_node_ids = visible_selection
+        self.selected_node_id = active_id
 
     def _sync_filter_options(self) -> None:
         if not hasattr(self, "filter_material"):
@@ -1480,9 +1491,7 @@ class GraphVisualizerApp:
                 continue
             if not (min_level <= int(node.level) <= max_level):
                 continue
-            if self.filter_heater_sensor.isChecked() and not (
-                node.is_heater or node.is_sensor or node.has_cryocooler
-            ):
+            if self.filter_heater_sensor.isChecked() and not node_has_heater_sensor_role(node):
                 continue
             if self.filter_boundary.isChecked() and node.confidence == "high" and node_id not in contact_nodes:
                 continue

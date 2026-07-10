@@ -60,3 +60,7 @@ def assign_node_role(node: NodeProperties, role: str) -> None:
         node.heater_control.reset_pid_state()
         node.heater.heater_id = node.node_id
         node.sensor.sensor_id = node.node_id
+
+
+def node_has_heater_sensor_role(node: NodeProperties) -> bool:
+    return bool(getattr(node, "is_heater", False) or getattr(node, "is_sensor", False))
