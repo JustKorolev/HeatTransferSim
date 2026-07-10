@@ -459,6 +459,41 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
         self.assertEqual(result.edges[0]["source"], "cad_role_node_contact")
 
+    def test_graph_build_does_not_fallback_connect_gapped_role_node(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"body_panel": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="body_panel",
+                dominant_material="Copper",
+                confidence="high",
+            )
+        ]
+        heater_obj = _mesh_object("heater_strip_1", "Copper", [5.01, -2.0, -2.0], [7.01, 2.0, 2.0])
+        role_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj])
+        warnings: list[str] = []
+
+        result = build_graph(
+            leaves,
+            ContactReport(),
+            materials,
+            warnings=warnings,
+            contact_detection_distance_mm=3.0,
+            role_components=[role_component],
+        )
+
+        self.assertEqual(len(result.nodes), 2)
+        self.assertEqual(result.edges, [])
+        self.assertIn("has 0 contact edges", warnings[0])
+        self.assertIn("thermally isolated", result.nodes[1]["warnings"][-1])
+
     def test_graph_build_adds_near_contact_edges_for_near_face_cells(self) -> None:
         materials = self.make_materials()
         leaves = [

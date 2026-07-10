@@ -15,6 +15,7 @@ from .octree import OctreeCell, _physical_material_name
 
 
 _DEFAULT_ROLE_CONTACT_G_W_K = 0.1
+_ROLE_NODE_CONTACT_TOLERANCE_MM = 1.0e-6
 DEFAULT_HEATER_NAME_PATTERNS = [
     r"heater",
     r"heat[_\s-]*strip",
@@ -207,6 +208,7 @@ def build_graph(
         edge_index,
         contact_detection_distance_mm,
         connected_node_pairs,
+        warnings,
     )
     return GraphBuildResult(nodes=nodes, edges=edges, warnings=warnings)
 
@@ -410,10 +412,11 @@ def _add_role_node_contact_edges(
     edge_index: int,
     max_gap_mm: float,
     connected_node_pairs: set[tuple[int, int]],
+    warnings: list[str],
 ) -> int:
     if not cells or not role_nodes:
         return edge_index
-    search_gap_mm = max(0.0, float(max_gap_mm))
+    search_gap_mm = _ROLE_NODE_CONTACT_TOLERANCE_MM
     for role_node in role_nodes:
         contacts: list[tuple[OctreeCell, float, float, float]] = []
         for cell in cells:
@@ -422,11 +425,7 @@ def _add_role_node_contact_edges(
                 continue
             area_mm2, gap_mm, distance_mm = contact
             contacts.append((cell, area_mm2, gap_mm, distance_mm))
-        if not contacts:
-            nearest = min(cells, key=lambda cell: _node_cell_gap_mm(role_node, cell))
-            gap_mm = _node_cell_gap_mm(role_node, nearest)
-            distance_mm = _node_cell_center_distance_mm(role_node, nearest)
-            contacts = [(nearest, 0.0, gap_mm, distance_mm)]
+        added_edges = 0
         for cell, area_mm2, gap_mm, distance_mm in contacts:
             body_node = cell_to_node.get(cell.cell_id)
             if body_node is None:
@@ -449,12 +448,21 @@ def _add_role_node_contact_edges(
                     "contact_confidence": "medium" if gap_mm <= search_gap_mm else "low",
                     "source": "cad_role_node_contact",
                     "warnings": [
-                        f"Heater/sensor node connected to nearby body cell with gap {gap_mm:.3g} mm."
+                        f"Heater/sensor role node connected to contacting body cell with AABB gap {gap_mm:.3g} mm."
                     ],
                 }
             )
             connected_node_pairs.add(node_pair)
             edge_index += 1
+            added_edges += 1
+        if added_edges == 0:
+            warning = (
+                f"Detected {role_node.get('node_type', 'heater/sensor')} role node "
+                f"{role_node.get('node_id')} ({role_node.get('component_name', '?')}) has 0 contact edges; "
+                "it will be thermally isolated in the simulation."
+            )
+            role_node.setdefault("warnings", []).append(warning)
+            warnings.append(warning)
     return edge_index
 
 
