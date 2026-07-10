@@ -86,6 +86,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         voxel_batch_size=args.voxel_batch_size,
         crowded_component_refine_count=args.crowded_component_refine_count,
         crowded_component_refine_distance_mm=args.crowded_component_refine_distance_mm,
+        contains_backend=args.contains_backend,
     )
     leaves, graph_result, diagnostics = _build_graph_with_optional_fallback(
         scene,
@@ -188,6 +189,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=64,
         help="Maximum queued octree cells classified per multiprocessing batch.",
+    )
+    parser.add_argument(
+        "--contains-backend",
+        choices=("trimesh", "ray"),
+        default="trimesh",
+        help=(
+            "Inside/outside backend for watertight meshes. Use 'ray' to bypass trimesh.contains "
+            "when native geometry code exits without a Python traceback."
+        ),
     )
     parser.add_argument(
         "--contact-detection-distance-mm",

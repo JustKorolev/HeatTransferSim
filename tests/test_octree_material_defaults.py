@@ -39,6 +39,7 @@ from octree_graph.octree import (
     OctreeCell,
     OctreeDiagnostics,
     OctreeParams,
+    _mesh_contains_point,
     _physical_material_name,
     _sample_points,
     _triangle_intersects_aabb,
@@ -391,6 +392,20 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         )
 
         self.assertTrue(args.no_detect_role_nodes)
+
+    def test_cli_accepts_ray_contains_backend(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--mesh-dir",
+                "meshes",
+                "--graph-name",
+                "graph",
+                "--contains-backend",
+                "ray",
+            ]
+        )
+
+        self.assertEqual(args.contains_backend, "ray")
 
     def test_cli_role_substrings_are_normalized_like_cad_names(self) -> None:
         body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
@@ -917,6 +932,37 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertTrue(np.any(points[:, 1] > 0.0))
         self.assertTrue(np.any(points[:, 2] < 0.0))
         self.assertTrue(np.any(points[:, 2] > 0.0))
+
+    def test_ray_contains_backend_bypasses_trimesh_contains(self) -> None:
+        class ContainsShouldNotRunMesh:
+            triangles = np.array(
+                [
+                    [[1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [1.0, 1.0, 1.0]],
+                    [[1.0, -1.0, -1.0], [1.0, 1.0, 1.0], [1.0, -1.0, 1.0]],
+                ],
+                dtype=float,
+            )
+
+            def contains(self, points) -> list[bool]:
+                raise AssertionError("trimesh.contains should not run")
+
+        obj = MeshObject(
+            name="ray_panel",
+            material_name="Copper",
+            mesh=ContainsShouldNotRunMesh(),
+            vertices_mm=np.empty((0, 3), dtype=float),
+            bounds_mm=(np.array([1.0, -1.0, -1.0]), np.array([1.0, 1.0, 1.0])),
+            watertight=True,
+        )
+
+        self.assertIsInstance(
+            _mesh_contains_point(
+                obj,
+                np.array([0.0, 0.0, 0.0]),
+                OctreeParams(contains_backend="ray"),
+            ),
+            bool,
+        )
 
     def test_triangle_box_intersection_rejects_aabb_only_overlap(self) -> None:
         triangle = np.array(

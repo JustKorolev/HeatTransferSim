@@ -51,6 +51,7 @@ class OctreeParams:
     voxel_batch_size: int = 64
     crowded_component_refine_count: int = 0
     crowded_component_refine_distance_mm: float = 0.0
+    contains_backend: str = "trimesh"
 
 
 @dataclass
@@ -670,7 +671,7 @@ def _classify_cell(
             if np.any(point < obj_min) or np.any(point > obj_max):
                 continue
             try:
-                if _mesh_contains_point(obj, point):
+                if _mesh_contains_point(obj, point, params):
                     inside_counts[obj.name] += 1
                     material_counts[_physical_material_name(obj, contact_report, known_materials)] += 1
                     break
@@ -808,8 +809,10 @@ def _physical_material_name(
     return DEFAULT_ASSIGNED_MATERIAL_NAME
 
 
-def _mesh_contains_point(obj: MeshObject, point: np.ndarray) -> bool:
+def _mesh_contains_point(obj: MeshObject, point: np.ndarray, params: OctreeParams) -> bool:
     global _TRIMESH_CONTAINS_AVAILABLE
+    if str(getattr(params, "contains_backend", "trimesh")).lower() == "ray":
+        return _ray_contains_point(obj, point)
     if _TRIMESH_CONTAINS_AVAILABLE is not False:
         try:
             inside = bool(obj.mesh.contains([point])[0])
