@@ -251,6 +251,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable CAD name/path detection for heater and sensor graph nodes.",
     )
+    parser.add_argument(
+        "--no-detect-physical-devices",
+        dest="no_detect_role_nodes",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -370,6 +376,10 @@ def _split_role_components(
     )
     args.role_components = role_components
     if not role_components:
+        warnings.append(
+            "No heater/sensor CAD components were detected from the configured name patterns; "
+            "voxelization will include all mesh objects as body geometry."
+        )
         return scene, []
     role_names = ", ".join(f"{component.kind}:{component.name}" for component in role_components[:8])
     extra = "" if len(role_components) <= 8 else f", ... and {len(role_components) - 8} more"
@@ -382,7 +392,11 @@ def _split_role_components(
 
 
 def _substring_patterns(values: list[str]) -> list[str]:
-    return [re.escape(str(value)) for value in values if str(value).strip()]
+    return [re.escape(_normalize_role_pattern_text(str(value))) for value in values if str(value).strip()]
+
+
+def _normalize_role_pattern_text(value: str) -> str:
+    return str(value).replace("\\", "/").replace("-", "_").replace(" ", "_")
 
 
 def _bounds_for_objects(objects: list) -> tuple[np.ndarray, np.ndarray] | None:

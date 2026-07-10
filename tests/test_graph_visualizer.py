@@ -35,6 +35,7 @@ from graph_visualizer.matrix_builder import (
     refresh_radiation_from_exposed_faces,
 )
 from graph_visualizer.models import EdgeMode, GraphMetadata, NodeProperties, ThermalGraphModel
+from graph_visualizer.role_assignment import assign_matching_nodes_to_role
 from graph_visualizer.simulation_model import prepare_simulation
 from graph_visualizer.simulation_parameters import (
     SimulationParameters,
@@ -461,6 +462,42 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertAlmostEqual(prepared.heater_power_by_node()[2], 2.5)
         self.assertEqual(prepared.controller_mode, "coarse")
+
+    def test_bulk_role_assignment_matches_normalized_component_substring_per_node(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="bulk_roles"))
+        left = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        left.component_name = "V_GUUTZ_SAFE-HEATER_LEFT"
+        right = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        right.component_name = "V_GUUTZ_SAFE_HEATER_RIGHT"
+        body = NodeProperties.with_material(3, (2, 0, 0), material="copper")
+        body.component_name = "V_GUUTZ_SENSOR_HEATER_CABLE"
+        for node in (left, right, body):
+            model.add_node(node)
+
+        matched = assign_matching_nodes_to_role(model, "safe-heater", "heater")
+
+        self.assertEqual(matched, [1, 2])
+        self.assertTrue(model.nodes[1].is_heater)
+        self.assertTrue(model.nodes[2].is_heater)
+        self.assertFalse(model.nodes[3].is_heater)
+        self.assertEqual(model.nodes[1].heater.heater_id, 1)
+        self.assertEqual(model.nodes[2].heater.heater_id, 2)
+        self.assertEqual(len(model.nodes), 3)
+
+    def test_bulk_role_assignment_can_match_source_components_as_sensor(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="bulk_source_roles"))
+        sensor = NodeProperties.with_material(4, (0, 0, 0), material="copper")
+        sensor.component_name = "cell_body"
+        sensor.source_components = ["assembly/TEMP-PROBE-A"]
+        sensor.is_heater = True
+        model.add_node(sensor)
+
+        matched = assign_matching_nodes_to_role(model, "temp probe", "sensor")
+
+        self.assertEqual(matched, [4])
+        self.assertFalse(model.nodes[4].is_heater)
+        self.assertTrue(model.nodes[4].is_sensor)
+        self.assertEqual(model.nodes[4].sensor.sensor_id, 4)
 
     def test_mimo_dynamic_rate_gain_is_static_direct_capacitance(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_static_bdyn"))

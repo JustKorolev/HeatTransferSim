@@ -107,6 +107,12 @@ and reads material properties from the project-level `materials.json` file by
 default. The mesh directory must contain exactly one `.glb` scene file.
 External-buffer `.gltf`/`.bin` exports are rejected because missing or mismatched
 buffers can collapse CAD geometry during loading.
+CAD components are converted into dedicated heater/sensor graph nodes only when
+you provide matching names with `--heater-name-substring`,
+`--heater-name-pattern`, `--sensor-name-substring`, or
+`--sensor-name-pattern`; repeat a flag to add multiple matches. If no heater or
+sensor match is configured, all components remain in the voxelized body
+geometry.
 If `materials.xlsx` exists in `--mesh-dir`, it maps SolidWorks part instance
 names to material names. Contact checking is handled separately in Python by
 exact shared voxel faces plus a voxel-surface contact-distance pass.
@@ -119,8 +125,12 @@ cells are classified per worker batch.
 Each run writes `conversion.log` in the graph output folder with phase changes,
 periodic voxelization progress, memory estimates, and Python tracebacks. If a
 run exits without a terminal error, inspect that log first.
-For bbox-fallback graphs, `--contact-detection-distance-mm` defaults to
-`--min-cell-size-mm` so near but non-face-adjacent cells can still be connected.
+The `Voxelizing octree` phase depends on the mesh geometry, any configured
+heater/sensor component exclusions, material lookup used for material-contrast
+refinement, and octree/refinement parameters such as cell sizes, depth,
+sampling, and boundary/contact refinement distance. It does not depend on
+graph-only settings such as `--contact-detection-distance-mm` or radiation
+reference temperature.
 The builder writes:
 
 ```text

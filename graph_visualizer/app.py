@@ -39,6 +39,7 @@ from .models import (
     ThermalGraphModel,
 )
 from .pyvista_widget import GraphPyVistaWidget
+from .role_assignment import assign_matching_nodes_to_role
 from .tooltip_formatters import format_node_tooltip
 from .two_d_graph_widget import TwoDGraphWidget
 from .validation import raise_if_errors, validate_model
@@ -116,6 +117,7 @@ class GraphVisualizerApp:
         self._build_search_controls()
         self._build_filter_controls()
         self._build_node_form()
+        self._build_bulk_role_assignment_controls()
         self._build_details_panel()
         self.left_layout.addStretch(1)
 
@@ -460,6 +462,22 @@ class GraphVisualizerApp:
         form.addRow("initial_temperature_K", self.component_temp_input)
         self.left_layout.addWidget(box)
 
+    def _build_bulk_role_assignment_controls(self) -> None:
+        box = self._group_box("Recognize Existing Cells")
+        layout = self.QtWidgets.QVBoxLayout(box)
+        form = self.QtWidgets.QFormLayout()
+        self.bulk_role_substring_input = self.QtWidgets.QLineEdit()
+        self.bulk_role_substring_input.setPlaceholderText("substring in component/source name")
+        self.bulk_role_combo = self.QtWidgets.QComboBox()
+        self.bulk_role_combo.addItems(["Heater", "Sensor"])
+        form.addRow("substring", self.bulk_role_substring_input)
+        form.addRow("assign as", self.bulk_role_combo)
+        layout.addLayout(form)
+        button = self.QtWidgets.QPushButton("Assign Matching Cells")
+        button.clicked.connect(self.apply_bulk_role_assignment)
+        layout.addWidget(button)
+        self.left_layout.addWidget(box)
+
     def _build_details_panel(self) -> None:
         box = self._group_box("Selected Cell")
         layout = self.QtWidgets.QVBoxLayout(box)
@@ -604,6 +622,28 @@ class GraphVisualizerApp:
         target.controller_mu_order = template.controller_mu_order
         target.notes = template.notes
         target.initial_temperature_K = template.initial_temperature_K
+
+    def apply_bulk_role_assignment(self) -> None:
+        substring = self.bulk_role_substring_input.text() if hasattr(self, "bulk_role_substring_input") else ""
+        role = self.bulk_role_combo.currentText().lower() if hasattr(self, "bulk_role_combo") else ""
+        try:
+            matched = assign_matching_nodes_to_role(self.model, substring, role)
+        except ValueError as exc:
+            self._set_status(str(exc), error=True)
+            return
+        if not matched:
+            self._set_status(f"No cells matched substring {substring!r}.", error=True)
+            return
+        self.model.prune_controller_gain_matrix()
+        self._mark_dirty()
+        if self.selected_node_id in self.model.nodes:
+            self._load_node_into_form(self.model.nodes[int(self.selected_node_id)])
+        self._refresh_all(reset_camera=False)
+        self._sync_simulation_from_editor(reinitialize=True)
+        label = "heater" if role == "heater" else "sensor"
+        self._set_status(
+            f"Assigned {len(matched)} existing cell(s) as {label}s from substring {substring!r}."
+        )
 
     def _visual_tag_snapshot(self, node_ids: list[int]) -> tuple[tuple[int, bool, bool, bool], ...]:
         return tuple(

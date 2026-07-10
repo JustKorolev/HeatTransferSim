@@ -11,6 +11,7 @@ from unittest.mock import patch
 import numpy as np
 
 from octree_graph.cli import (
+    build_parser,
     _build_graph_with_optional_fallback,
     _log_scene_memory_risk,
     _raise_if_empty_graph,
@@ -340,12 +341,13 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
                 [r"sensor"],
             )
 
-    def test_cli_role_component_split_excludes_components_from_voxel_scene(self) -> None:
+    def test_cli_role_component_split_requires_configured_patterns(self) -> None:
         body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
         heater = _mesh_object("heater_strip_1", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
+        sensor = _mesh_object("temperature_probe_A", "Copper", [-6.0, -1.0, -1.0], [-5.0, 1.0, 1.0])
         scene = GltfScene(
             path=SimpleNamespace(),
-            objects=[body, heater],
+            objects=[body, heater, sensor],
             bounds_mm=(np.array([-5.0, -5.0, -5.0]), np.array([6.0, 5.0, 5.0])),
             warnings=[],
         )
@@ -363,19 +365,58 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         voxel_scene, role_components = _split_role_components(scene, args, warnings)
 
-        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel", "heater_strip_1"])
+        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel", "heater_strip_1", "temperature_probe_A"])
         self.assertEqual(role_components, [])
         self.assertEqual(args.role_components, [])
         self.assertEqual(warnings, [])
 
         args.heater_name_substring = ["heater_strip"]
+        args.sensor_name_substring = ["temperature-probe"]
         voxel_scene, role_components = _split_role_components(scene, args, warnings)
 
         self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel"])
-        self.assertEqual(len(role_components), 1)
-        self.assertEqual(role_components[0].kind, "heater")
+        self.assertEqual([component.kind for component in role_components], ["heater", "sensor"])
         self.assertEqual(args.role_components, role_components)
         self.assertIn("excluded them from voxelization", warnings[0])
+
+    def test_cli_legacy_physical_device_disable_flag_disables_role_detection(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--mesh-dir",
+                "meshes",
+                "--graph-name",
+                "graph",
+                "--no-detect-physical-devices",
+            ]
+        )
+
+        self.assertTrue(args.no_detect_role_nodes)
+
+    def test_cli_role_substrings_are_normalized_like_cad_names(self) -> None:
+        body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        sensor = _mesh_object("THERMAL_PICKUP_A", "Copper", [-6.0, -1.0, -1.0], [-5.0, 1.0, 1.0])
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[body, sensor],
+            bounds_mm=(np.array([-6.0, -5.0, -5.0]), np.array([5.0, 5.0, 5.0])),
+            warnings=[],
+        )
+        args = SimpleNamespace(
+            no_detect_role_nodes=False,
+            heater_name_pattern=[],
+            heater_name_substring=[],
+            sensor_name_pattern=[],
+            sensor_name_substring=["thermal-pickup"],
+            device_exclude_name_pattern=[],
+            no_default_device_excludes=False,
+            role_node_group_gap_mm=10.0,
+        )
+
+        voxel_scene, role_components = _split_role_components(scene, args, warnings=[])
+
+        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel"])
+        self.assertEqual(len(role_components), 1)
+        self.assertEqual(role_components[0].kind, "sensor")
 
     def test_graph_build_adds_heater_role_node_and_contact_edge(self) -> None:
         materials = self.make_materials()
