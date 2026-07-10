@@ -953,6 +953,37 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertIn("AABB overlap", " ".join(leaves[0].warnings))
         self.assertEqual(diagnostics.cells_subdivided, 0)
 
+    def test_crowded_component_refinement_subdivides_dense_empty_regions(self) -> None:
+        materials = self.make_materials()
+        left = _mesh_object("small_part_left", "Copper", [-5.0, -1.0, -1.0], [-3.0, 1.0, 1.0])
+        right = _mesh_object("small_part_right", "Copper", [3.0, -1.0, -1.0], [5.0, 1.0, 1.0])
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[left, right],
+            bounds_mm=(np.array([-5.0, -1.0, -1.0]), np.array([5.0, 1.0, 1.0])),
+            warnings=[],
+        )
+        coarse_params = OctreeParams(
+            min_cell_size_mm=1.25,
+            max_cell_size_mm=50.0,
+            max_depth=4,
+            crowded_component_refine_count=0,
+        )
+        crowded_params = OctreeParams(
+            min_cell_size_mm=1.25,
+            max_cell_size_mm=50.0,
+            max_depth=4,
+            crowded_component_refine_count=2,
+            crowded_component_refine_distance_mm=3.0,
+        )
+
+        coarse = build_octree(scene, ContactReport(), materials, coarse_params, warnings=[])
+        crowded = build_octree(scene, ContactReport(), materials, crowded_params, warnings=[])
+
+        self.assertEqual(len(coarse), 1)
+        self.assertGreater(len(crowded), len(coarse))
+        self.assertLess(min(max(cell.size_mm) for cell in crowded), max(coarse[0].size_mm))
+
     def test_empty_graph_guard_reports_actionable_failure(self) -> None:
         args = SimpleNamespace(bbox_fallback=False, max_leaf_cells=15000)
         leaves = [

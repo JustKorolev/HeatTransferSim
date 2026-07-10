@@ -97,6 +97,8 @@ python build_octree_graph.py `
   --minority-fraction-ignore 0.02 `
   --material-contrast-refine-threshold 5 `
   --contact-refine-distance-mm 10 `
+  --crowded-component-refine-count 3 `
+  --crowded-component-refine-distance-mm 2 `
   --samples-per-cell 9 `
   --voxel-workers 0
 ```
@@ -131,6 +133,12 @@ refinement, and octree/refinement parameters such as cell sizes, depth,
 sampling, and boundary/contact refinement distance. It does not depend on
 graph-only settings such as `--contact-detection-distance-mm` or radiation
 reference temperature.
+For dense regions with many small nearby parts, use
+`--crowded-component-refine-count N` with
+`--crowded-component-refine-distance-mm D` to force additional local refinement
+where a cell's padded bounds overlap at least `N` CAD components. This helps
+preserve small air gaps between nearby parts; keep `--max-leaf-cells` high
+enough for the extra local cells.
 The builder writes:
 
 ```text

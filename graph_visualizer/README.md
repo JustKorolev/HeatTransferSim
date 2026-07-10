@@ -174,3 +174,7 @@ processes during octree classification, or pass an explicit worker count. Large
 CAD assemblies copy triangle data into each worker process, so increase the
 count gradually. Conversion runs write `conversion.log` in the graph output
 folder with phase changes, progress, memory estimates, and Python tracebacks.
+For dense small-part areas, `--crowded-component-refine-count` and
+`--crowded-component-refine-distance-mm` force extra local octree refinement
+around cells whose padded bounds overlap many CAD components, which can preserve
+small empty gaps that ordinary dominant-component acceptance can miss.

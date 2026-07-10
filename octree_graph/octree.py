@@ -49,6 +49,8 @@ class OctreeParams:
     bbox_fallback: bool = False
     voxel_workers: int = 1
     voxel_batch_size: int = 64
+    crowded_component_refine_count: int = 0
+    crowded_component_refine_distance_mm: float = 0.0
 
 
 @dataclass
@@ -87,6 +89,7 @@ class CellClassification:
     inside_mesh_ids: set[int]
     near_surface_mesh_ids: set[int]
     candidate_mesh_ids: set[int]
+    crowded_component_count: int
     material_ids: set[str]
     part_ids: set[str]
     occupancy: dict[str, float]
@@ -127,6 +130,7 @@ class OctreeDiagnostics:
     cells_inside_hit: int = 0
     cells_near_surface_hit: int = 0
     cells_bbox_only_hit: int = 0
+    cells_crowded_component_hit: int = 0
     triangle_candidate_tests: int = 0
     triangle_intersection_tests: int = 0
     max_depth_reached: int = 0
@@ -149,6 +153,7 @@ class OctreeDiagnostics:
             "cells_inside_hit": self.cells_inside_hit,
             "cells_near_surface_hit": self.cells_near_surface_hit,
             "cells_bbox_only_hit": self.cells_bbox_only_hit,
+            "cells_crowded_component_hit": self.cells_crowded_component_hit,
             "triangle_candidate_tests": self.triangle_candidate_tests,
             "triangle_intersection_tests": self.triangle_intersection_tests,
             "max_depth_reached": self.max_depth_reached,
@@ -315,6 +320,7 @@ def build_octree(
         needs_surface_refinement = params.boundary_refine and (
             classification.surface_hit or classification.near_surface_hit
         )
+        crowded_component_refinement = _needs_crowded_component_refinement(classification, params)
         effective_queue_len = len(queue) + int(remaining_batch_items)
         budget_allows_children = (
             params.max_leaf_cells is None
@@ -332,6 +338,7 @@ def build_octree(
             or mixed_parts
             or mixed_materials
             or high_contrast
+            or crowded_component_refinement
             or (needs_surface_refinement and float(max(size_mm)) > params.min_cell_size_mm)
             or (
                 classification.occupied
@@ -561,6 +568,8 @@ def _record_leaf_diagnostics(
         diagnostics.cells_near_surface_hit += 1
     if classification.bbox_only_hit:
         diagnostics.cells_bbox_only_hit += 1
+    if int(classification.crowded_component_count) > 0:
+        diagnostics.cells_crowded_component_hit += 1
     if diagnostics.debug_leaves and classification.occupied:
         diagnostics.leaf_records.append(
             {
@@ -574,6 +583,7 @@ def _record_leaf_diagnostics(
                 "inside_hit": classification.inside_hit,
                 "near_surface_hit": classification.near_surface_hit,
                 "bbox_only_hit": classification.bbox_only_hit,
+                "crowded_component_count": int(classification.crowded_component_count),
                 "accepted_by_exact_geometry": classification.occupied,
                 "accepted_by_bbox_fallback": False,
             }
@@ -612,6 +622,12 @@ def _classify_cell(
     near_min = cell_min - near_margin
     near_max = cell_max + near_margin
     candidate_objects = _objects_intersecting_bounds(objects, near_min, near_max)
+    crowded_margin = max(0.0, float(params.crowded_component_refine_distance_mm))
+    crowded_objects = (
+        _objects_intersecting_bounds(objects, cell_min - crowded_margin, cell_max + crowded_margin)
+        if int(params.crowded_component_refine_count) > 0
+        else []
+    )
     candidate_mesh_ids = {id(obj) for obj in candidate_objects}
     surface_objects: list[MeshObject] = []
     near_surface_objects: list[MeshObject] = []
@@ -711,6 +727,7 @@ def _classify_cell(
         inside_mesh_ids=inside_mesh_ids,
         near_surface_mesh_ids=near_surface_mesh_ids,
         candidate_mesh_ids=candidate_mesh_ids,
+        crowded_component_count=len({id(obj) for obj in crowded_objects}),
         material_ids=set(material_fractions),
         part_ids={obj.name for obj in hit_objects},
         occupancy=occupancy,
@@ -731,6 +748,14 @@ def _normalize_fraction_map(values: dict[str, float]) -> dict[str, float]:
     if total <= 1.0:
         return clean
     return {name: value / total for name, value in clean.items()}
+
+
+def _needs_crowded_component_refinement(
+    classification: CellClassification,
+    params: OctreeParams,
+) -> bool:
+    threshold = int(params.crowded_component_refine_count)
+    return threshold > 0 and int(classification.crowded_component_count) >= threshold
 
 
 def _unique_objects(objects: list[MeshObject]) -> list[MeshObject]:

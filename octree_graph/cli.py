@@ -84,6 +84,8 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         bbox_fallback=args.bbox_fallback,
         voxel_workers=args.voxel_workers,
         voxel_batch_size=args.voxel_batch_size,
+        crowded_component_refine_count=args.crowded_component_refine_count,
+        crowded_component_refine_distance_mm=args.crowded_component_refine_distance_mm,
     )
     leaves, graph_result, diagnostics = _build_graph_with_optional_fallback(
         scene,
@@ -154,6 +156,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-leaf-cells", type=int, default=None)
     parser.add_argument("--samples-per-cell", type=int, default=9)
     parser.add_argument("--min-solid-fraction", type=float, default=0.12)
+    parser.add_argument(
+        "--crowded-component-refine-count",
+        type=int,
+        default=0,
+        help=(
+            "If greater than 0, refine cells whose local neighborhood overlaps at least this many "
+            "CAD component bounds. Useful for preserving empty gaps in dense small-part regions."
+        ),
+    )
+    parser.add_argument(
+        "--crowded-component-refine-distance-mm",
+        type=float,
+        default=0.0,
+        help=(
+            "Padding around each octree cell when counting nearby components for crowded-region refinement."
+        ),
+    )
     parser.add_argument("--bbox-fallback", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--voxel-workers",
