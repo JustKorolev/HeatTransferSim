@@ -667,8 +667,7 @@ def _classify_cell(
     watertight_candidates = [obj for obj in candidate_objects if bool(getattr(obj, "watertight", False))]
     for point in points:
         for obj in watertight_candidates:
-            obj_min, obj_max = obj.bounds_mm
-            if np.any(point < obj_min) or np.any(point > obj_max):
+            if not _point_in_object_bounds(point, obj):
                 continue
             try:
                 if _mesh_contains_point(obj, point, params):
@@ -875,12 +874,68 @@ def _ray_contains_point(obj: MeshObject, point: np.ndarray) -> bool:
 def _objects_intersecting_bounds(
     objects: list[MeshObject], bounds_min: np.ndarray, bounds_max: np.ndarray
 ) -> list[MeshObject]:
+    query_min = tuple(float(value) for value in bounds_min)
+    query_max = tuple(float(value) for value in bounds_max)
     hits: list[MeshObject] = []
     for obj in objects:
-        obj_min, obj_max = obj.bounds_mm
-        if np.all(bounds_max >= obj_min) and np.all(obj_max >= bounds_min):
+        bounds = _object_bounds_tuple(obj)
+        if bounds is None:
+            continue
+        obj_min, obj_max = bounds
+        if _bounds_intersect_tuple(obj_min, obj_max, query_min, query_max):
             hits.append(obj)
     return hits
+
+
+def _point_in_object_bounds(point: np.ndarray, obj: MeshObject) -> bool:
+    bounds = _object_bounds_tuple(obj)
+    if bounds is None:
+        return False
+    obj_min, obj_max = bounds
+    x, y, z = (float(value) for value in point)
+    return (
+        obj_min[0] <= x <= obj_max[0]
+        and obj_min[1] <= y <= obj_max[1]
+        and obj_min[2] <= z <= obj_max[2]
+    )
+
+
+def _object_bounds_tuple(obj: MeshObject) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    cached = getattr(obj, "_bounds_tuple_mm", None)
+    if cached is not None:
+        return cached
+    try:
+        raw_min, raw_max = obj.bounds_mm
+        obj_min = tuple(float(value) for value in raw_min)
+        obj_max = tuple(float(value) for value in raw_max)
+    except (TypeError, ValueError):
+        return None
+    if len(obj_min) != 3 or len(obj_max) != 3:
+        return None
+    if not all(math.isfinite(value) for value in (*obj_min, *obj_max)):
+        return None
+    cached = (obj_min, obj_max)
+    try:
+        setattr(obj, "_bounds_tuple_mm", cached)
+    except Exception:
+        pass
+    return cached
+
+
+def _bounds_intersect_tuple(
+    a_min: tuple[float, float, float],
+    a_max: tuple[float, float, float],
+    b_min: tuple[float, float, float],
+    b_max: tuple[float, float, float],
+) -> bool:
+    return (
+        b_max[0] >= a_min[0]
+        and a_max[0] >= b_min[0]
+        and b_max[1] >= a_min[1]
+        and a_max[1] >= b_min[1]
+        and b_max[2] >= a_min[2]
+        and a_max[2] >= b_min[2]
+    )
 
 
 def _sample_points(center_mm: np.ndarray, size_mm: np.ndarray, samples_per_cell: int) -> np.ndarray:

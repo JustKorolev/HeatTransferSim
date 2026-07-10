@@ -40,6 +40,7 @@ from octree_graph.octree import (
     OctreeDiagnostics,
     OctreeParams,
     _mesh_contains_point,
+    _objects_intersecting_bounds,
     _physical_material_name,
     _sample_points,
     _triangle_intersects_aabb,
@@ -963,6 +964,18 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             ),
             bool,
         )
+
+    def test_objects_intersecting_bounds_skips_non_finite_object_bounds(self) -> None:
+        valid = _mesh_object("valid", "Copper", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+        invalid = _mesh_object("invalid", "Copper", [float("nan"), 0.0, 0.0], [1.0, 1.0, 1.0])
+
+        hits = _objects_intersecting_bounds(
+            [invalid, valid],
+            np.array([-0.5, -0.5, -0.5]),
+            np.array([0.5, 0.5, 0.5]),
+        )
+
+        self.assertEqual([obj.name for obj in hits], ["valid"])
 
     def test_triangle_box_intersection_rejects_aabb_only_overlap(self) -> None:
         triangle = np.array(

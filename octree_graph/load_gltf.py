@@ -64,7 +64,7 @@ def load_gltf_scene(path: str | Path) -> GltfScene:
                 material_name=str(material_name).strip() if material_name else None,
                 mesh=mesh,
                 vertices_mm=np.asarray(mesh.vertices, dtype=float),
-                bounds_mm=(bounds[0], bounds[1]),
+                bounds_mm=(bounds[0].astype(float, copy=True), bounds[1].astype(float, copy=True)),
                 watertight=bool(getattr(mesh, "is_watertight", False)),
                 scene_path=str(node_name),
             )
@@ -83,7 +83,7 @@ def load_gltf_scene(path: str | Path) -> GltfScene:
             obj.mesh.apply_scale(1000.0)
             obj.vertices_mm = np.asarray(obj.mesh.vertices, dtype=float)
             bounds = np.asarray(obj.mesh.bounds, dtype=float)
-            obj.bounds_mm = (bounds[0], bounds[1])
+            obj.bounds_mm = (bounds[0].astype(float, copy=True), bounds[1].astype(float, copy=True))
         mins = np.min([obj.bounds_mm[0] for obj in objects], axis=0)
         maxs = np.max([obj.bounds_mm[1] for obj in objects], axis=0)
     return GltfScene(path=file_path, objects=objects, bounds_mm=(mins, maxs), warnings=warnings)
