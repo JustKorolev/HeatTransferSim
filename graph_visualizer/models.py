@@ -317,11 +317,23 @@ class NodeProperties:
             sensor_data.setdefault("sensor_id", tags.get("sensor_id") or node_id)
         copied.setdefault(
             "is_heater",
-            bool(is_heater_value if is_heater_value is not None else node_type == "heater"),
+            bool(
+                tags.get("heater")
+                if "heater" in tags
+                else is_heater_value
+                if is_heater_value is not None
+                else node_type == "heater"
+            ),
         )
         copied.setdefault(
             "is_sensor",
-            bool(is_sensor_value if is_sensor_value is not None else node_type == "sensor"),
+            bool(
+                tags.get("sensor")
+                if "sensor" in tags
+                else is_sensor_value
+                if is_sensor_value is not None
+                else node_type == "sensor"
+            ),
         )
         copied.pop("has_heat_sink", None)
         copied.setdefault(
@@ -768,8 +780,16 @@ class ThermalGraphModel:
         model = cls(metadata=metadata, material_library=data.get("material_library") or {})
         model.octree_graph_data = dict(data)
         model.controller_gain_matrix = _parse_controller_gain_matrix(data.get("controller_gain_matrix"))
+        top_level_tags = data.get("heater_sensor_tags", {}) or {}
         for raw_node in data.get("graph_nodes", []):
-            node = NodeProperties.from_dict(dict(raw_node))
+            raw_node = dict(raw_node)
+            raw_node_id = raw_node.get("node_id", raw_node.get("id"))
+            tag_payload = top_level_tags.get(str(raw_node_id))
+            if isinstance(tag_payload, dict):
+                merged_tags = dict(raw_node.get("tags", {}) or {})
+                merged_tags.update(tag_payload)
+                raw_node["tags"] = merged_tags
+            node = NodeProperties.from_dict(raw_node)
             model.add_node(node)
         for raw_edge in data.get("graph_edges", []):
             edge = EdgeProperties.from_dict(dict(raw_edge))

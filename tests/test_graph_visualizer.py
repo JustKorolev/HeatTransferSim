@@ -1067,6 +1067,60 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertFalse(sensor.is_heater)
         self.assertTrue(sensor.is_sensor)
 
+    def test_octree_node_load_promotes_legacy_role_tags(self) -> None:
+        node = NodeProperties.from_dict(
+            {
+                "node_id": 31,
+                "coord": [31, 0, 0],
+                "tags": {
+                    "heater": True,
+                    "sensor": True,
+                    "heater_id": 310,
+                    "sensor_id": 311,
+                },
+            }
+        )
+
+        self.assertTrue(node.is_heater)
+        self.assertTrue(node.is_sensor)
+        self.assertEqual(node.heater.heater_id, 310)
+        self.assertEqual(node.sensor.sensor_id, 311)
+
+    def test_octree_graph_load_applies_top_level_heater_sensor_tags(self) -> None:
+        model = ThermalGraphModel.from_octree_graph_dict(
+            {
+                "metadata": {"graph_name": "legacy_tags"},
+                "graph_nodes": [
+                    {
+                        "node_id": 41,
+                        "coord": [41, 0, 0],
+                        "center_mm": [1.0, 2.0, 3.0],
+                        "size_mm": [1.0, 1.0, 1.0],
+                        "component_name": "legacy_heater_cell",
+                        "material_name": "Copper",
+                        "is_heater": False,
+                        "is_sensor": False,
+                    }
+                ],
+                "graph_edges": [],
+                "heater_sensor_tags": {
+                    "41": {
+                        "heater": True,
+                        "sensor": False,
+                        "heater_id": 41,
+                        "sensor_id": None,
+                        "notes": "legacy assignment",
+                    }
+                },
+            }
+        )
+
+        node = model.nodes[41]
+        self.assertTrue(node.is_heater)
+        self.assertFalse(node.is_sensor)
+        self.assertEqual(node.heater.heater_id, 41)
+        self.assertEqual(node.notes, "legacy assignment")
+
     def test_mimo_controller_metadata_and_gain_matrix_round_trip(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_round_trip"))
         sensor = NodeProperties.with_material(1, (0, 0, 0), material="copper")
