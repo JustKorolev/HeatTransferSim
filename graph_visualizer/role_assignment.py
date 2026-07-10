@@ -64,3 +64,9 @@ def assign_node_role(node: NodeProperties, role: str) -> None:
 
 def node_has_heater_sensor_role(node: NodeProperties) -> bool:
     return bool(getattr(node, "is_heater", False) or getattr(node, "is_sensor", False))
+
+
+def node_matches_level_filter(node: NodeProperties, min_level: int, max_level: int) -> bool:
+    if getattr(node, "is_cad_role_node", False):
+        return True
+    return int(min_level) <= int(getattr(node, "level", 0)) <= int(max_level)

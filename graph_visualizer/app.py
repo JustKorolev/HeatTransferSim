@@ -39,7 +39,13 @@ from .models import (
     ThermalGraphModel,
 )
 from .pyvista_widget import GraphPyVistaWidget
-from .role_assignment import assign_matching_nodes_to_role, node_has_heater_sensor_role
+from .role_assignment import (
+    assign_matching_nodes_to_role,
+    node_has_heater_sensor_role,
+    node_matches_level_filter,
+    node_matches_role_substring,
+    normalize_role_match_text,
+)
 from .tooltip_formatters import format_node_tooltip
 from .two_d_graph_widget import TwoDGraphWidget
 from .validation import raise_if_errors, validate_model
@@ -244,7 +250,7 @@ class GraphVisualizerApp:
         box = self._group_box("Search")
         row = self.QtWidgets.QHBoxLayout(box)
         self.search_input = self.QtWidgets.QLineEdit()
-        self.search_input.setPlaceholderText("node_id or (i, j, k)")
+        self.search_input.setPlaceholderText("node_id, (i, j, k), or component/source substring")
         search_button = self.QtWidgets.QPushButton("Find")
         search_button.clicked.connect(self.search_node)
         row.addWidget(self.search_input, 1)
@@ -798,13 +804,30 @@ class GraphVisualizerApp:
         try:
             node_id = int(text)
         except ValueError:
-            self._set_status("Search must be a node_id or coordinate like (1, 2, 3).", error=True)
+            matched = self._find_node_by_metadata_substring(text)
+            if matched is None:
+                self._set_status(
+                    "Search must match a node_id, coordinate like (1, 2, 3), or component/source substring.",
+                    error=True,
+                )
+                return
+            self.select_node(matched.node_id)
+            self._set_status(f"Selected node {matched.node_id}.")
             return
         if node_id not in self.model.nodes:
             self._set_status(f"No node found with node_id {node_id}.", error=True)
             return
         self.select_node(node_id)
         self._set_status(f"Selected node {node_id}.")
+
+    def _find_node_by_metadata_substring(self, text: str) -> NodeProperties | None:
+        normalized = normalize_role_match_text(text)
+        if not normalized:
+            return None
+        for node_id, node in sorted(self.model.nodes.items()):
+            if node_matches_role_substring(node, normalized):
+                return node
+        return None
 
     def recompute_auto_edges(self) -> None:
         refresh_auto_edges(self.model)
@@ -1509,7 +1532,7 @@ class GraphVisualizerApp:
                 continue
             if component != "All" and node.component_name != component:
                 continue
-            if not (min_level <= int(node.level) <= max_level):
+            if not node_matches_level_filter(node, min_level, max_level):
                 continue
             if self.filter_heater_sensor.isChecked() and not node_has_heater_sensor_role(node):
                 continue

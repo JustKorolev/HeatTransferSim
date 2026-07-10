@@ -35,7 +35,13 @@ from graph_visualizer.matrix_builder import (
     refresh_radiation_from_exposed_faces,
 )
 from graph_visualizer.models import EdgeMode, GraphMetadata, NodeProperties, ThermalGraphModel
-from graph_visualizer.role_assignment import assign_matching_nodes_to_role, node_has_heater_sensor_role
+from graph_visualizer.role_assignment import (
+    assign_matching_nodes_to_role,
+    node_has_heater_sensor_role,
+    node_matches_level_filter,
+    node_matches_role_substring,
+    normalize_role_match_text,
+)
 from graph_visualizer.simulation_model import prepare_simulation
 from graph_visualizer.simulation_parameters import (
     SimulationParameters,
@@ -498,6 +504,23 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertFalse(model.nodes[4].is_heater)
         self.assertTrue(model.nodes[4].is_sensor)
         self.assertEqual(model.nodes[4].sensor.sensor_id, 4)
+
+    def test_cad_role_nodes_bypass_octree_level_filter_and_match_source_search(self) -> None:
+        heater = NodeProperties.with_material(8, (0, 0, 0), material="copper")
+        heater.node_type = "heater"
+        heater.level = -1
+        heater.source_components = ["assembly/V_GUUTZ_SAFE-HEATER"]
+        body = NodeProperties.with_material(9, (1, 0, 0), material="copper")
+        body.level = 1
+
+        self.assertTrue(node_matches_level_filter(heater, 0, 99))
+        self.assertFalse(node_matches_level_filter(body, 2, 99))
+        self.assertTrue(
+            node_matches_role_substring(
+                heater,
+                normalize_role_match_text("safe heater"),
+            )
+        )
 
     def test_heater_sensor_filter_excludes_cryocooler_only_nodes(self) -> None:
         heater = NodeProperties.with_material(1, (0, 0, 0), material="copper")
