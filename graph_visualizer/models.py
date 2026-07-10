@@ -144,6 +144,9 @@ class NodeProperties:
     parent_id: str | None = None
     children_ids: list[str] = field(default_factory=list)
     level: int = 0
+    node_type: str = ""
+    source_components: list[str] = field(default_factory=list)
+    source_bounds_mm: dict[str, Any] = field(default_factory=dict)
     center_mm: tuple[float, float, float] | None = None
     size_mm: tuple[float, float, float] | None = None
     component_name: str = ""
@@ -166,10 +169,10 @@ class NodeProperties:
     radiating_area_m2: float = 0.0
     G_rad_W_K: float = 0.0
     R_rad_K_W: float | None = None
-    has_heater: bool = False
+    is_heater: bool = False
     heater: HeaterProperties = field(default_factory=HeaterProperties)
     heater_control: HeaterControl = field(default_factory=HeaterControl)
-    has_sensor: bool = False
+    is_sensor: bool = False
     sensor: SensorProperties = field(default_factory=SensorProperties)
     has_cryocooler: bool = False
     controller_setpoint_K: float = 293.15
@@ -217,6 +220,11 @@ class NodeProperties:
         size_mm = copied.pop("size_mm", None)
         component_name = copied.pop("component_name", copied.pop("component", ""))
         material_name = copied.pop("material_name", None)
+        node_type = str(copied.pop("node_type", ""))
+        source_components = copied.pop("source_components", []) or []
+        source_bounds_mm = copied.pop("source_bounds_mm", {}) or {}
+        is_heater_value = copied.pop("is_heater", None)
+        is_sensor_value = copied.pop("is_sensor", None)
         tags = copied.pop("tags", {}) or {}
         coord_value = copied.pop("coord", None)
         if coord_value is None and center_mm is not None:
@@ -307,8 +315,14 @@ class NodeProperties:
             heater_data.setdefault("heater_id", tags.get("heater_id") or node_id)
         if "sensor_id" in tags:
             sensor_data.setdefault("sensor_id", tags.get("sensor_id") or node_id)
-        copied.setdefault("has_heater", bool(tags.get("heater", False)))
-        copied.setdefault("has_sensor", bool(tags.get("sensor", False)))
+        copied.setdefault(
+            "is_heater",
+            bool(is_heater_value if is_heater_value is not None else node_type == "heater"),
+        )
+        copied.setdefault(
+            "is_sensor",
+            bool(is_sensor_value if is_sensor_value is not None else node_type == "sensor"),
+        )
         copied.pop("has_heat_sink", None)
         copied.setdefault(
             "has_cryocooler",
@@ -327,8 +341,6 @@ class NodeProperties:
         copied.setdefault("initial_temperature_K", float(copied.get("initial_temperature_K", 293.15)))
         copied.pop("dominant_component", None)
         copied.pop("dominant_material", None)
-        copied.pop("node_type", None)
-        copied.pop("physical_device", None)
         copied.pop("pos", None)
         if size_mm is not None and "side_length_m" not in copied:
             copied["side_length_m"] = max(float(v) for v in size_mm) / 1000.0
@@ -337,6 +349,9 @@ class NodeProperties:
             coord=coord,
             center_mm=tuple(float(v) for v in center_mm) if center_mm is not None else None,
             size_mm=tuple(float(v) for v in size_mm) if size_mm is not None else None,
+            node_type=node_type,
+            source_components=[str(value) for value in source_components],
+            source_bounds_mm=dict(source_bounds_mm) if isinstance(source_bounds_mm, dict) else {},
             component_name=str(component_name),
             **copied,
         )
@@ -344,8 +359,6 @@ class NodeProperties:
             node.heater = HeaterProperties(**heater_data)
         else:
             node.heater = HeaterProperties(**heater_data)
-        if node.has_heater:
-            node.has_sensor = True
         if not isinstance(node.heater_control, HeaterControl):
             node.heater_control = HeaterControl.from_dict(
                 heater_control_data,
@@ -362,6 +375,10 @@ class NodeProperties:
             node.sensor = SensorProperties(**sensor_data)
         else:
             node.sensor = SensorProperties(**sensor_data)
+        if node.is_heater and not int(node.heater.heater_id):
+            node.heater.heater_id = node.node_id
+        if node.is_sensor and not int(node.sensor.sensor_id):
+            node.sensor.sensor_id = node.node_id
         return node
 
     def to_dict(self, include_id_key: bool = False) -> dict[str, Any]:
@@ -376,7 +393,18 @@ class NodeProperties:
         return data
 
     def to_octree_node_dict(self) -> dict[str, Any]:
-        return {
+        tags: dict[str, Any] = {
+            "cryocooler": self.has_cryocooler,
+            "notes": self.notes,
+        }
+        if not self.is_cad_role_node:
+            tags.update(
+                {
+                    "heater_id": self.heater.heater_id if self.is_heater else None,
+                    "sensor_id": self.sensor.sensor_id if self.is_sensor else None,
+                }
+            )
+        data = {
             "node_id": self.node_id,
             "cell_id": self.cell_id or f"cell_{self.node_id}",
             "center_mm": list(self.center_mm or self.center),
@@ -389,6 +417,8 @@ class NodeProperties:
             "C_J_K": self.C_J_K,
             "initial_temperature_K": self.initial_temperature_K,
             "occupancy_fraction": self.occupancy_fraction,
+            "is_heater": self.is_heater,
+            "is_sensor": self.is_sensor,
             "confidence": self.confidence,
             "warnings": list(self.warnings),
             "radiation": {
@@ -398,14 +428,7 @@ class NodeProperties:
                 "G_rad_W_K": self.G_rad_W_K,
                 "R_rad_K_W": self.R_rad_K_W,
             },
-            "tags": {
-                "heater": self.has_heater,
-                "sensor": self.has_sensor,
-                "cryocooler": self.has_cryocooler,
-                "heater_id": self.heater.heater_id if self.has_heater else None,
-                "sensor_id": self.sensor.sensor_id if self.has_sensor else None,
-                "notes": self.notes,
-            },
+            "tags": tags,
             "heater_control": asdict(self.heater_control),
             "controller": {
                 "setpoint_K": self.controller_setpoint_K,
@@ -422,6 +445,17 @@ class NodeProperties:
                 "integral_leak_per_s": self.controller_integral_leak_per_s,
             },
         }
+        if self.node_type:
+            data["node_type"] = self.node_type
+        if self.source_components:
+            data["source_components"] = list(self.source_components)
+        if self.source_bounds_mm:
+            data["source_bounds_mm"] = dict(self.source_bounds_mm)
+        return data
+
+    @property
+    def is_cad_role_node(self) -> bool:
+        return bool(str(self.node_type) in {"heater", "sensor"} and self.source_components)
 
     def apply_material_defaults(self, library: dict[str, dict[str, float]] | None = None) -> None:
         defaults = material_defaults(self.material, library)
@@ -614,8 +648,8 @@ class ThermalGraphModel:
         self.touch()
 
     def prune_controller_gain_matrix(self) -> None:
-        sensor_ids = {node_id for node_id, node in self.nodes.items() if node.has_sensor}
-        heater_ids = {node_id for node_id, node in self.nodes.items() if node.has_heater}
+        sensor_ids = {node_id for node_id, node in self.nodes.items() if node.is_sensor}
+        heater_ids = {node_id for node_id, node in self.nodes.items() if node.is_heater}
         pruned: dict[int, dict[int, float]] = {}
         for sensor_id, row in self.controller_gain_matrix.items():
             sensor_key = int(sensor_id)
@@ -696,7 +730,7 @@ class ThermalGraphModel:
             "heater_sensor_tags": {
                 str(node_id): node.to_octree_node_dict()["tags"]
                 for node_id, node in self.nodes.items()
-                if node.has_heater or node.has_sensor or node.has_cryocooler or node.notes
+                if node.is_heater or node.is_sensor or node.has_cryocooler or node.notes
             },
             "controller_gain_matrix": {
                 str(sensor_id): {

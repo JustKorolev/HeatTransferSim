@@ -334,7 +334,13 @@ class GraphVisualizerApp:
         ):
             self.inputs[key].setEnabled(False)
 
-        self.inputs["has_heater"] = self._checkbox("has heater", False, self._update_optional_sections)
+        self.inputs["role"] = self.QtWidgets.QComboBox()
+        self.inputs["role"].addItems(["Body", "Heater", "Sensor"])
+        self.inputs["role"].currentTextChanged.connect(self._handle_role_changed)
+        self.inputs["is_heater"] = self._checkbox("is heater", False, self._update_optional_sections)
+        self.inputs["is_heater"].setVisible(False)
+        self.node_role_label = self.QtWidgets.QLabel("role: body cell")
+        self.node_role_label.setWordWrap(True)
         self.heater_box = self._group_box("Heater")
         heater_form = self.QtWidgets.QFormLayout(self.heater_box)
         self.inputs["heater_id"] = self._int_spin(-1, 10**9, 0)
@@ -391,7 +397,8 @@ class GraphVisualizerApp:
         ):
             heater_form.addRow(key, self.inputs[key])
 
-        self.inputs["has_sensor"] = self._checkbox("has sensor", False, self._update_optional_sections)
+        self.inputs["is_sensor"] = self._checkbox("is sensor", False, self._update_optional_sections)
+        self.inputs["is_sensor"].setVisible(False)
         self.sensor_box = self._group_box("Sensor")
         sensor_form = self.QtWidgets.QFormLayout(self.sensor_box)
         self.inputs["sensor_id"] = self._int_spin(-1, 10**9, 0)
@@ -430,9 +437,9 @@ class GraphVisualizerApp:
         self.inputs["has_cryocooler"] = self._checkbox("has cryocooler", False, self._update_optional_sections)
 
         layout.addLayout(form)
-        layout.addWidget(self.inputs["has_heater"])
+        layout.addWidget(self.inputs["role"])
+        layout.addWidget(self.node_role_label)
         layout.addWidget(self.heater_box)
-        layout.addWidget(self.inputs["has_sensor"])
         layout.addWidget(self.sensor_box)
         layout.addWidget(self.controller_gain_box)
         layout.addWidget(self.inputs["has_cryocooler"])
@@ -570,15 +577,19 @@ class GraphVisualizerApp:
         target = self.model.nodes[target_id]
         existing_heater_id = target.heater.heater_id or target.node_id
         existing_sensor_id = target.sensor.sensor_id or target.node_id
-        target.has_heater = bool(template.has_heater)
-        target.heater = deepcopy(template.heater)
-        if target_id != self.selected_node_id:
-            target.heater.heater_id = existing_heater_id
-        target.heater_control = deepcopy(template.heater_control)
-        target.has_sensor = bool(template.has_sensor)
-        target.sensor = deepcopy(template.sensor)
-        if target_id != self.selected_node_id:
-            target.sensor.sensor_id = existing_sensor_id
+        target.is_heater = bool(template.is_heater)
+        target.is_sensor = bool(template.is_sensor)
+        if target.is_heater:
+            target.heater = deepcopy(template.heater)
+            if target_id != self.selected_node_id:
+                target.heater.heater_id = existing_heater_id
+            target.heater_control = deepcopy(template.heater_control)
+        else:
+            target.heater_control.reset_pid_state()
+        if target.is_sensor:
+            target.sensor = deepcopy(template.sensor)
+            if target_id != self.selected_node_id:
+                target.sensor.sensor_id = existing_sensor_id
         target.has_cryocooler = bool(template.has_cryocooler)
         target.controller_setpoint_K = template.controller_setpoint_K
         target.controller_weight = template.controller_weight
@@ -598,8 +609,8 @@ class GraphVisualizerApp:
         return tuple(
             (
                 int(node_id),
-                bool(self.model.nodes[int(node_id)].has_heater),
-                bool(self.model.nodes[int(node_id)].has_sensor),
+                bool(self.model.nodes[int(node_id)].is_heater),
+                bool(self.model.nodes[int(node_id)].is_sensor),
                 bool(self.model.nodes[int(node_id)].has_cryocooler),
             )
             for node_id in node_ids
@@ -621,18 +632,14 @@ class GraphVisualizerApp:
             self.controller_gain_box.setVisible(False)
             return
         active_node = self.model.nodes[int(active_id)]
-        if (
-            not active_node.has_heater
-            or not active_node.has_sensor
-            or getattr(active_node.heater_control, "mode", "manual") != "mimo"
-        ):
+        if not active_node.is_sensor:
             self.controller_gain_box.setVisible(False)
             return
         self.controller_gain_box.setVisible(True)
         heater_ids = [
             int(node_id)
             for node_id, node in sorted(self.model.nodes.items(), key=lambda item: int(item[0]))
-            if node.has_heater
+            if node.is_heater
         ]
         if not heater_ids:
             self.controller_gain_form.addRow(self.QtWidgets.QLabel("No heater cells are tagged."))
@@ -1085,8 +1092,9 @@ class GraphVisualizerApp:
 
     def _node_from_form(self) -> NodeProperties:
         node_id = int(self.inputs["node_id"].value())
-        has_heater = self.inputs["has_heater"].isChecked()
-        has_sensor = self.inputs["has_sensor"].isChecked()
+        role = self.inputs["role"].currentText().lower()
+        is_heater = role == "heater"
+        is_sensor = role == "sensor"
         has_cryocooler = self.inputs["has_cryocooler"].isChecked()
         node = NodeProperties(
             node_id=node_id,
@@ -1106,7 +1114,7 @@ class GraphVisualizerApp:
             C_manual_override=self.inputs["C_manual_override"].isChecked(),
             Grad_W_K=float(self.inputs["Grad_W_K"].value()),
             initial_temperature_K=float(self.inputs["initial_temperature_K"].value()),
-            has_heater=has_heater,
+            is_heater=is_heater,
             heater=HeaterProperties(
                 heater_id=int(self.inputs["heater_id"].value()),
                 heater_min_power_W=float(self.inputs["heater_min_power_W"].value()),
@@ -1132,7 +1140,7 @@ class GraphVisualizerApp:
                 manual=ManualHeaterSettings(power=float(self.inputs["heater_manual_power"].value())),
                 pid_state=PIDState(),
             ),
-            has_sensor=has_sensor,
+            is_sensor=is_sensor,
             sensor=SensorProperties(
                 sensor_id=int(self.inputs["sensor_id"].value()),
                 sensor_noise_std_K=float(self.inputs["sensor_noise_std_K"].value()),
@@ -1155,13 +1163,11 @@ class GraphVisualizerApp:
         )
         if not node.C_manual_override:
             node.recompute_heat_capacity()
-        if not has_heater:
+        if not is_heater:
             node.heater.heater_id = node_id
             node.heater_control.reset_pid_state()
-        if not has_sensor:
+        if not is_sensor:
             node.sensor.sensor_id = node_id
-        if node.has_heater:
-            node.has_sensor = True
         return node
 
     def _load_node_into_form(self, node: NodeProperties) -> None:
@@ -1185,7 +1191,8 @@ class GraphVisualizerApp:
         self.inputs["Grad_W_K"].setValue(node.Grad_W_K)
         self.inputs["initial_temperature_K"].setValue(node.initial_temperature_K)
         self.inputs["notes"].setPlainText(node.notes)
-        self.inputs["has_heater"].setChecked(node.has_heater)
+        self.inputs["role"].setCurrentText("Heater" if node.is_heater else "Sensor" if node.is_sensor else "Body")
+        self.inputs["is_heater"].setChecked(node.is_heater)
         self.inputs["heater_id"].setValue(node.heater.heater_id or node.node_id)
         self.inputs["heater_min_power_W"].setValue(node.heater.heater_min_power_W)
         self.inputs["heater_max_power_W"].setValue(node.heater.heater_max_power_W)
@@ -1208,10 +1215,10 @@ class GraphVisualizerApp:
         self.inputs["heater_pid_mu_order"].setValue(float(getattr(heater_control.pid, "mu_order", 1.0)))
         self.inputs["heater_pid_setpoint"].setValue(heater_control.pid.setpoint)
         manual_power = heater_control.manual.power
-        if node.has_heater and heater_control.mode == "manual" and manual_power <= 0.0:
+        if node.is_heater and heater_control.mode == "manual" and manual_power <= 0.0:
             manual_power = self._default_heater_manual_power()
         self.inputs["heater_manual_power"].setValue(manual_power)
-        self.inputs["has_sensor"].setChecked(node.has_sensor)
+        self.inputs["is_sensor"].setChecked(node.is_sensor)
         self.inputs["sensor_id"].setValue(node.sensor.sensor_id or node.node_id)
         self.inputs["sensor_noise_std_K"].setValue(node.sensor.sensor_noise_std_K)
         self.inputs["sensor_bias_K"].setValue(node.sensor.sensor_bias_K)
@@ -1228,10 +1235,23 @@ class GraphVisualizerApp:
         self.inputs["controller_lambda_order"].setValue(float(getattr(node, "controller_lambda_order", 1.0)))
         self.inputs["controller_mu_order"].setValue(float(getattr(node, "controller_mu_order", 1.0)))
         self.inputs["has_cryocooler"].setChecked(node.has_cryocooler)
+        self._sync_node_role_label(node)
         self._update_optional_sections()
         self._update_C_enabled()
         self._building_form = False
         self._rebuild_controller_gain_fields()
+
+    def _handle_role_changed(self, *_: Any) -> None:
+        if "role" not in self.inputs:
+            return
+        role = self.inputs["role"].currentText().lower()
+        self.inputs["is_heater"].blockSignals(True)
+        self.inputs["is_sensor"].blockSignals(True)
+        self.inputs["is_heater"].setChecked(role == "heater")
+        self.inputs["is_sensor"].setChecked(role == "sensor")
+        self.inputs["is_heater"].blockSignals(False)
+        self.inputs["is_sensor"].blockSignals(False)
+        self._update_optional_sections()
 
     def _apply_selected_material(self, *_: Any) -> None:
         if self._building_form:
@@ -1257,29 +1277,19 @@ class GraphVisualizerApp:
             self._auto_update_C()
 
     def _update_optional_sections(self, *_: Any) -> None:
-        if "has_heater" not in self.inputs:
+        if "is_heater" not in self.inputs:
             return
-        if self.inputs["has_heater"].isChecked() and not self.inputs["has_sensor"].isChecked():
-            self.inputs["has_sensor"].blockSignals(True)
-            self.inputs["has_sensor"].setChecked(True)
-            self.inputs["has_sensor"].blockSignals(False)
         if (
             not self._building_form
-            and self.inputs["has_heater"].isChecked()
+            and self.inputs["is_heater"].isChecked()
             and self.inputs["heater_mode_manual"].isChecked()
             and self.inputs["heater_manual_power"].value() <= 0.0
         ):
             self.inputs["heater_manual_power"].setValue(self._default_heater_manual_power())
-        if not self.inputs["has_sensor"].isChecked() and self.inputs["has_heater"].isChecked():
-            self.inputs["has_heater"].blockSignals(True)
-            self.inputs["has_heater"].setChecked(False)
-            self.inputs["has_heater"].blockSignals(False)
-        self.heater_box.setVisible(self.inputs["has_heater"].isChecked())
-        self.sensor_box.setVisible(self.inputs["has_sensor"].isChecked())
+        self.heater_box.setVisible(self.inputs["is_heater"].isChecked())
+        self.sensor_box.setVisible(self.inputs["is_sensor"].isChecked())
         self.controller_gain_box.setVisible(
-            self.inputs["has_heater"].isChecked()
-            and self.inputs["has_sensor"].isChecked()
-            and self.inputs["heater_mode_mimo"].isChecked()
+            self.inputs["is_sensor"].isChecked()
         )
         node_id = int(self.inputs["node_id"].value())
         if self.inputs["heater_id"].value() == 0:
@@ -1311,9 +1321,9 @@ class GraphVisualizerApp:
     def _sync_heater_control_enabled(self) -> None:
         if "heater_mode_pid" not in self.inputs:
             return
-        pid_active = self.inputs["has_heater"].isChecked() and self.inputs["heater_mode_pid"].isChecked()
-        mimo_active = self.inputs["has_heater"].isChecked() and self.inputs["heater_mode_mimo"].isChecked()
-        manual_active = self.inputs["has_heater"].isChecked() and self.inputs["heater_mode_manual"].isChecked()
+        pid_active = self.inputs["is_heater"].isChecked() and self.inputs["heater_mode_pid"].isChecked()
+        mimo_active = self.inputs["is_sensor"].isChecked()
+        manual_active = self.inputs["is_heater"].isChecked() and self.inputs["heater_mode_manual"].isChecked()
         for key in (
             "heater_pid_kp",
             "heater_pid_ki",
@@ -1431,7 +1441,7 @@ class GraphVisualizerApp:
             if not (min_level <= int(node.level) <= max_level):
                 continue
             if self.filter_heater_sensor.isChecked() and not (
-                node.has_heater or node.has_sensor or node.has_cryocooler
+                node.is_heater or node.is_sensor or node.has_cryocooler
             ):
                 continue
             if self.filter_boundary.isChecked() and node.confidence == "high" and node_id not in contact_nodes:
@@ -1462,9 +1472,23 @@ class GraphVisualizerApp:
             f"C: {node.C_J_K:.6g} J/K, Grad: {node.Grad_W_K:.6g} W/K\n"
             f"initial T: {node.initial_temperature_K:.3f} K / {node.initial_temperature_K - 273.15:.3f} C\n"
             f"exposed: {node.is_exposed}, G_rad: {node.G_rad_W_K:.6g} W/K\n"
-            f"heater: {node.has_heater}, sensor: {node.has_sensor}, cryocooler: {node.has_cryocooler}\n"
+            f"role: {self._node_role_text(node)}, cryocooler: {node.has_cryocooler}\n"
             f"incident conductive edges: {len(incident)}"
         )
+
+    def _sync_node_role_label(self, node: NodeProperties) -> None:
+        if hasattr(self, "node_role_label"):
+            self.node_role_label.setText(f"role: {self._node_role_text(node)}")
+
+    @staticmethod
+    def _node_role_text(node: NodeProperties) -> str:
+        if node.is_heater and node.is_sensor:
+            return "invalid heater/sensor node"
+        if node.is_heater:
+            return "heater node" if node.is_cad_role_node else "user heater node"
+        if node.is_sensor:
+            return "sensor node" if node.is_cad_role_node else "user sensor node"
+        return "body cell"
 
     @staticmethod
     def _part_code(component_name: str) -> str:

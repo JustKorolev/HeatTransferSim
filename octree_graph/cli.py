@@ -9,6 +9,7 @@ import faulthandler
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -18,12 +19,12 @@ from typing import Any
 import numpy as np
 
 from .graph_builder import (
-    DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS,
-    DEFAULT_DEVICE_GROUP_GAP_MM,
+    DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS,
+    DEFAULT_ROLE_GROUP_GAP_MM,
     DEFAULT_HEATER_NAME_PATTERNS,
     DEFAULT_SENSOR_NAME_PATTERNS,
     build_graph,
-    collapse_physical_devices,
+    collapse_role_components,
 )
 from .load_contact_report import load_contact_report
 from .load_gltf import GltfScene, load_gltf_scene
@@ -67,7 +68,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     warnings.extend(scene.warnings)
     warnings.extend(contact_report.warnings)
     warnings.extend(material_warnings)
-    voxel_scene, physical_devices = _split_physical_devices(scene, args, warnings)
+    voxel_scene, role_components = _split_role_components(scene, args, warnings)
     params = OctreeParams(
         min_cell_size_mm=args.min_cell_size_mm,
         max_cell_size_mm=args.max_cell_size_mm,
@@ -111,7 +112,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         "parameters": _parameters_payload(args),
         "materials_used": {name: material.to_dict() for name, material in materials.items()},
         "component_mapping": {obj.name: obj.name for obj in scene.objects},
-        "physical_devices": _physical_devices_payload(physical_devices),
+        "role_nodes": _role_components_payload(role_components),
         "octree_cells": [cell.__dict__ for cell in leaves],
         "graph_nodes": graph_result.nodes,
         "graph_edges": graph_result.edges,
@@ -191,8 +192,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help=(
-            "Regex pattern for CAD component names/paths that should become physical heater nodes. "
-            "Repeat to add multiple patterns. Defaults cover common heater names."
+            "Regex pattern for CAD component names/paths that should become heater nodes. "
+            "Repeat to add multiple patterns. No heater detection is performed unless a heater pattern or substring is provided."
+        ),
+    )
+    parser.add_argument(
+        "--heater-name-substring",
+        action="append",
+        default=None,
+        help=(
+            "Case-insensitive CAD component name/path substring that should become heater nodes. "
+            "Repeat to add multiple substrings."
         ),
     )
     parser.add_argument(
@@ -200,8 +210,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help=(
-            "Regex pattern for CAD component names/paths that should become physical sensor nodes. "
-            "Repeat to add multiple patterns. Defaults cover common sensor names."
+            "Regex pattern for CAD component names/paths that should become sensor nodes. "
+            "Repeat to add multiple patterns. No sensor detection is performed unless a sensor pattern or substring is provided."
+        ),
+    )
+    parser.add_argument(
+        "--sensor-name-substring",
+        action="append",
+        default=None,
+        help=(
+            "Case-insensitive CAD component name/path substring that should become sensor nodes. "
+            "Repeat to add multiple substrings."
         ),
     )
     parser.add_argument(
@@ -209,28 +228,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help=(
-            "Regex pattern for CAD component names/paths that should not become physical heater/sensor nodes, "
+            "Regex pattern for CAD component names/paths that should not become heater/sensor nodes, "
             "even if they match heater or sensor words. Repeat to add multiple patterns."
         ),
     )
     parser.add_argument(
         "--no-default-device-excludes",
         action="store_true",
-        help="Disable default physical-device exclusions for cables, connectors, breakout boards, and PCBs.",
+        help="Disable default heater/sensor CAD exclusions for cables, connectors, breakout boards, and PCBs.",
     )
     parser.add_argument(
-        "--physical-device-group-gap-mm",
+        "--role-node-group-gap-mm",
         type=float,
-        default=DEFAULT_DEVICE_GROUP_GAP_MM,
+        default=DEFAULT_ROLE_GROUP_GAP_MM,
         help=(
-            "Maximum AABB gap for collapsing same-named heater/sensor mesh pieces into one physical node. "
+            "Maximum AABB gap for collapsing same-named heater/sensor mesh pieces into one role node. "
             "Larger gaps keep more repeated instances grouped; smaller gaps split them apart."
         ),
     )
     parser.add_argument(
-        "--no-detect-physical-devices",
+        "--no-detect-role-nodes",
         action="store_true",
-        help="Disable CAD name/path detection for physical heater and sensor graph nodes.",
+        help="Disable CAD name/path detection for heater and sensor graph nodes.",
     )
     return parser
 
@@ -319,42 +338,51 @@ def _build_graph_with_optional_fallback(
         radiation_reference_temperature_K=args.radiation_reference_temperature_K,
         contact_detection_distance_mm=contact_distance_mm,
         component_bounds_mm=_component_bounds_mm(voxel_scene),
-        physical_devices=getattr(args, "physical_devices", None),
+        role_components=getattr(args, "role_components", None),
     )
     return (leaves, graph_result, diagnostics) if include_diagnostics else (leaves, graph_result)
 
 
-def _split_physical_devices(
+def _split_role_components(
     scene: GltfScene,
     args: argparse.Namespace,
     warnings: list[str],
 ) -> tuple[GltfScene, list]:
-    if getattr(args, "no_detect_physical_devices", False):
-        args.physical_devices = []
+    if getattr(args, "no_detect_role_nodes", False):
+        args.role_components = []
         return scene, []
-    heater_patterns = list(getattr(args, "heater_name_pattern", None) or DEFAULT_HEATER_NAME_PATTERNS)
-    sensor_patterns = list(getattr(args, "sensor_name_pattern", None) or DEFAULT_SENSOR_NAME_PATTERNS)
-    exclude_patterns = [] if getattr(args, "no_default_device_excludes", False) else list(DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS)
+    heater_patterns = list(getattr(args, "heater_name_pattern", None) or [])
+    sensor_patterns = list(getattr(args, "sensor_name_pattern", None) or [])
+    heater_patterns.extend(_substring_patterns(getattr(args, "heater_name_substring", None) or []))
+    sensor_patterns.extend(_substring_patterns(getattr(args, "sensor_name_substring", None) or []))
+    if not heater_patterns and not sensor_patterns:
+        args.role_components = []
+        return scene, []
+    exclude_patterns = [] if getattr(args, "no_default_device_excludes", False) else list(DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS)
     exclude_patterns.extend(getattr(args, "device_exclude_name_pattern", None) or [])
-    group_gap_mm = float(getattr(args, "physical_device_group_gap_mm", DEFAULT_DEVICE_GROUP_GAP_MM))
-    body_objects, devices = collapse_physical_devices(
+    group_gap_mm = float(getattr(args, "role_node_group_gap_mm", DEFAULT_ROLE_GROUP_GAP_MM))
+    body_objects, role_components = collapse_role_components(
         scene.objects,
         heater_patterns,
         sensor_patterns,
         exclude_patterns=exclude_patterns,
         group_gap_mm=group_gap_mm,
     )
-    args.physical_devices = devices
-    if not devices:
+    args.role_components = role_components
+    if not role_components:
         return scene, []
-    device_names = ", ".join(f"{device.kind}:{device.name}" for device in devices[:8])
-    extra = "" if len(devices) <= 8 else f", ... and {len(devices) - 8} more"
+    role_names = ", ".join(f"{component.kind}:{component.name}" for component in role_components[:8])
+    extra = "" if len(role_components) <= 8 else f", ... and {len(role_components) - 8} more"
     warnings.append(
-        f"Detected {len(devices)} physical heater/sensor CAD component(s); "
-        f"excluded them from voxelization and added dedicated graph nodes: {device_names}{extra}."
+        f"Detected {len(role_components)} heater/sensor CAD component(s); "
+        f"excluded them from voxelization and added dedicated graph nodes: {role_names}{extra}."
     )
     bounds = _bounds_for_objects(body_objects) or scene.bounds_mm
-    return GltfScene(path=scene.path, objects=body_objects, bounds_mm=bounds, warnings=scene.warnings), devices
+    return GltfScene(path=scene.path, objects=body_objects, bounds_mm=bounds, warnings=scene.warnings), role_components
+
+
+def _substring_patterns(values: list[str]) -> list[str]:
+    return [re.escape(str(value)) for value in values if str(value).strip()]
 
 
 def _bounds_for_objects(objects: list) -> tuple[np.ndarray, np.ndarray] | None:
@@ -452,25 +480,25 @@ def _format_bytes(value: int | None) -> str:
 
 def _parameters_payload(args: argparse.Namespace) -> dict:
     payload = dict(vars(args))
-    payload.pop("physical_devices", None)
+    payload.pop("role_components", None)
     return payload
 
 
-def _physical_devices_payload(devices: list) -> list[dict]:
+def _role_components_payload(role_components: list) -> list[dict]:
     payload = []
-    for device in devices:
-        mins, maxs = device.bounds_mm
+    for component in role_components:
+        mins, maxs = component.bounds_mm
         payload.append(
             {
-                "name": device.name,
-                "kind": device.kind,
-                "source_components": [obj.name for obj in device.objects],
+                "name": component.name,
+                "kind": component.kind,
+                "source_components": [obj.name for obj in component.objects],
                 "bounds_mm": {
                     "min": np.asarray(mins, dtype=float).tolist(),
                     "max": np.asarray(maxs, dtype=float).tolist(),
                 },
-                "center_mm": np.asarray(device.center_mm, dtype=float).tolist(),
-                "size_mm": np.asarray(device.size_mm, dtype=float).tolist(),
+                "center_mm": np.asarray(component.center_mm, dtype=float).tolist(),
+                "size_mm": np.asarray(component.size_mm, dtype=float).tolist(),
             }
         )
     return payload

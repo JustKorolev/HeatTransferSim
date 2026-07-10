@@ -397,12 +397,12 @@ class HeatTransferSimulationTab:
     def _tagged_heater_node_ids(self) -> set[int]:
         if self.model is None:
             return set()
-        return {int(node_id) for node_id, node in self.model.nodes.items() if node.has_heater}
+        return {int(node_id) for node_id, node in self.model.nodes.items() if node.is_heater}
 
     def _tagged_sensor_node_ids(self) -> set[int]:
         if self.model is None:
             return set()
-        return {int(node_id) for node_id, node in self.model.nodes.items() if node.has_sensor}
+        return {int(node_id) for node_id, node in self.model.nodes.items() if node.is_sensor}
 
     def _reset_enabled_io_from_params(self) -> None:
         self._enabled_io_initialized = False
@@ -995,7 +995,7 @@ class HeatTransferSimulationTab:
         return [
             int(node_id)
             for node_id, node in sorted(self.model.nodes.items(), key=lambda item: int(item[0]))
-            if node.has_sensor and self._sensor_enabled_for_simulation(int(node_id))
+            if node.is_sensor and self._sensor_enabled_for_simulation(int(node_id))
         ]
 
     def _ordered_sys_id_heaters(self) -> list[int]:
@@ -1004,7 +1004,7 @@ class HeatTransferSimulationTab:
         return [
             int(node_id)
             for node_id, node in sorted(self.model.nodes.items(), key=lambda item: int(item[0]))
-            if node.has_heater and self._heater_enabled_for_simulation(int(node_id))
+            if node.is_heater and self._heater_enabled_for_simulation(int(node_id))
         ]
 
     def _collect_sensor_temperatures(self, sensor_ids: list[int]) -> np.ndarray:
@@ -1210,15 +1210,15 @@ class HeatTransferSimulationTab:
     def _mimo_controller_should_run(self) -> bool:
         if self.input_mode.currentText() != "heater_inputs" or self.model is None:
             return False
-        has_sensor = any(
+        is_sensor = any(
             _node_uses_mimo_controller(node, sensor_enabled=self._sensor_enabled_for_simulation(int(node_id)))
             for node_id, node in self.model.nodes.items()
         )
-        has_heater = any(
+        is_heater = any(
             _node_uses_mimo_controller(node, heater_enabled=self._heater_enabled_for_simulation(int(node_id)))
             for node_id, node in self.model.nodes.items()
         )
-        return has_sensor and has_heater
+        return is_sensor and is_heater
 
     def _load_params_from_folder(self) -> None:
         path = self._params_path()
@@ -1389,7 +1389,7 @@ class HeatTransferSimulationTab:
         readout_nodes = [
             node
             for node in self.model.nodes.values()
-            if node.has_sensor or node.has_heater or node.has_cryocooler
+            if node.is_sensor or node.is_heater or node.has_cryocooler
         ]
         self.sensor_readout_box.setVisible(bool(readout_nodes))
         self.sensor_readout_table.setRowCount(len(readout_nodes))
@@ -1409,7 +1409,7 @@ class HeatTransferSimulationTab:
             temp_item = self.QtWidgets.QTableWidgetItem(f"{temperature:.3f} K / {temperature - 273.15:.3f} C")
             power_text = (
                 f"{float(heater_powers.get(node.node_id, 0.0)):.3f} W"
-                if node.has_heater or node.has_cryocooler
+                if node.is_heater or node.has_cryocooler
                 else ""
             )
             power_item = self.QtWidgets.QTableWidgetItem(power_text)
@@ -1432,7 +1432,7 @@ class HeatTransferSimulationTab:
                 error = desired_temperature - temperature
                 desired_text = f"{desired_temperature:.3f} K / {desired_temperature - 273.15:.3f} C"
                 error_text = f"{error:.3f} K"
-            elif node.has_heater and node.heater_control.mode == "pid":
+            elif node.is_heater and node.heater_control.mode == "pid":
                 desired_temperature = float(node.heater_control.pid.setpoint)
                 error = desired_temperature - temperature
                 desired_text = f"{desired_temperature:.3f} K / {desired_temperature - 273.15:.3f} C"
@@ -1492,8 +1492,8 @@ class HeatTransferSimulationTab:
                 f"mass: {node.mass_kg:.6g} kg",
                 f"volume: {node.volume_m3:.6g} m^3",
                 f"level: {node.level}",
-                f"heater: {node.has_heater} id={node.heater.heater_id}",
-                f"sensor: {node.has_sensor} id={node.sensor.sensor_id}",
+                f"heater: {node.is_heater} id={node.heater.heater_id}",
+                f"sensor: {node.is_sensor} id={node.sensor.sensor_id}",
                 f"cryocooler: {node.has_cryocooler}",
                 f"exposed: {node.is_exposed}",
                 f"G_rad: {node.G_rad_W_K:.6g} W/K",
@@ -1586,8 +1586,8 @@ def _node_uses_mimo_controller(
     sensor_enabled: bool = True,
 ) -> bool:
     return (
-        bool(getattr(node, "has_heater", False))
-        and bool(getattr(node, "has_sensor", False))
+        bool(getattr(node, "is_heater", False))
+        and bool(getattr(node, "is_sensor", False))
         and bool(heater_enabled)
         and bool(sensor_enabled)
         and str(getattr(getattr(node, "heater_control", None), "mode", "manual")) == "mimo"

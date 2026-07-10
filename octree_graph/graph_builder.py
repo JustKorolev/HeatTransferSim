@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import combinations
 import re
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -15,7 +14,7 @@ from .materials import DEFAULT_ASSIGNED_MATERIAL_NAME, Material, resolve_materia
 from .octree import OctreeCell, _physical_material_name
 
 
-_DEFAULT_DEVICE_CONTACT_G_W_K = 0.1
+_DEFAULT_ROLE_CONTACT_G_W_K = 0.1
 DEFAULT_HEATER_NAME_PATTERNS = [
     r"heater",
     r"heat[_\s-]*strip",
@@ -32,7 +31,7 @@ DEFAULT_SENSOR_NAME_PATTERNS = [
     r"temperature[_\s-]*probe",
     r"temp[_\s-]*sensor",
 ]
-DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS = [
+DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS = [
     r"flex[_\s-]*cable",
     r"(?:^|_)cable(?:_|$)",
     r"(?:^|_)wire(?:_|$)",
@@ -42,11 +41,11 @@ DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS = [
     r"(?:^|_)pcb(?:_|$)",
     r"(?:^|_)board(?:_|$)",
 ]
-DEFAULT_DEVICE_GROUP_GAP_MM = 10.0
+DEFAULT_ROLE_GROUP_GAP_MM = 10.0
 
 
 @dataclass
-class PhysicalDevice:
+class RoleComponent:
     name: str
     kind: str
     objects: list[MeshObject]
@@ -85,7 +84,7 @@ def build_graph(
     radiation_reference_temperature_K: float = 293.15,
     contact_detection_distance_mm: float = 0.0,
     component_bounds_mm: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
-    physical_devices: list[PhysicalDevice] | None = None,
+    role_components: list[RoleComponent] | None = None,
 ) -> GraphBuildResult:
     contact_report = contact_report or ContactReport()
     solid = [cell for cell in leaves if not cell.is_empty]
@@ -118,6 +117,8 @@ def build_graph(
                 "C_J_K": mass * material.cp_J_kgK,
                 "initial_temperature_K": 293.15,
                 "occupancy_fraction": occupancy_fraction,
+                "is_heater": False,
+                "is_sensor": False,
                 "confidence": cell.confidence,
                 "warnings": list(cell.warnings),
                 "radiation": {
@@ -127,13 +128,13 @@ def build_graph(
                     "G_rad_W_K": float(G_rad),
                     "R_rad_K_W": float(1.0 / G_rad) if G_rad > 0.0 else None,
                 },
-                "tags": {"heater": False, "sensor": False, "heater_id": None, "sensor_id": None, "notes": ""},
+                "tags": {"notes": ""},
             }
         )
     cell_to_node = {node["cell_id"]: node for node in nodes}
-    device_nodes = _append_physical_device_nodes(
+    role_nodes = _append_role_nodes(
         nodes,
-        physical_devices or [],
+        role_components or [],
         contact_report,
         materials,
         warnings,
@@ -198,10 +199,10 @@ def build_graph(
             contact_detection_distance_mm,
             connected_node_pairs,
         )
-    edge_index = _add_physical_device_contact_edges(
+    edge_index = _add_role_node_contact_edges(
         solid,
         cell_to_node,
-        device_nodes,
+        role_nodes,
         edges,
         edge_index,
         contact_detection_distance_mm,
@@ -210,19 +211,19 @@ def build_graph(
     return GraphBuildResult(nodes=nodes, edges=edges, warnings=warnings)
 
 
-def classify_physical_device_name(
+def classify_role_component_name(
     name: str,
     heater_patterns: list[str],
     sensor_patterns: list[str],
     exclude_patterns: list[str] | None = None,
 ) -> str | None:
-    normalized = _normalize_device_name(name)
+    normalized = _normalize_role_name(name)
     if any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in exclude_patterns or []):
         return None
     heater = any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in heater_patterns)
     sensor = any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in sensor_patterns)
     if heater and sensor:
-        return "heater_sensor"
+        raise ValueError(f"CAD component name matches both heater and sensor detection patterns: {name!r}")
     if heater:
         return "heater"
     if sensor:
@@ -230,17 +231,17 @@ def classify_physical_device_name(
     return None
 
 
-def collapse_physical_devices(
+def collapse_role_components(
     objects: list[MeshObject],
     heater_patterns: list[str],
     sensor_patterns: list[str],
     exclude_patterns: list[str] | None = None,
-    group_gap_mm: float = DEFAULT_DEVICE_GROUP_GAP_MM,
-) -> tuple[list[MeshObject], list[PhysicalDevice]]:
+    group_gap_mm: float = DEFAULT_ROLE_GROUP_GAP_MM,
+) -> tuple[list[MeshObject], list[RoleComponent]]:
     body_objects: list[MeshObject] = []
     groups: dict[tuple[str, str], list[MeshObject]] = {}
     for obj in objects:
-        kind = classify_physical_device_name(
+        kind = classify_role_component_name(
             _object_search_text(obj),
             heater_patterns,
             sensor_patterns,
@@ -249,17 +250,17 @@ def collapse_physical_devices(
         if kind is None:
             body_objects.append(obj)
             continue
-        groups.setdefault((kind, _device_group_name(obj.name)), []).append(obj)
-    devices: list[PhysicalDevice] = []
+        groups.setdefault((kind, _role_group_name(obj.name)), []).append(obj)
+    components: list[RoleComponent] = []
     for (kind, name), members in sorted(groups.items(), key=lambda item: (item[0][0], item[0][1])):
-        clusters = _spatial_device_clusters(members, group_gap_mm)
+        clusters = _spatial_role_clusters(members, group_gap_mm)
         for cluster_index, cluster in enumerate(clusters, start=1):
-            device_name = name if len(clusters) == 1 else f"{name}_{cluster_index}"
-            devices.append(PhysicalDevice(name=device_name, kind=kind, objects=cluster))
-    return body_objects, devices
+            component_name = name if len(clusters) == 1 else f"{name}_{cluster_index}"
+            components.append(RoleComponent(name=component_name, kind=kind, objects=cluster))
+    return body_objects, components
 
 
-def _normalize_device_name(name: str) -> str:
+def _normalize_role_name(name: str) -> str:
     return str(name).replace("\\", "/").replace("-", "_").replace(" ", "_")
 
 
@@ -270,13 +271,13 @@ def _object_search_text(obj: MeshObject) -> str:
     return obj.name
 
 
-def _device_group_name(name: str) -> str:
-    normalized = _normalize_device_name(name)
+def _role_group_name(name: str) -> str:
+    normalized = _normalize_role_name(name)
     normalized = re.sub(r"(_?\d+)?(_geometry|_mesh|_body|_solid)?$", "", normalized, flags=re.IGNORECASE)
     return normalized or str(name)
 
 
-def _spatial_device_clusters(members: list[MeshObject], group_gap_mm: float) -> list[list[MeshObject]]:
+def _spatial_role_clusters(members: list[MeshObject], group_gap_mm: float) -> list[list[MeshObject]]:
     if len(members) <= 1:
         return [list(members)]
     max_gap_mm = max(0.0, float(group_gap_mm))
@@ -312,45 +313,44 @@ def _spatial_device_clusters(members: list[MeshObject], group_gap_mm: float) -> 
     )
 
 
-def _append_physical_device_nodes(
+def _append_role_nodes(
     nodes: list[dict],
-    devices: list[PhysicalDevice],
+    components: list[RoleComponent],
     contact_report: ContactReport,
     materials: dict[str, Material],
     warnings: list[str],
 ) -> list[dict]:
-    device_nodes: list[dict] = []
+    role_nodes: list[dict] = []
     known_materials = set(materials)
-    for device in devices:
+    for component in components:
         node_id = len(nodes)
-        material_name = _device_material_name(device, contact_report, known_materials)
+        material_name = _role_component_material_name(component, contact_report, known_materials)
         material = resolve_material(material_name, materials, warnings)
-        center_mm = device.center_mm
-        size_mm = device.size_mm
-        volume_m3 = _device_volume_m3(device)
+        center_mm = component.center_mm
+        size_mm = component.size_mm
+        volume_m3 = _role_component_volume_m3(component)
         mass_kg = material.density_kg_m3 * volume_m3
-        is_heater = device.kind in {"heater", "heater_sensor"}
-        is_sensor = device.kind in {"sensor", "heater_sensor"}
-        if is_heater:
-            # Existing graph_visualizer semantics treat heater nodes as readable controller cells.
-            is_sensor = True
+        is_heater = component.kind == "heater"
+        is_sensor = component.kind == "sensor"
         node = {
             "node_id": node_id,
-            "cell_id": f"physical_{device.kind}_{node_id}",
+            "cell_id": f"{component.kind}_{node_id}",
             "coord": [node_id, 0, 0],
             "center_mm": [float(value) for value in center_mm],
             "size_mm": [float(max(value, 1.0e-6)) for value in size_mm],
             "level": -1,
-            "node_type": f"physical_{device.kind}",
-            "component_name": device.name,
+            "node_type": component.kind,
+            "component_name": component.name,
             "material_name": material.name,
             "volume_m3": float(volume_m3),
             "mass_kg": float(mass_kg),
             "C_J_K": float(mass_kg * material.cp_J_kgK),
             "initial_temperature_K": 293.15,
             "occupancy_fraction": 1.0,
+            "is_heater": bool(is_heater),
+            "is_sensor": bool(is_sensor),
             "confidence": "high",
-            "warnings": [f"Physical {device.kind} CAD component collapsed into a dedicated graph node."],
+            "warnings": [f"CAD {component.kind} component collapsed into a dedicated graph node."],
             "radiation": {
                 "is_exposed": False,
                 "radiating_area_m2": 0.0,
@@ -359,41 +359,34 @@ def _append_physical_device_nodes(
                 "R_rad_K_W": None,
             },
             "tags": {
-                "heater": bool(is_heater),
-                "sensor": bool(is_sensor),
-                "heater_id": int(node_id) if is_heater else None,
-                "sensor_id": int(node_id) if is_sensor else None,
-                "notes": f"Detected from CAD component {device.name!r}.",
+                "notes": f"Detected from CAD component {component.name!r}.",
             },
-            "physical_device": {
-                "kind": device.kind,
-                "source_components": [obj.name for obj in device.objects],
-                "bounds_mm": {
-                    "min": [float(value) for value in device.bounds_mm[0]],
-                    "max": [float(value) for value in device.bounds_mm[1]],
-                },
+            "source_components": [obj.name for obj in component.objects],
+            "source_bounds_mm": {
+                "min": [float(value) for value in component.bounds_mm[0]],
+                "max": [float(value) for value in component.bounds_mm[1]],
             },
         }
         nodes.append(node)
-        device_nodes.append(node)
-    return device_nodes
+        role_nodes.append(node)
+    return role_nodes
 
 
-def _device_material_name(
-    device: PhysicalDevice,
+def _role_component_material_name(
+    component: RoleComponent,
     contact_report: ContactReport,
     known_materials: set[str],
 ) -> str:
-    for obj in device.objects:
+    for obj in component.objects:
         material = _physical_material_name(obj, contact_report, known_materials)
         if material != DEFAULT_ASSIGNED_MATERIAL_NAME:
             return material
-    return _physical_material_name(device.objects[0], contact_report, known_materials)
+    return _physical_material_name(component.objects[0], contact_report, known_materials)
 
 
-def _device_volume_m3(device: PhysicalDevice) -> float:
+def _role_component_volume_m3(component: RoleComponent) -> float:
     volume = 0.0
-    for obj in device.objects:
+    for obj in component.objects:
         mesh_volume = getattr(obj.mesh, "volume", 0.0)
         try:
             mesh_volume = abs(float(mesh_volume))
@@ -404,59 +397,59 @@ def _device_volume_m3(device: PhysicalDevice) -> float:
             volume += mesh_volume * 1.0e-9
     if volume > 0.0:
         return float(volume)
-    size_mm = np.maximum(device.size_mm, 0.0)
+    size_mm = np.maximum(component.size_mm, 0.0)
     effective_size_mm = np.maximum(size_mm, 1.0)
     return float(np.prod(effective_size_mm) * 1.0e-9)
 
 
-def _add_physical_device_contact_edges(
+def _add_role_node_contact_edges(
     cells: list[OctreeCell],
     cell_to_node: dict[str, dict],
-    device_nodes: list[dict],
+    role_nodes: list[dict],
     edges: list[dict],
     edge_index: int,
     max_gap_mm: float,
     connected_node_pairs: set[tuple[int, int]],
 ) -> int:
-    if not cells or not device_nodes:
+    if not cells or not role_nodes:
         return edge_index
     search_gap_mm = max(0.0, float(max_gap_mm))
-    for device_node in device_nodes:
+    for role_node in role_nodes:
         contacts: list[tuple[OctreeCell, float, float, float]] = []
         for cell in cells:
-            contact = _node_cell_contact(device_node, cell, search_gap_mm)
+            contact = _node_cell_contact(role_node, cell, search_gap_mm)
             if contact is None:
                 continue
             area_mm2, gap_mm, distance_mm = contact
             contacts.append((cell, area_mm2, gap_mm, distance_mm))
         if not contacts:
-            nearest = min(cells, key=lambda cell: _node_cell_gap_mm(device_node, cell))
-            gap_mm = _node_cell_gap_mm(device_node, nearest)
-            distance_mm = _node_cell_center_distance_mm(device_node, nearest)
+            nearest = min(cells, key=lambda cell: _node_cell_gap_mm(role_node, cell))
+            gap_mm = _node_cell_gap_mm(role_node, nearest)
+            distance_mm = _node_cell_center_distance_mm(role_node, nearest)
             contacts = [(nearest, 0.0, gap_mm, distance_mm)]
         for cell, area_mm2, gap_mm, distance_mm in contacts:
             body_node = cell_to_node.get(cell.cell_id)
             if body_node is None:
                 continue
-            node_pair = _node_pair_key(device_node, body_node)
+            node_pair = _node_pair_key(role_node, body_node)
             if node_pair in connected_node_pairs:
                 continue
-            conductance = _DEFAULT_DEVICE_CONTACT_G_W_K
-            if area_mm2 > 0.0 and distance_mm > 0.0 and device_node["material_name"] == body_node["material_name"]:
-                conductance = max(_DEFAULT_DEVICE_CONTACT_G_W_K, area_mm2 * 1.0e-6 / max(distance_mm * 1.0e-3, 1.0e-12))
+            conductance = _DEFAULT_ROLE_CONTACT_G_W_K
+            if area_mm2 > 0.0 and distance_mm > 0.0 and role_node["material_name"] == body_node["material_name"]:
+                conductance = max(_DEFAULT_ROLE_CONTACT_G_W_K, area_mm2 * 1.0e-6 / max(distance_mm * 1.0e-3, 1.0e-12))
             edges.append(
                 {
                     "edge_id": f"edge_{edge_index}",
-                    "node_i": int(device_node["node_id"]),
+                    "node_i": int(role_node["node_id"]),
                     "node_j": int(body_node["node_id"]),
-                    "edge_type": "physical_device_contact",
+                    "edge_type": "role_node_contact",
                     "G_W_K": float(conductance),
                     "shared_area_m2": float(area_mm2 * 1.0e-6),
                     "distance_m": float(distance_mm * 1.0e-3),
                     "contact_confidence": "medium" if gap_mm <= search_gap_mm else "low",
-                    "source": "physical_device_cad_contact",
+                    "source": "cad_role_node_contact",
                     "warnings": [
-                        f"Physical device node connected to nearby body cell with gap {gap_mm:.3g} mm."
+                        f"Heater/sensor node connected to nearby body cell with gap {gap_mm:.3g} mm."
                     ],
                 }
             )
@@ -626,39 +619,43 @@ def _node_pair_key(node_a: dict, node_b: dict) -> tuple[int, int]:
     return tuple(sorted((int(node_a["node_id"]), int(node_b["node_id"]))))
 
 
-def _candidate_cell_pairs(cells: list[OctreeCell], max_gap_mm: float) -> list[tuple[OctreeCell, OctreeCell]]:
-    max_size = max((float(max(cell.size_mm)) for cell in cells), default=0.0)
-    bucket_size = max(max_gap_mm + max_size, 1.0e-9)
+def _candidate_cell_pairs(cells: list[OctreeCell], max_gap_mm: float) -> Iterator[tuple[OctreeCell, OctreeCell]]:
+    bucket_size = _cell_pair_bucket_size(cells, max_gap_mm)
     buckets: dict[tuple[int, int, int], list[OctreeCell]] = {}
     for cell in cells:
-        key = _bucket_key(cell.center_mm, bucket_size)
-        buckets.setdefault(key, []).append(cell)
-    pairs: list[tuple[OctreeCell, OctreeCell]] = []
-    neighbor_offsets = [
-        (dx, dy, dz)
-        for dx in (-1, 0, 1)
-        for dy in (-1, 0, 1)
-        for dz in (-1, 0, 1)
-    ]
+        for key in _cell_bucket_keys(cell, bucket_size, max_gap_mm):
+            buckets.setdefault(key, []).append(cell)
     seen: set[tuple[str, str]] = set()
     for cell in cells:
-        key = _bucket_key(cell.center_mm, bucket_size)
-        for offset in neighbor_offsets:
-            neighbor_key = (key[0] + offset[0], key[1] + offset[1], key[2] + offset[2])
-            for other in buckets.get(neighbor_key, []):
-                if other.cell_id <= cell.cell_id:
+        for key in _cell_bucket_keys(cell, bucket_size, max_gap_mm):
+            for other in buckets.get(key, []):
+                if other is cell:
                     continue
                 pair_key = _cell_pair_key(cell, other)
                 if pair_key in seen:
                     continue
                 seen.add(pair_key)
-                pairs.append((cell, other))
-    return pairs
+                yield cell, other
 
 
-def _bucket_key(center_mm: tuple[float, float, float], bucket_size_mm: float) -> tuple[int, int, int]:
-    center = np.asarray(center_mm, dtype=float)
-    return tuple(np.floor(center / bucket_size_mm).astype(int))
+def _cell_pair_bucket_size(cells: list[OctreeCell], max_gap_mm: float) -> float:
+    sizes = [float(min(cell.size_mm)) for cell in cells if min(cell.size_mm) > 0.0]
+    if not sizes:
+        return max(float(max_gap_mm), 1.0e-9)
+    # The median keeps dense, mostly uniform voxel grids from collapsing into a few oversized buckets
+    # when a small number of coarse leaves are present.
+    return max(float(np.median(sizes)) + float(max_gap_mm), 1.0e-9)
+
+
+def _cell_bucket_keys(cell: OctreeCell, bucket_size_mm: float, padding_mm: float) -> Iterator[tuple[int, int, int]]:
+    mins, maxs = _cell_bounds_mm(cell)
+    padding = max(0.0, float(padding_mm))
+    lo = np.floor((mins - padding) / bucket_size_mm).astype(int)
+    hi = np.floor((maxs + padding) / bucket_size_mm).astype(int)
+    for ix in range(int(lo[0]), int(hi[0]) + 1):
+        for iy in range(int(lo[1]), int(hi[1]) + 1):
+            for iz in range(int(lo[2]), int(hi[2]) + 1):
+                yield ix, iy, iz
 
 
 def _cell_pair_key(a: OctreeCell, b: OctreeCell) -> tuple[str, str]:
@@ -710,7 +707,7 @@ def _exposed_areas_m2(cells: list[OctreeCell]) -> dict[str, float]:
     for cell in cells:
         sx, sy, sz = (float(v) for v in cell.size_mm)
         areas_mm2[cell.cell_id] = 2.0 * (sx * sy + sx * sz + sy * sz)
-    for a, b in combinations(cells, 2):
+    for a, b in _candidate_cell_pairs(cells, 0.0):
         shared_area_mm2, _distance_mm = _shared_face_area_and_distance(a, b)
         if shared_area_mm2 <= 0.0:
             continue

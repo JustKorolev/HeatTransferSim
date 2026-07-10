@@ -290,8 +290,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.manual.power = 5.0
         model.add_node(node)
@@ -397,8 +397,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 310.0
@@ -426,14 +426,50 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertGreater(float(prepared.temperatures_K[0]), 300.0)
         self.assertEqual(prepared.controller_mode, "coarse")
 
+    def test_mimo_controller_uses_separate_sensor_and_heater_nodes(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_separate_roles"))
+        sensor = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        sensor.C_J_K = 10.0
+        sensor.initial_temperature_K = 300.0
+        sensor.is_sensor = True
+        sensor.controller_setpoint_K = 310.0
+        sensor.controller_kp_coarse = 1.0
+        sensor.controller_ki_coarse = 0.0
+        heater = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        heater.C_J_K = 10.0
+        heater.initial_temperature_K = 300.0
+        heater.is_heater = True
+        heater.heater.heater_max_power_W = 20.0
+        heater.heater_control.mode = "mimo"
+        model.add_node(sensor)
+        model.add_node(heater)
+        model.set_controller_gain(1, 2, 0.1)
+        matrices = {
+            "node_ids": np.array([1, 2], dtype=int),
+            "C": np.array([10.0, 10.0]),
+            "L": np.zeros((2, 2)),
+            "G_rad": np.array([0.0, 0.0]),
+        }
+        params = SimulationParameters(
+            dt_s=1.0,
+            input_mode="heater_inputs",
+            mimo_lambda_u=0.0,
+            use_ambient_radiation=False,
+        )
+
+        prepared = prepare_simulation(model, matrices, params)
+
+        self.assertAlmostEqual(prepared.heater_power_by_node()[2], 2.5)
+        self.assertEqual(prepared.controller_mode, "coarse")
+
     def test_mimo_dynamic_rate_gain_is_static_direct_capacitance(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_static_bdyn"))
         for node_id, capacitance in ((1, 10.0), (2, 20.0)):
             node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
             node.C_J_K = capacitance
             node.initial_temperature_K = 300.0
-            node.has_heater = True
-            node.has_sensor = True
+            node.is_heater = True
+            node.is_sensor = True
             node.heater.heater_max_power_W = 20.0
             node.heater_control.mode = "mimo"
             node.controller_setpoint_K = 310.0
@@ -465,8 +501,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 310.0
@@ -505,8 +541,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "manual"
         node.heater_control.manual.power = 12.0
@@ -538,8 +574,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
             node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
             node.C_J_K = 10.0
             node.initial_temperature_K = 300.0
-            node.has_heater = True
-            node.has_sensor = True
+            node.is_heater = True
+            node.is_sensor = True
             node.heater.heater_max_power_W = 20.0
             node.heater_control.mode = "mimo"
             node.controller_setpoint_K = 310.0
@@ -579,8 +615,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 310.0
@@ -614,8 +650,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 310.0
@@ -647,8 +683,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 290.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 100.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 300.0
@@ -685,8 +721,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 310.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 200.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 300.0
@@ -723,8 +759,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 4.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 320.0
@@ -759,8 +795,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 305.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 310.0
@@ -794,8 +830,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 200.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 310.0
@@ -836,8 +872,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 200.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 300.0
@@ -874,8 +910,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "mimo"
         node.heater_control.manual.power = 20.0
@@ -924,45 +960,66 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertTrue(restored.nodes[4].has_cryocooler)
         self.assertTrue(bool(matrices["has_cryocooler"][0]))
 
-    def test_physical_device_octree_node_metadata_is_ignored_on_load(self) -> None:
+    def test_heater_node_metadata_defines_role_without_tags(self) -> None:
         node = NodeProperties.from_dict(
             {
                 "node_id": 12,
-                "cell_id": "physical_heater_12",
+                "cell_id": "heater_12",
                 "coord": [12, 0, 0],
                 "center_mm": [5.0, 0.0, 0.0],
                 "size_mm": [2.0, 4.0, 4.0],
                 "level": -1,
-                "node_type": "physical_heater",
+                "node_type": "heater",
                 "component_name": "heater_strip",
                 "material_name": "Copper",
                 "mass_kg": 0.01,
                 "C_J_K": 3.85,
-                "tags": {
-                    "heater": True,
-                    "sensor": True,
-                    "heater_id": 12,
-                    "sensor_id": 12,
-                },
-                "physical_device": {
-                    "kind": "heater",
-                    "source_components": ["heater_strip_1"],
-                },
+                "source_components": ["heater_strip_1"],
             }
         )
 
         self.assertEqual(node.node_id, 12)
-        self.assertEqual(node.cell_id, "physical_heater_12")
+        self.assertEqual(node.cell_id, "heater_12")
+        self.assertEqual(node.node_type, "heater")
         self.assertEqual(node.component_name, "heater_strip")
-        self.assertTrue(node.has_heater)
-        self.assertTrue(node.has_sensor)
-        self.assertEqual(node.heater.heater_id, 12)
-        self.assertEqual(node.sensor.sensor_id, 12)
+        self.assertTrue(node.is_heater)
+        self.assertFalse(node.is_sensor)
+
+        saved = node.to_octree_node_dict()
+
+        self.assertEqual(saved["node_type"], "heater")
+        self.assertTrue(saved["is_heater"])
+        self.assertFalse(saved["is_sensor"])
+        self.assertNotIn("heater", saved["tags"])
+        self.assertNotIn("sensor", saved["tags"])
+
+    def test_octree_node_load_accepts_is_heater_is_sensor_schema(self) -> None:
+        heater = NodeProperties.from_dict(
+            {
+                "node_id": 21,
+                "coord": [21, 0, 0],
+                "is_heater": True,
+                "is_sensor": False,
+            }
+        )
+        sensor = NodeProperties.from_dict(
+            {
+                "node_id": 22,
+                "coord": [22, 0, 0],
+                "is_heater": False,
+                "is_sensor": True,
+            }
+        )
+
+        self.assertTrue(heater.is_heater)
+        self.assertFalse(heater.is_sensor)
+        self.assertFalse(sensor.is_heater)
+        self.assertTrue(sensor.is_sensor)
 
     def test_mimo_controller_metadata_and_gain_matrix_round_trip(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_round_trip"))
         sensor = NodeProperties.with_material(1, (0, 0, 0), material="copper")
-        sensor.has_sensor = True
+        sensor.is_sensor = True
         sensor.controller_setpoint_K = 315.0
         sensor.controller_weight = 2.0
         sensor.sensor_settling_time_s = 8.0
@@ -975,8 +1032,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         sensor.controller_lambda_order = 0.8
         sensor.controller_mu_order = 0.6
         heater = NodeProperties.with_material(2, (1, 0, 0), material="copper")
-        heater.has_heater = True
-        heater.has_sensor = True
+        heater.is_heater = True
+        heater.is_sensor = True
         heater.heater_control.mode = "mimo"
         model.add_node(sensor)
         model.add_node(heater)
@@ -1027,8 +1084,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         hot.C_J_K = cold.C_J_K = 10.0
         hot.initial_temperature_K = 310.0
         cold.initial_temperature_K = 290.0
-        cold.has_heater = True
-        cold.has_sensor = True
+        cold.is_heater = True
+        cold.is_sensor = True
         cold.heater_control.manual.power = 0.0
         model.add_node(hot)
         model.add_node(cold)
@@ -1055,8 +1112,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         model.add_node(node)
         matrices = {
             "node_ids": np.array([1], dtype=int),
@@ -1118,8 +1175,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
             node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
             node.C_J_K = 10.0
             node.initial_temperature_K = 300.0
-            node.has_heater = True
-            node.has_sensor = True
+            node.is_heater = True
+            node.is_sensor = True
             node.heater_control.mode = "pid"
             node.heater_control.pid.kp = 100.0
             node.heater_control.pid.setpoint = 350.0
@@ -1215,8 +1272,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.has_cryocooler = True
         node.heater_control.manual.power = 3.0
         model.add_node(node)
@@ -1246,8 +1303,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 300.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 4.0
         node.heater_control.mode = "pid"
         node.heater_control.pid.kp = 100.0
@@ -1283,8 +1340,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 310.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "pid"
         node.heater_control.pid.ki = 1.0
@@ -1308,8 +1365,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 310.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "pid"
         node.heater_control.pid.ki = 1.0
@@ -1344,8 +1401,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 290.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "pid"
         node.heater_control.pid.ki = 0.0
@@ -1376,8 +1433,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 290.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 100.0
         node.heater_control.mode = "pid"
         node.heater_control.pid.ki = 1.0
@@ -1410,8 +1467,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 291.0
-        node.has_heater = True
-        node.has_sensor = True
+        node.is_heater = True
+        node.is_sensor = True
         node.heater.heater_max_power_W = 100.0
         node.heater_control.mode = "pid"
         node.heater_control.pid.kd = 1.0
@@ -1437,18 +1494,19 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertAlmostEqual(prepared.heater_power_by_node()[1], 3.5)
 
-    def test_loaded_legacy_heater_implies_sensor_and_default_control(self) -> None:
+    def test_loaded_heater_keeps_sensor_role_separate_and_default_control(self) -> None:
         node = NodeProperties.from_dict(
             {
                 "node_id": 3,
                 "coord": [0, 0, 0],
-                "has_heater": True,
+                "is_heater": True,
                 "heater": {"heater_id": 3, "heater_max_power_W": 12.0, "heater_efficiency": 0.5},
                 "heater_control": {"pid": {"integral_leak_per_s": 0.25}},
             }
         )
 
-        self.assertTrue(node.has_sensor)
+        self.assertTrue(node.is_heater)
+        self.assertFalse(node.is_sensor)
         self.assertEqual(node.heater_control.mode, "manual")
         self.assertAlmostEqual(node.heater_control.manual.power, 6.0)
         self.assertAlmostEqual(node.heater_control.pid.integral_leak_per_s, 0.25)
@@ -1596,9 +1654,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
     def test_extruded_node_copies_thermal_mass_but_resets_io_metadata(self) -> None:
         source = NodeProperties.with_material(10, (0, 0, 0), material="copper")
-        source.has_heater = True
+        source.is_heater = True
         source.heater.heater_id = 99
-        source.has_sensor = True
+        source.is_sensor = True
         source.sensor.sensor_id = 42
         source.has_cryocooler = True
         source.Grad_W_K = 3.0
@@ -1608,9 +1666,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(cloned.material, source.material)
         self.assertEqual(cloned.side_length_m, source.side_length_m)
         self.assertEqual(cloned.Grad_W_K, 0.0)
-        self.assertFalse(cloned.has_heater)
+        self.assertFalse(cloned.is_heater)
         self.assertEqual(cloned.heater.heater_id, 11)
-        self.assertFalse(cloned.has_sensor)
+        self.assertFalse(cloned.is_sensor)
         self.assertEqual(cloned.sensor.sensor_id, 11)
         self.assertFalse(cloned.has_cryocooler)
 
@@ -1624,7 +1682,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node.radiating_area_m2 = 3.0e-6
         node.G_rad_W_K = 1.2e-4
         node.R_rad_K_W = 8333.3
-        node.has_heater = True
+        node.is_heater = True
         node.heater.heater_id = 7
         node.heater.heater_min_power_W = 0.0
         node.heater.heater_max_power_W = 12.0
@@ -1635,7 +1693,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node.heater_control.pid.lambda_order = 0.7
         node.heater_control.pid.mu_order = 0.4
         node.heater_control.pid.setpoint = 310.0
-        node.has_sensor = True
+        node.is_sensor = True
         node.sensor.sensor_id = 7
         node.has_cryocooler = True
         node_text = format_node_tooltip(7, node)

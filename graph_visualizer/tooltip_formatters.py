@@ -36,11 +36,11 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
         f"radiating area: {_fmt(getattr(attrs, 'radiating_area_m2', None))} m^2",
         f"G_rad: {_fmt(getattr(attrs, 'G_rad_W_K', None))} W/K",
         f"R_rad: {_fmt(getattr(attrs, 'R_rad_K_W', None))} K/W",
-        f"heater: {'yes' if getattr(attrs, 'has_heater', False) else 'no'}",
-        f"sensor: {'yes' if getattr(attrs, 'has_sensor', False) else 'no'}",
+        f"heater: {'yes' if getattr(attrs, 'is_heater', False) else 'no'}",
+        f"sensor: {'yes' if getattr(attrs, 'is_sensor', False) else 'no'}",
         f"cryocooler: {'yes' if getattr(attrs, 'has_cryocooler', False) else 'no'}",
     ]
-    if getattr(attrs, "has_heater", False):
+    if getattr(attrs, "is_heater", False):
         heater = getattr(attrs, "heater", None)
         control = getattr(attrs, "heater_control", None)
         pid = getattr(control, "pid", None)
@@ -65,7 +65,7 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"PID prev error: {_fmt(getattr(state, 'previous_error', None))} K",
             ]
         )
-    if getattr(attrs, "has_sensor", False):
+    if getattr(attrs, "is_sensor", False):
         sensor = getattr(attrs, "sensor", None)
         lines.extend(
             [

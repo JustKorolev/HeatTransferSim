@@ -15,16 +15,16 @@ from octree_graph.cli import (
     _log_scene_memory_risk,
     _raise_if_empty_graph,
     _resolve_material_lookup_path,
-    _split_physical_devices,
+    _split_role_components,
 )
 from octree_graph.load_contact_report import ContactReport
 from octree_graph.graph_builder import (
-    DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS,
-    DEFAULT_HEATER_NAME_PATTERNS,
-    DEFAULT_SENSOR_NAME_PATTERNS,
-    PhysicalDevice,
+    DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS,
+    RoleComponent,
+    _candidate_cell_pairs,
+    _exposed_areas_m2,
     build_graph,
-    collapse_physical_devices,
+    collapse_role_components,
 )
 from octree_graph.load_gltf import GltfScene, MeshObject
 from octree_graph.load_contact_report import load_contact_report
@@ -71,6 +71,10 @@ def _mesh_object(
         watertight=False,
         scene_path=name,
     )
+
+
+def _pair_ids(a: OctreeCell, b: OctreeCell) -> tuple[str, str]:
+    return tuple(sorted((a.cell_id, b.cell_id)))
 
 
 class OctreeMaterialDefaultTests(unittest.TestCase):
@@ -262,24 +266,28 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual(len(result.nodes), 1)
         self.assertEqual(result.nodes[0]["component_name"], "part_1")
+        self.assertFalse(result.nodes[0]["is_heater"])
+        self.assertFalse(result.nodes[0]["is_sensor"])
+        self.assertNotIn("heater", result.nodes[0]["tags"])
+        self.assertNotIn("sensor", result.nodes[0]["tags"])
         self.assertGreater(result.nodes[0]["C_J_K"], 0.0)
 
-    def test_physical_device_detection_removes_heaters_and_sensors_from_body_objects(self) -> None:
+    def test_role_component_detection_removes_heaters_and_sensors_from_body_objects(self) -> None:
         body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
         heater = _mesh_object("kapton_heater_1", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
         sensor = _mesh_object("assembly/temperature_probe_A", "Copper", [-6.0, -1.0, -1.0], [-5.0, 1.0, 1.0])
 
-        body_objects, devices = collapse_physical_devices(
+        body_objects, role_components = collapse_role_components(
             [body, heater, sensor],
-            DEFAULT_HEATER_NAME_PATTERNS,
-            DEFAULT_SENSOR_NAME_PATTERNS,
+            [r"kapton_heater"],
+            [r"temperature_probe"],
         )
 
         self.assertEqual([obj.name for obj in body_objects], ["body_panel"])
-        self.assertEqual([device.kind for device in devices], ["heater", "sensor"])
-        self.assertEqual({device.name for device in devices}, {"assembly/temperature_probe_A", "kapton_heater"})
+        self.assertEqual([component.kind for component in role_components], ["heater", "sensor"])
+        self.assertEqual({component.name for component in role_components}, {"assembly/temperature_probe_A", "kapton_heater"})
 
-    def test_physical_device_detection_excludes_cables_and_breakout_boards_by_default(self) -> None:
+    def test_role_component_detection_excludes_cables_and_breakout_boards_by_default(self) -> None:
         flex = _mesh_object(
             "V_GUUTZ_SENSOR-HEATER-FLEX-CABLE_HISPEC_36",
             "Copper",
@@ -294,35 +302,45 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         )
         heater = _mesh_object("kapton_heater_1", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
 
-        body_objects, devices = collapse_physical_devices(
+        body_objects, role_components = collapse_role_components(
             [flex, breakout, heater],
-            DEFAULT_HEATER_NAME_PATTERNS,
-            DEFAULT_SENSOR_NAME_PATTERNS,
-            exclude_patterns=DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS,
+            [r"kapton_heater"],
+            [r"sensor"],
+            exclude_patterns=DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS,
         )
 
         self.assertEqual([obj.name for obj in body_objects], [flex.name, breakout.name])
-        self.assertEqual(len(devices), 1)
-        self.assertEqual(devices[0].name, "kapton_heater")
+        self.assertEqual(len(role_components), 1)
+        self.assertEqual(role_components[0].name, "kapton_heater")
 
-    def test_physical_device_detection_splits_distant_same_named_instances(self) -> None:
+    def test_role_component_detection_splits_distant_same_named_instances(self) -> None:
         left = _mesh_object("safe_heater_1", "Copper", [0.0, 0.0, 0.0], [5.0, 5.0, 1.0])
         right = _mesh_object("safe_heater_2", "Copper", [100.0, 0.0, 0.0], [105.0, 5.0, 1.0])
         bridge = _mesh_object("safe_heater_3", "Copper", [108.0, 0.0, 0.0], [112.0, 5.0, 1.0])
 
-        body_objects, devices = collapse_physical_devices(
+        body_objects, role_components = collapse_role_components(
             [left, right, bridge],
-            DEFAULT_HEATER_NAME_PATTERNS,
-            DEFAULT_SENSOR_NAME_PATTERNS,
-            exclude_patterns=DEFAULT_DEVICE_EXCLUDE_NAME_PATTERNS,
+            [r"safe_heater"],
+            [],
+            exclude_patterns=DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS,
             group_gap_mm=10.0,
         )
 
         self.assertEqual(body_objects, [])
-        self.assertEqual([device.name for device in devices], ["safe_heater_1", "safe_heater_2"])
-        self.assertEqual([len(device.objects) for device in devices], [1, 2])
+        self.assertEqual([component.name for component in role_components], ["safe_heater_1", "safe_heater_2"])
+        self.assertEqual([len(component.objects) for component in role_components], [1, 2])
 
-    def test_cli_physical_device_split_excludes_devices_from_voxel_scene(self) -> None:
+    def test_role_component_detection_rejects_ambiguous_heater_sensor_match(self) -> None:
+        ambiguous = _mesh_object("sensor_heater_combo", "Copper", [0.0, 0.0, 0.0], [5.0, 5.0, 1.0])
+
+        with self.assertRaisesRegex(ValueError, "matches both heater and sensor"):
+            collapse_role_components(
+                [ambiguous],
+                [r"heater"],
+                [r"sensor"],
+            )
+
+    def test_cli_role_component_split_excludes_components_from_voxel_scene(self) -> None:
         body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
         heater = _mesh_object("heater_strip_1", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
         scene = GltfScene(
@@ -332,24 +350,34 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             warnings=[],
         )
         args = SimpleNamespace(
-            no_detect_physical_devices=False,
+            no_detect_role_nodes=False,
             heater_name_pattern=None,
+            heater_name_substring=None,
             sensor_name_pattern=None,
+            sensor_name_substring=None,
             device_exclude_name_pattern=None,
             no_default_device_excludes=False,
-            physical_device_group_gap_mm=10.0,
+            role_node_group_gap_mm=10.0,
         )
         warnings: list[str] = []
 
-        voxel_scene, devices = _split_physical_devices(scene, args, warnings)
+        voxel_scene, role_components = _split_role_components(scene, args, warnings)
+
+        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel", "heater_strip_1"])
+        self.assertEqual(role_components, [])
+        self.assertEqual(args.role_components, [])
+        self.assertEqual(warnings, [])
+
+        args.heater_name_substring = ["heater_strip"]
+        voxel_scene, role_components = _split_role_components(scene, args, warnings)
 
         self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel"])
-        self.assertEqual(len(devices), 1)
-        self.assertEqual(devices[0].kind, "heater")
-        self.assertEqual(args.physical_devices, devices)
+        self.assertEqual(len(role_components), 1)
+        self.assertEqual(role_components[0].kind, "heater")
+        self.assertEqual(args.role_components, role_components)
         self.assertIn("excluded them from voxelization", warnings[0])
 
-    def test_graph_build_adds_physical_heater_node_and_contact_edge(self) -> None:
+    def test_graph_build_adds_heater_role_node_and_contact_edge(self) -> None:
         materials = self.make_materials()
         leaves = [
             OctreeCell(
@@ -367,25 +395,28 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             )
         ]
         heater_obj = _mesh_object("heater_strip_1", "Copper", [5.0, -2.0, -2.0], [7.0, 2.0, 2.0])
-        device = PhysicalDevice(name="heater_strip", kind="heater", objects=[heater_obj])
+        role_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj])
 
         result = build_graph(
             leaves,
             ContactReport(),
             materials,
             warnings=[],
-            physical_devices=[device],
+            role_components=[role_component],
         )
 
         self.assertEqual(len(result.nodes), 2)
         heater_node = result.nodes[1]
-        self.assertEqual(heater_node["node_type"], "physical_heater")
-        self.assertTrue(heater_node["tags"]["heater"])
-        self.assertTrue(heater_node["tags"]["sensor"])
+        self.assertEqual(heater_node["node_type"], "heater")
+        self.assertTrue(heater_node["is_heater"])
+        self.assertFalse(heater_node["is_sensor"])
+        self.assertNotIn("heater", heater_node["tags"])
+        self.assertNotIn("sensor", heater_node["tags"])
+        self.assertEqual(heater_node["source_components"], ["heater_strip_1"])
         self.assertGreater(heater_node["C_J_K"], 0.0)
         self.assertEqual(len(result.edges), 1)
-        self.assertEqual(result.edges[0]["edge_type"], "physical_device_contact")
-        self.assertEqual(result.edges[0]["source"], "physical_device_cad_contact")
+        self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
+        self.assertEqual(result.edges[0]["source"], "cad_role_node_contact")
 
     def test_graph_build_adds_near_contact_edges_for_near_face_cells(self) -> None:
         materials = self.make_materials()
@@ -424,6 +455,133 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(result.edges[0]["edge_type"], "near_same_material_contact")
         self.assertAlmostEqual(result.edges[0]["shared_area_m2"], 100.0e-6)
         self.assertAlmostEqual(result.edges[0]["distance_m"], 0.012)
+
+    def test_candidate_cell_pairs_streams_only_spatial_neighbors(self) -> None:
+        cells = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"part_1": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_1",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_2",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(10.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"part_2": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_2",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_3",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(23.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"part_3": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_3",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_far",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(200.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"part_far": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_far",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+        ]
+
+        touching_pairs = {_pair_ids(a, b) for a, b in _candidate_cell_pairs(cells, 0.0)}
+        near_pairs = {_pair_ids(a, b) for a, b in _candidate_cell_pairs(cells, 3.0)}
+
+        self.assertIn(("cell_1", "cell_2"), touching_pairs)
+        self.assertIn(("cell_2", "cell_3"), near_pairs)
+        self.assertNotIn(("cell_1", "cell_far"), near_pairs)
+        self.assertNotIn(("cell_2", "cell_far"), near_pairs)
+
+    def test_exposed_area_uses_indexed_neighbor_pairs_for_mixed_cell_sizes(self) -> None:
+        cells = [
+            OctreeCell(
+                cell_id="cell_large",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(20.0, 20.0, 20.0),
+                occupancy={"part_large": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_large",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_small_a",
+                parent_id=None,
+                children_ids=[],
+                level=1,
+                center_mm=(15.0, -5.0, 0.0),
+                size_mm=(10.0, 10.0, 20.0),
+                occupancy={"part_small_a": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_small_a",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_small_b",
+                parent_id=None,
+                children_ids=[],
+                level=1,
+                center_mm=(15.0, 5.0, 0.0),
+                size_mm=(10.0, 10.0, 20.0),
+                occupancy={"part_small_b": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_small_b",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_far",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(100.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"part_far": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="part_far",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+        ]
+
+        areas = _exposed_areas_m2(cells)
+
+        self.assertAlmostEqual(areas["cell_large"], 2000.0e-6)
+        self.assertAlmostEqual(areas["cell_small_a"], 600.0e-6)
+        self.assertAlmostEqual(areas["cell_small_b"], 600.0e-6)
+        self.assertAlmostEqual(areas["cell_far"], 600.0e-6)
 
     def test_graph_build_ignores_near_diagonal_cells_without_face_overlap(self) -> None:
         materials = self.make_materials()

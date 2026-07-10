@@ -92,9 +92,9 @@ def clone_node_for_extrusion(source: NodeProperties, node_id: int, coord: GridCo
         node_id=int(node_id),
         coord=coord,
         Grad_W_K=0.0,
-        has_heater=False,
+        is_heater=False,
         heater=HeaterProperties(heater_id=int(node_id)),
-        has_sensor=False,
+        is_sensor=False,
         sensor=SensorProperties(sensor_id=int(node_id)),
         has_cryocooler=False,
     )

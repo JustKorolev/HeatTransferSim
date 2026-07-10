@@ -301,12 +301,12 @@ def build_matrices(model: ThermalGraphModel) -> dict[str, np.ndarray]:
     G_rad = np.zeros(size, dtype=float)
     initial_temperature_K = np.zeros(size, dtype=float)
     G = np.zeros((size, size), dtype=float)
-    has_heater = np.zeros(size, dtype=bool)
+    is_heater = np.zeros(size, dtype=bool)
     heater_ids = np.full(size, -1, dtype=int)
     heater_min_power_W = np.zeros(size, dtype=float)
     heater_max_power_W = np.zeros(size, dtype=float)
     heater_efficiency = np.ones(size, dtype=float)
-    has_sensor = np.zeros(size, dtype=bool)
+    is_sensor = np.zeros(size, dtype=bool)
     sensor_ids = np.full(size, -1, dtype=int)
     sensor_noise_std_K = np.zeros(size, dtype=float)
     sensor_bias_K = np.zeros(size, dtype=float)
@@ -321,12 +321,12 @@ def build_matrices(model: ThermalGraphModel) -> dict[str, np.ndarray]:
         Grad[row] = float(node.Grad_W_K)
         G_rad[row] = float(node.G_rad_W_K if node.G_rad_W_K > 0.0 else node.Grad_W_K)
         initial_temperature_K[row] = float(node.initial_temperature_K)
-        has_heater[row] = bool(node.has_heater)
+        is_heater[row] = bool(node.is_heater)
         heater_ids[row] = int(node.heater.heater_id)
         heater_min_power_W[row] = float(node.heater.heater_min_power_W)
         heater_max_power_W[row] = float(node.heater.heater_max_power_W)
         heater_efficiency[row] = float(node.heater.heater_efficiency)
-        has_sensor[row] = bool(node.has_sensor)
+        is_sensor[row] = bool(node.is_sensor)
         sensor_ids[row] = int(node.sensor.sensor_id)
         sensor_noise_std_K[row] = float(node.sensor.sensor_noise_std_K)
         sensor_bias_K[row] = float(node.sensor.sensor_bias_K)
@@ -352,12 +352,12 @@ def build_matrices(model: ThermalGraphModel) -> dict[str, np.ndarray]:
         "initial_temperature_K": initial_temperature_K,
         "G": G,
         "L": L,
-        "has_heater": has_heater,
+        "is_heater": is_heater,
         "heater_ids": heater_ids,
         "heater_min_power_W": heater_min_power_W,
         "heater_max_power_W": heater_max_power_W,
         "heater_efficiency": heater_efficiency,
-        "has_sensor": has_sensor,
+        "is_sensor": is_sensor,
         "sensor_ids": sensor_ids,
         "sensor_noise_std_K": sensor_noise_std_K,
         "sensor_bias_K": sensor_bias_K,

@@ -45,6 +45,7 @@ class GraphPyVistaWidget:
         self.show_heaters = True
         self.show_sensors = True
         self.show_coolers = True
+        self.shader_mode_enabled = False
         self._node_actors: dict[int, Any] = {}
         self._node_meshes: dict[int, Any] = {}
         self._actor_node_ids: dict[str, int] = {}
@@ -163,6 +164,15 @@ class GraphPyVistaWidget:
         self.dark_mode = bool(enabled)
         self.plotter.set_background("#111827" if self.dark_mode else "white")
 
+    def set_shader_mode(self, enabled: bool, render: bool = True) -> bool:
+        """Toggle opaque, lit cell rendering for geometry inspection."""
+        self.shader_mode_enabled = bool(enabled)
+        self._apply_shader_mode_to_scene()
+        return self.safe_render() if render else True
+
+    def toggle_shader_mode(self) -> bool:
+        return self.set_shader_mode(not self.shader_mode_enabled)
+
     def draw(
         self,
         model: ThermalGraphModel,
@@ -225,11 +235,12 @@ class GraphPyVistaWidget:
             selected = node_id == self.selected_node_id or node_id in self.selected_node_ids
             color = (node_colors or {}).get(node_id, self._color_for_material(node.material))
             mesh_kwargs = {
-                "opacity": 0.78 if node_scalar_values is not None and not selected else (0.62 if selected else 0.34),
+                "opacity": self._cell_opacity(node_scalar_values is not None, selected),
                 "show_edges": True,
                 "edge_color": "#f87171" if selected else self._node_edge_color(),
                 "line_width": 3 if selected else 1,
                 "pickable": True,
+                **self._lit_mesh_kwargs(),
             }
             if node_scalar_values is not None and node_id in node_scalar_values:
                 mesh.cell_data["temperature_K"] = np.full(mesh.n_cells, float(node_scalar_values[node_id]))
@@ -504,7 +515,7 @@ class GraphPyVistaWidget:
         self._marker_actors_by_kind.setdefault(kind, []).append(label_actor)
 
     def _add_io_markers_for_node(self, node: Any, center: np.ndarray, marker_side: float) -> None:
-        if bool(getattr(node, "has_heater", False)):
+        if bool(getattr(node, "is_heater", False)):
             self._add_marker(
                 center + np.array([0.0, 0.0, 0.36 * marker_side]),
                 "#ff6b35",
@@ -512,7 +523,7 @@ class GraphPyVistaWidget:
                 "heater",
                 self.show_heaters,
             )
-        if bool(getattr(node, "has_sensor", False)):
+        if bool(getattr(node, "is_sensor", False)):
             self._add_marker(
                 center + np.array([0.0, 0.0, -0.36 * marker_side]),
                 "#2a9d8f",
@@ -550,14 +561,15 @@ class GraphPyVistaWidget:
         prop = actor.GetProperty()
         if selected:
             prop.SetColor(1.0, 0.8196078431, 0.4)
-            prop.SetOpacity(0.62)
+            prop.SetOpacity(self._cell_opacity(False, True))
             prop.SetEdgeColor(0.9725490196, 0.4431372549, 0.4431372549)
             prop.SetLineWidth(3)
         else:
             prop.SetColor(0.3450980392, 0.6509803922, 1.0)
-            prop.SetOpacity(0.34)
+            prop.SetOpacity(self._cell_opacity(self._actor_has_temperature_scalars(actor), False))
             prop.SetEdgeColor(*(self._node_edge_rgb()))
             prop.SetLineWidth(1)
+        self._apply_lighting_to_actor(actor)
         prop.Modified()
 
     def _enable_actor_pick(self, actor: Any) -> None:
@@ -654,6 +666,8 @@ class GraphPyVistaWidget:
                 pass
         if key == "Escape" and self.on_escape is not None:
             self.on_escape()
+        elif key in {"s", "S"}:
+            self.toggle_shader_mode()
 
     def _ctrl_modifier_active(self) -> bool:
         try:
@@ -988,11 +1002,12 @@ class GraphPyVistaWidget:
             mesh.cell_data["cell_rgb"] = np.asarray(cell_colors, dtype=np.uint8)
         self._batched_mesh = mesh
         mesh_kwargs = {
-            "opacity": 0.78 if node_scalar_values is not None else 0.36,
+            "opacity": self._cell_opacity(node_scalar_values is not None, False),
             "show_edges": True,
             "edge_color": self._node_edge_color(),
             "line_width": 0.35,
             "pickable": True,
+            **self._lit_mesh_kwargs(),
         }
         if node_scalar_values is not None:
             self._batched_actor = self.plotter.add_mesh(
@@ -1068,12 +1083,98 @@ class GraphPyVistaWidget:
         self._batched_selected_actor = self.plotter.add_mesh(
             mesh,
             color="#ffd166",
-            opacity=0.7,
+            opacity=self._cell_opacity(False, True),
             show_edges=True,
             edge_color="#f87171",
             line_width=3,
             pickable=False,
+            **self._lit_mesh_kwargs(),
         )
+
+    def _cell_opacity(self, scalar_active: bool, selected: bool) -> float:
+        if self.shader_mode_enabled:
+            return 1.0
+        if scalar_active and not selected:
+            return 0.78
+        return 0.62 if selected else 0.34
+
+    def _lit_mesh_kwargs(self) -> dict[str, Any]:
+        if not self.shader_mode_enabled:
+            return {"lighting": True}
+        return {
+            "lighting": True,
+            "ambient": 0.22,
+            "diffuse": 0.78,
+            "specular": 0.25,
+            "specular_power": 24.0,
+            "smooth_shading": False,
+        }
+
+    def _apply_shader_mode_to_scene(self) -> None:
+        for node_id, actor in self._node_actors.items():
+            selected = node_id in self.selected_node_ids
+            self._set_actor_opacity(actor, self._cell_opacity(self._actor_has_temperature_scalars(actor), selected))
+            self._apply_lighting_to_actor(actor)
+        for actor in (self._batched_actor, self._batched_selected_actor):
+            if actor is None:
+                continue
+            self._set_actor_opacity(actor, self._batched_actor_opacity(actor))
+            self._apply_lighting_to_actor(actor)
+
+    def _batched_actor_opacity(self, actor: Any) -> float:
+        selected = (
+            self._batched_selected_actor is not None
+            and self._actor_key(actor) == self._actor_key(self._batched_selected_actor)
+        )
+        scalar_active = False
+        if self._batched_mesh is not None and not selected:
+            try:
+                scalar_active = "temperature_K" in self._batched_mesh.cell_data
+            except Exception:
+                scalar_active = False
+        return self._cell_opacity(scalar_active, selected)
+
+    @staticmethod
+    def _set_actor_opacity(actor: Any, opacity: float) -> None:
+        try:
+            prop = actor.GetProperty()
+            prop.SetOpacity(float(opacity))
+            prop.Modified()
+        except Exception:
+            pass
+
+    def _apply_lighting_to_actor(self, actor: Any) -> None:
+        try:
+            prop = actor.GetProperty()
+            prop.LightingOn()
+            if self.shader_mode_enabled:
+                prop.SetAmbient(0.22)
+                prop.SetDiffuse(0.78)
+                prop.SetSpecular(0.25)
+                prop.SetSpecularPower(24.0)
+                if hasattr(prop, "SetInterpolationToPhong"):
+                    prop.SetInterpolationToPhong()
+            else:
+                prop.SetAmbient(0.0)
+                prop.SetDiffuse(1.0)
+                prop.SetSpecular(0.0)
+                if hasattr(prop, "SetInterpolationToFlat"):
+                    prop.SetInterpolationToFlat()
+            prop.Modified()
+        except Exception:
+            pass
+
+    def _actor_has_temperature_scalars(self, actor: Any) -> bool:
+        node_id = self._actor_node_ids.get(self._actor_key(actor))
+        if node_id is None:
+            return False
+        mesh = self._node_meshes.get(int(node_id))
+        if mesh is None:
+            return False
+        try:
+            return "temperature_K" in mesh.cell_data
+        except Exception:
+            return False
 
     @staticmethod
     def _actor_key(actor: Any) -> str:

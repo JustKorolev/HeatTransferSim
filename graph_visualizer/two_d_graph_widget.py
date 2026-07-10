@@ -149,11 +149,11 @@ class TwoDGraphWidget:
             node = model.nodes[node_id]
             color = (
                 "#ffb703"
-                if node.has_heater
+                if node.is_heater
                 else "#06b6d4"
                 if getattr(node, "has_cryocooler", False)
                 else "#2a9d8f"
-                if node.has_sensor
+                if node.is_sensor
                 else "#58a6ff"
             )
             selected = node_id in self.selected_node_ids
@@ -198,11 +198,11 @@ class TwoDGraphWidget:
             ys.append(y)
             colors.append(
                 "#ffb703"
-                if node.has_heater
+                if node.is_heater
                 else "#06b6d4"
                 if getattr(node, "has_cryocooler", False)
                 else "#2a9d8f"
-                if node.has_sensor
+                if node.is_sensor
                 else "#58a6ff"
             )
             self.node_points[node_id] = (x, y)
