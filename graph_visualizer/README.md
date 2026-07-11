@@ -165,10 +165,12 @@ are rejected for octree conversion.
 If `materials.xlsx` exists in the mesh directory, it is used as a two-column
 Excel lookup for part names and material names. Contact checking is handled in
 Python by exact shared voxel faces plus a voxel-surface contact-distance pass.
-Heater and sensor CAD components are converted into dedicated role nodes only
-when you provide matches with `--heater-name-substring`,
-`--heater-name-pattern`, `--sensor-name-substring`, or
-`--sensor-name-pattern`.
+Heater and sensor CAD components stay in voxelization when you provide matches
+with `--heater-name-substring`, `--heater-name-pattern`,
+`--sensor-name-substring`, or `--sensor-name-pattern`. Their occupied octree
+cells receive normal graph connections first, then cells from the same detected
+heater/sensor part are consolidated into one role node with those external
+connections preserved.
 Use `--voxel-workers 0` for conservative multiprocessing capped at 2 worker
 processes during octree classification, or pass an explicit worker count. Large
 CAD assemblies copy triangle data into each worker process, so increase the

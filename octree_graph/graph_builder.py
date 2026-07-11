@@ -133,14 +133,13 @@ def build_graph(
                 "tags": {"notes": ""},
             }
         )
-    cell_to_node = {node["cell_id"]: node for node in nodes}
-    role_contacts = _append_role_nodes(
+    role_groups = _tag_role_voxel_nodes(
         nodes,
+        solid,
         role_components or [],
-        contact_report,
-        materials,
         warnings,
     )
+    cell_to_node = {node["cell_id"]: node for node in nodes}
     edges: list[dict] = []
     edge_index = 0
     connected_pairs: set[tuple[str, str]] = set()
@@ -201,17 +200,8 @@ def build_graph(
             contact_detection_distance_mm,
             connected_node_pairs,
         )
-    edge_index = _add_role_node_contact_edges(
-        solid,
-        cell_to_node,
-        role_contacts,
-        edges,
-        edge_index,
-        contact_detection_distance_mm,
-        connected_node_pairs,
-        warnings,
-        role_contact_tolerance_mm,
-    )
+    if role_groups:
+        nodes, edges = _consolidate_role_voxel_nodes(nodes, edges, role_groups, warnings)
     return GraphBuildResult(nodes=nodes, edges=edges, warnings=warnings)
 
 
@@ -315,6 +305,224 @@ def _spatial_role_clusters(members: list[MeshObject], group_gap_mm: float) -> li
             min(obj.name for obj in cluster),
         ),
     )
+
+
+def _tag_role_voxel_nodes(
+    nodes: list[dict],
+    cells: list[OctreeCell],
+    components: list[RoleComponent],
+    warnings: list[str],
+) -> dict[str, dict[str, Any]]:
+    role_by_object: dict[str, RoleComponent] = {}
+    matched_by_component: dict[str, int] = {component.name: 0 for component in components}
+    role_groups: dict[str, dict[str, Any]] = {
+        component.name: {"component": component, "node_ids": set()} for component in components
+    }
+    for component in components:
+        for obj in component.objects:
+            role_by_object[obj.name] = component
+    if not role_by_object:
+        return {}
+    for node, cell in zip(nodes, cells):
+        role_hits: dict[str, list[str]] = {}
+        for component_name, fraction in cell.occupancy.items():
+            if fraction <= 0.0:
+                continue
+            component = role_by_object.get(component_name)
+            if component is None:
+                continue
+            role_hits.setdefault(component.kind, []).append(component_name)
+            matched_by_component[component.name] = matched_by_component.get(component.name, 0) + 1
+            role_groups.setdefault(component.name, {"component": component, "node_ids": set()})["node_ids"].add(
+                int(node["node_id"])
+            )
+        if not role_hits:
+            continue
+        if "heater" in role_hits:
+            node["is_heater"] = True
+        if "sensor" in role_hits:
+            node["is_sensor"] = True
+        source_components = sorted({name for names in role_hits.values() for name in names})
+        node["role_source_components"] = source_components
+        node.setdefault("tags", {}).setdefault("notes", "")
+        note = f"Detected CAD role geometry in voxel cell: {', '.join(source_components)}."
+        node["tags"]["notes"] = _append_note(str(node["tags"].get("notes", "")), note)
+        node.setdefault("warnings", []).append(note)
+    for component in components:
+        if matched_by_component.get(component.name, 0) > 0:
+            continue
+        warning = (
+            f"Detected {component.kind} CAD component {component.name!r}, but it produced 0 solid voxel cells; "
+            "no heater/sensor graph cells were tagged for that component."
+        )
+        warnings.append(warning)
+    return {
+        name: group
+        for name, group in role_groups.items()
+        if group.get("node_ids")
+    }
+
+
+def _append_note(existing: str, note: str) -> str:
+    existing = str(existing or "").strip()
+    return note if not existing else f"{existing}\n{note}"
+
+
+def _consolidate_role_voxel_nodes(
+    nodes: list[dict],
+    edges: list[dict],
+    role_groups: dict[str, dict[str, Any]],
+    warnings: list[str],
+) -> tuple[list[dict], list[dict]]:
+    if not role_groups:
+        return nodes, edges
+    node_by_id = {int(node["node_id"]): node for node in nodes}
+    old_to_new: dict[int, int] = {}
+    replacement_nodes: list[dict] = []
+    next_node_id = max(node_by_id, default=-1) + 1
+    for group_name, group in sorted(role_groups.items()):
+        component = group["component"]
+        node_ids = sorted(int(node_id) for node_id in group.get("node_ids", set()) if int(node_id) in node_by_id)
+        if len(node_ids) <= 1:
+            continue
+        group_nodes = [node_by_id[node_id] for node_id in node_ids]
+        consolidated = _make_consolidated_role_node(next_node_id, component, group_nodes)
+        replacement_nodes.append(consolidated)
+        for node_id in node_ids:
+            old_to_new[node_id] = next_node_id
+        warnings.append(
+            f"Consolidated {len(node_ids)} voxelized {component.kind} cell(s) into node {next_node_id} "
+            f"for CAD component {group_name!r}."
+        )
+        next_node_id += 1
+    if not old_to_new:
+        return nodes, edges
+    removed_ids = set(old_to_new)
+    kept_nodes = [node for node in nodes if int(node["node_id"]) not in removed_ids]
+    consolidated_edges = _rewrite_edges_for_consolidated_roles(edges, old_to_new, removed_ids)
+    return kept_nodes + replacement_nodes, consolidated_edges
+
+
+def _make_consolidated_role_node(node_id: int, component: RoleComponent, group_nodes: list[dict]) -> dict:
+    total_C = sum(float(node.get("C_J_K", 0.0)) for node in group_nodes)
+    total_mass = sum(float(node.get("mass_kg", 0.0)) for node in group_nodes)
+    total_volume = sum(float(node.get("volume_m3", 0.0)) for node in group_nodes)
+    initial_temperature = _weighted_node_average(group_nodes, "initial_temperature_K", total_C, default=293.15)
+    g_rad = sum(float((node.get("radiation") or {}).get("G_rad_W_K", 0.0)) for node in group_nodes)
+    radiating_area = sum(float((node.get("radiation") or {}).get("radiating_area_m2", 0.0)) for node in group_nodes)
+    material_name = _dominant_node_value(group_nodes, "material_name")
+    confidence = "high" if all(str(node.get("confidence", "")) == "high" for node in group_nodes) else "medium"
+    is_heater = component.kind == "heater"
+    is_sensor = component.kind == "sensor"
+    source_components = sorted({obj.name for obj in component.objects})
+    mins, maxs = component.bounds_mm
+    notes = f"Consolidated {len(group_nodes)} voxelized {component.kind} cell(s) from CAD component {component.name!r}."
+    return {
+        "node_id": int(node_id),
+        "cell_id": f"{component.kind}_consolidated_{node_id}",
+        "coord": [int(node_id), 0, 0],
+        "center_mm": [float(value) for value in component.center_mm],
+        "size_mm": [float(max(value, 1.0e-6)) for value in component.size_mm],
+        "level": min(int(node.get("level", 0)) for node in group_nodes),
+        "node_type": component.kind,
+        "component_name": component.name,
+        "material_name": material_name,
+        "volume_m3": float(total_volume),
+        "mass_kg": float(total_mass),
+        "C_J_K": float(total_C),
+        "initial_temperature_K": float(initial_temperature),
+        "occupancy_fraction": 1.0,
+        "is_heater": bool(is_heater),
+        "is_sensor": bool(is_sensor),
+        "confidence": confidence,
+        "warnings": [notes],
+        "radiation": {
+            "is_exposed": radiating_area > 0.0,
+            "radiating_area_m2": float(radiating_area),
+            "emissivity": float(_weighted_radiation_value(group_nodes, "emissivity", default=0.0)),
+            "G_rad_W_K": float(g_rad),
+            "R_rad_K_W": float(1.0 / g_rad) if g_rad > 0.0 else None,
+        },
+        "tags": {"notes": notes},
+        "source_components": source_components,
+        "source_node_ids": [int(node["node_id"]) for node in group_nodes],
+        "source_bounds_mm": {
+            "min": [float(value) for value in mins],
+            "max": [float(value) for value in maxs],
+        },
+        "role_source_components": source_components,
+    }
+
+
+def _rewrite_edges_for_consolidated_roles(
+    edges: list[dict],
+    old_to_new: dict[int, int],
+    removed_ids: set[int],
+) -> list[dict]:
+    merged: dict[tuple[int, int], dict] = {}
+    passthrough: list[dict] = []
+    for edge in edges:
+        old_i = int(edge["node_i"])
+        old_j = int(edge["node_j"])
+        new_i = old_to_new.get(old_i, old_i)
+        new_j = old_to_new.get(old_j, old_j)
+        if new_i == new_j:
+            continue
+        key = tuple(sorted((new_i, new_j)))
+        if old_i not in removed_ids and old_j not in removed_ids:
+            copied = dict(edge)
+            copied["node_i"], copied["node_j"] = key
+            passthrough.append(copied)
+            continue
+        if key not in merged:
+            copied = dict(edge)
+            copied["node_i"], copied["node_j"] = key
+            copied["edge_type"] = "consolidated_role_contact"
+            copied["source"] = "voxel_role_consolidation"
+            copied["G_W_K"] = 0.0
+            copied["shared_area_m2"] = 0.0
+            copied["warnings"] = ["Merged from voxelized heater/sensor cell connections."]
+            merged[key] = copied
+        merged_edge = merged[key]
+        merged_edge["G_W_K"] = float(merged_edge.get("G_W_K", 0.0)) + float(edge.get("G_W_K", 0.0))
+        merged_edge["shared_area_m2"] = float(merged_edge.get("shared_area_m2", 0.0)) + float(edge.get("shared_area_m2", 0.0))
+        merged_edge["distance_m"] = min(
+            float(merged_edge.get("distance_m", edge.get("distance_m", 0.0))),
+            float(edge.get("distance_m", 0.0)),
+        )
+    rewritten = passthrough + list(merged.values())
+    for index, edge in enumerate(rewritten):
+        edge["edge_id"] = f"edge_{index}"
+    return rewritten
+
+
+def _weighted_node_average(group_nodes: list[dict], field: str, total_C: float, default: float) -> float:
+    if total_C <= 0.0:
+        values = [float(node.get(field, default)) for node in group_nodes]
+        return float(sum(values) / max(1, len(values)))
+    return float(
+        sum(float(node.get(field, default)) * float(node.get("C_J_K", 0.0)) for node in group_nodes) / total_C
+    )
+
+
+def _weighted_radiation_value(group_nodes: list[dict], field: str, default: float) -> float:
+    weights = [float((node.get("radiation") or {}).get("radiating_area_m2", 0.0)) for node in group_nodes]
+    total = sum(weights)
+    if total <= 0.0:
+        values = [float((node.get("radiation") or {}).get(field, default)) for node in group_nodes]
+        return float(sum(values) / max(1, len(values)))
+    return float(
+        sum(float((node.get("radiation") or {}).get(field, default)) * weight for node, weight in zip(group_nodes, weights))
+        / total
+    )
+
+
+def _dominant_node_value(group_nodes: list[dict], field: str) -> str:
+    counts: dict[str, float] = {}
+    for node in group_nodes:
+        value = str(node.get(field, ""))
+        counts[value] = counts.get(value, 0.0) + float(node.get("C_J_K", 0.0))
+    return max(counts, key=counts.get) if counts else ""
 
 
 def _append_role_nodes(

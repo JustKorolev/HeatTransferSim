@@ -213,8 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0e-6,
         help=(
-            "Maximum AABB gap for connecting detected heater/sensor role nodes to voxelized body cells. "
-            "No nearest-cell fallback is used; isolated role nodes are reported in graph warnings."
+            "Legacy compatibility option. Detected heater/sensor CAD parts are now voxelized and tagged "
+            "as normal graph cells, so no special role-node contact tolerance is used."
         ),
     )
     parser.add_argument("--proximity-contact-distance-mm", type=float, default=None, help=argparse.SUPPRESS)
@@ -406,7 +406,7 @@ def _split_role_components(
     exclude_patterns = [] if getattr(args, "no_default_device_excludes", False) else list(DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS)
     exclude_patterns.extend(getattr(args, "device_exclude_name_pattern", None) or [])
     group_gap_mm = float(getattr(args, "role_node_group_gap_mm", DEFAULT_ROLE_GROUP_GAP_MM))
-    body_objects, role_components = collapse_role_components(
+    _body_objects, role_components = collapse_role_components(
         scene.objects,
         heater_patterns,
         sensor_patterns,
@@ -424,10 +424,9 @@ def _split_role_components(
     extra = "" if len(role_components) <= 8 else f", ... and {len(role_components) - 8} more"
     warnings.append(
         f"Detected {len(role_components)} heater/sensor CAD component(s); "
-        f"excluded them from voxelization and added dedicated graph nodes: {role_names}{extra}."
+        f"kept them in voxelization and will tag matching voxel cells: {role_names}{extra}."
     )
-    bounds = _bounds_for_objects(body_objects) or scene.bounds_mm
-    return GltfScene(path=scene.path, objects=body_objects, bounds_mm=bounds, warnings=scene.warnings), role_components
+    return scene, role_components
 
 
 def _substring_patterns(values: list[str]) -> list[str]:

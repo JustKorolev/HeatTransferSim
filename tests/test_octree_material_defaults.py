@@ -376,10 +376,10 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         args.sensor_name_substring = ["temperature-probe"]
         voxel_scene, role_components = _split_role_components(scene, args, warnings)
 
-        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel"])
+        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel", "heater_strip_1", "temperature_probe_A"])
         self.assertEqual([component.kind for component in role_components], ["heater", "sensor"])
         self.assertEqual(args.role_components, role_components)
-        self.assertIn("excluded them from voxelization", warnings[0])
+        self.assertIn("kept them in voxelization", warnings[0])
 
     def test_cli_legacy_physical_device_disable_flag_disables_role_detection(self) -> None:
         args = build_parser().parse_args(
@@ -430,23 +430,23 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         voxel_scene, role_components = _split_role_components(scene, args, warnings=[])
 
-        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel"])
+        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel", "THERMAL_PICKUP_A"])
         self.assertEqual(len(role_components), 1)
         self.assertEqual(role_components[0].kind, "sensor")
 
-    def test_graph_build_adds_heater_role_node_and_contact_edge(self) -> None:
+    def test_graph_build_tags_voxelized_heater_cell(self) -> None:
         materials = self.make_materials()
         leaves = [
             OctreeCell(
-                cell_id="cell_1",
+                cell_id="cell_heater",
                 parent_id=None,
                 children_ids=[],
                 level=0,
-                center_mm=(0.0, 0.0, 0.0),
-                size_mm=(10.0, 10.0, 10.0),
-                occupancy={"body_panel": 1.0},
+                center_mm=(5.5, 0.0, 0.0),
+                size_mm=(1.0, 4.0, 4.0),
+                occupancy={"heater_strip_1": 1.0},
                 material_fractions={"Copper": 1.0},
-                dominant_component="body_panel",
+                dominant_component="heater_strip_1",
                 dominant_material="Copper",
                 confidence="high",
             )
@@ -462,20 +462,86 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             role_components=[role_component],
         )
 
-        self.assertEqual(len(result.nodes), 2)
-        heater_node = result.nodes[1]
-        self.assertEqual(heater_node["node_type"], "heater")
+        self.assertEqual(len(result.nodes), 1)
+        heater_node = result.nodes[0]
         self.assertTrue(heater_node["is_heater"])
         self.assertFalse(heater_node["is_sensor"])
-        self.assertNotIn("heater", heater_node["tags"])
-        self.assertNotIn("sensor", heater_node["tags"])
-        self.assertEqual(heater_node["source_components"], ["heater_strip_1"])
+        self.assertEqual(heater_node["role_source_components"], ["heater_strip_1"])
         self.assertGreater(heater_node["C_J_K"], 0.0)
-        self.assertEqual(len(result.edges), 1)
-        self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
-        self.assertEqual(result.edges[0]["source"], "cad_role_node_contact")
+        self.assertEqual(result.edges, [])
 
-    def test_graph_build_does_not_fallback_connect_gapped_role_node(self) -> None:
+    def test_graph_build_consolidates_same_part_heater_voxels_and_preserves_external_edges(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_heater_left",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"safe_heater_1": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="safe_heater_1",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_body",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(10.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"body_panel": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="body_panel",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_heater_right",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(20.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"safe_heater_2": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="safe_heater_2",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+        ]
+        heater_left = _mesh_object("safe_heater_1", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        heater_right = _mesh_object("safe_heater_2", "Copper", [15.0, -5.0, -5.0], [25.0, 5.0, 5.0])
+        role_component = RoleComponent(name="safe_heater", kind="heater", objects=[heater_left, heater_right])
+
+        result = build_graph(
+            leaves,
+            ContactReport(),
+            materials,
+            warnings=[],
+            role_components=[role_component],
+        )
+
+        heater_nodes = [node for node in result.nodes if node["is_heater"]]
+        body_nodes = [node for node in result.nodes if not node["is_heater"]]
+        self.assertEqual(len(result.nodes), 2)
+        self.assertEqual(len(heater_nodes), 1)
+        self.assertEqual(len(body_nodes), 1)
+        heater = heater_nodes[0]
+        body = body_nodes[0]
+        self.assertEqual(heater["component_name"], "safe_heater")
+        self.assertEqual(heater["source_node_ids"], [0, 2])
+        self.assertEqual(sorted(heater["source_components"]), ["safe_heater_1", "safe_heater_2"])
+        self.assertEqual(len(result.edges), 1)
+        edge = result.edges[0]
+        self.assertEqual({edge["node_i"], edge["node_j"]}, {heater["node_id"], body["node_id"]})
+        self.assertEqual(edge["edge_type"], "consolidated_role_contact")
+        self.assertGreater(edge["G_W_K"], 0.0)
+
+    def test_graph_build_warns_when_detected_role_component_has_no_voxel_cells(self) -> None:
         materials = self.make_materials()
         leaves = [
             OctreeCell(
@@ -505,95 +571,9 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             role_components=[role_component],
         )
 
-        self.assertEqual(len(result.nodes), 2)
-        self.assertEqual(result.edges, [])
-        self.assertIn("has 0 contact edges", warnings[0])
-        self.assertIn("Nearest body cells: cell_1 gap=0.01 mm", warnings[0])
-        self.assertIn("thermally isolated", result.nodes[1]["warnings"][-1])
-
-    def test_graph_build_role_contact_tolerance_connects_small_gap_without_fallback(self) -> None:
-        materials = self.make_materials()
-        leaves = [
-            OctreeCell(
-                cell_id="cell_1",
-                parent_id=None,
-                children_ids=[],
-                level=0,
-                center_mm=(0.0, 0.0, 0.0),
-                size_mm=(10.0, 10.0, 10.0),
-                occupancy={"body_panel": 1.0},
-                material_fractions={"Copper": 1.0},
-                dominant_component="body_panel",
-                dominant_material="Copper",
-                confidence="high",
-            )
-        ]
-        heater_obj = _mesh_object("heater_strip_1", "Copper", [5.01, -2.0, -2.0], [7.01, 2.0, 2.0])
-        role_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj])
-
-        result = build_graph(
-            leaves,
-            ContactReport(),
-            materials,
-            warnings=[],
-            role_components=[role_component],
-            role_contact_tolerance_mm=0.02,
-        )
-
-        self.assertEqual(len(result.edges), 1)
-        self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
-        self.assertAlmostEqual(result.edges[0]["distance_m"], np.linalg.norm([6.01, 0.0, 0.0]) * 1.0e-3)
-
-    def test_graph_build_role_contact_uses_source_triangles_not_only_role_bounds(self) -> None:
-        materials = self.make_materials()
-        leaves = [
-            OctreeCell(
-                cell_id="cell_1",
-                parent_id=None,
-                children_ids=[],
-                level=0,
-                center_mm=(0.0, 0.0, 0.0),
-                size_mm=(10.0, 10.0, 10.0),
-                occupancy={"body_panel": 1.0},
-                material_fractions={"Copper": 1.0},
-                dominant_component="body_panel",
-                dominant_material="Copper",
-                confidence="high",
-            )
-        ]
-        triangle = np.array(
-            [
-                [[5.05, 5.05, 0.0], [5.05, 5.30, 0.0], [5.30, 5.05, 0.0]],
-            ],
-            dtype=float,
-        )
-        mesh = SimpleNamespace(
-            vertices=triangle.reshape(-1, 3),
-            faces=np.array([[0, 1, 2]]),
-            triangles=triangle,
-            is_watertight=False,
-        )
-        heater_obj = MeshObject(
-            name="heater_corner_contact",
-            material_name="Copper",
-            mesh=mesh,
-            vertices_mm=triangle.reshape(-1, 3),
-            bounds_mm=(np.array([5.05, 5.05, 0.0]), np.array([5.30, 5.30, 0.0])),
-            watertight=False,
-        )
-        role_component = RoleComponent(name="heater_corner_contact", kind="heater", objects=[heater_obj])
-
-        result = build_graph(
-            leaves,
-            ContactReport(),
-            materials,
-            warnings=[],
-            role_components=[role_component],
-            role_contact_tolerance_mm=0.1,
-        )
-
-        self.assertEqual(len(result.edges), 1)
-        self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
+        self.assertEqual(len(result.nodes), 1)
+        self.assertFalse(any(node["is_heater"] for node in result.nodes))
+        self.assertIn("produced 0 solid voxel cells", warnings[0])
 
     def test_graph_build_adds_near_contact_edges_for_near_face_cells(self) -> None:
         materials = self.make_materials()

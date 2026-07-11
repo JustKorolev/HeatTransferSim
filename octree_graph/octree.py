@@ -24,7 +24,7 @@ from .materials import (
 )
 
 _TRIMESH_CONTAINS_AVAILABLE: bool | None = None
-_TRIANGLE_CACHE: dict[int, np.ndarray] = {}
+_TRIANGLE_CACHE: dict[int, tuple[object, np.ndarray]] = {}
 _TRIANGLE_INDEX_CACHE: dict[int, "TriangleSpatialIndex"] = {}
 _WORKER_OBJECTS: list[MeshObject] = []
 _WORKER_TRIANGLE_INDICES: dict[int, "TriangleSpatialIndex"] = {}
@@ -826,12 +826,14 @@ def _mesh_contains_point(obj: MeshObject, point: np.ndarray, params: OctreeParam
 
 def _mesh_triangles(obj: MeshObject) -> np.ndarray:
     cache_key = id(obj.mesh)
-    triangles = _TRIANGLE_CACHE.get(cache_key)
-    if triangles is None:
+    cached = _TRIANGLE_CACHE.get(cache_key)
+    if cached is not None and cached[0] is obj.mesh:
+        return cached[1]
+    else:
         triangles = np.asarray(getattr(obj.mesh, "triangles", []), dtype=float)
         if triangles.ndim != 3 or triangles.shape[1:] != (3, 3):
             triangles = np.empty((0, 3, 3), dtype=float)
-        _TRIANGLE_CACHE[cache_key] = triangles
+        _TRIANGLE_CACHE[cache_key] = (obj.mesh, triangles)
     return triangles
 
 

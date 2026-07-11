@@ -109,12 +109,14 @@ and reads material properties from the project-level `materials.json` file by
 default. The mesh directory must contain exactly one `.glb` scene file.
 External-buffer `.gltf`/`.bin` exports are rejected because missing or mismatched
 buffers can collapse CAD geometry during loading.
-CAD components are converted into dedicated heater/sensor graph nodes only when
-you provide matching names with `--heater-name-substring`,
-`--heater-name-pattern`, `--sensor-name-substring`, or
-`--sensor-name-pattern`; repeat a flag to add multiple matches. If no heater or
-sensor match is configured, all components remain in the voxelized body
-geometry.
+CAD components are recognized as heater/sensor geometry only when you provide
+matching names with `--heater-name-substring`, `--heater-name-pattern`,
+`--sensor-name-substring`, or `--sensor-name-pattern`; repeat a flag to add
+multiple matches. Matched components remain in voxelization so their occupied
+octree cells first receive normal graph connections, then cells from the same
+detected heater/sensor part are consolidated into one role node with the union
+of those external connections. If no heater or sensor match is configured, no
+cells are assigned those roles.
 If `materials.xlsx` exists in `--mesh-dir`, it maps SolidWorks part instance
 names to material names. Contact checking is handled separately in Python by
 exact shared voxel faces plus a voxel-surface contact-distance pass.
