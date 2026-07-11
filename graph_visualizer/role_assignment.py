@@ -40,6 +40,7 @@ def node_role_match_values(node: NodeProperties) -> list[str]:
         str(node.node_type or ""),
     ]
     values.extend(str(value) for value in getattr(node, "source_components", []) or [])
+    values.extend(str(value) for value in getattr(node, "role_source_components", []) or [])
     return [value for value in values if value.strip()]
 
 

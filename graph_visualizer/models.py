@@ -146,6 +146,8 @@ class NodeProperties:
     level: int = 0
     node_type: str = ""
     source_components: list[str] = field(default_factory=list)
+    source_node_ids: list[int] = field(default_factory=list)
+    role_source_components: list[str] = field(default_factory=list)
     source_bounds_mm: dict[str, Any] = field(default_factory=dict)
     center_mm: tuple[float, float, float] | None = None
     size_mm: tuple[float, float, float] | None = None
@@ -222,6 +224,8 @@ class NodeProperties:
         material_name = copied.pop("material_name", None)
         node_type = str(copied.pop("node_type", ""))
         source_components = copied.pop("source_components", []) or []
+        source_node_ids = copied.pop("source_node_ids", []) or []
+        role_source_components = copied.pop("role_source_components", []) or []
         source_bounds_mm = copied.pop("source_bounds_mm", {}) or {}
         is_heater_value = copied.pop("is_heater", None)
         is_sensor_value = copied.pop("is_sensor", None)
@@ -363,6 +367,8 @@ class NodeProperties:
             size_mm=tuple(float(v) for v in size_mm) if size_mm is not None else None,
             node_type=node_type,
             source_components=[str(value) for value in source_components],
+            source_node_ids=[int(value) for value in source_node_ids],
+            role_source_components=[str(value) for value in role_source_components],
             source_bounds_mm=dict(source_bounds_mm) if isinstance(source_bounds_mm, dict) else {},
             component_name=str(component_name),
             **copied,
@@ -461,6 +467,10 @@ class NodeProperties:
             data["node_type"] = self.node_type
         if self.source_components:
             data["source_components"] = list(self.source_components)
+        if self.source_node_ids:
+            data["source_node_ids"] = [int(value) for value in self.source_node_ids]
+        if self.role_source_components:
+            data["role_source_components"] = list(self.role_source_components)
         if self.source_bounds_mm:
             data["source_bounds_mm"] = dict(self.source_bounds_mm)
         return data
