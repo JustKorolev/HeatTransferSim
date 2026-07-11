@@ -544,6 +544,57 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
         self.assertAlmostEqual(result.edges[0]["distance_m"], np.linalg.norm([6.01, 0.0, 0.0]) * 1.0e-3)
 
+    def test_graph_build_role_contact_uses_source_triangles_not_only_role_bounds(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"body_panel": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="body_panel",
+                dominant_material="Copper",
+                confidence="high",
+            )
+        ]
+        triangle = np.array(
+            [
+                [[5.05, 5.05, 0.0], [5.05, 5.30, 0.0], [5.30, 5.05, 0.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(
+            vertices=triangle.reshape(-1, 3),
+            faces=np.array([[0, 1, 2]]),
+            triangles=triangle,
+            is_watertight=False,
+        )
+        heater_obj = MeshObject(
+            name="heater_corner_contact",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangle.reshape(-1, 3),
+            bounds_mm=(np.array([5.05, 5.05, 0.0]), np.array([5.30, 5.30, 0.0])),
+            watertight=False,
+        )
+        role_component = RoleComponent(name="heater_corner_contact", kind="heater", objects=[heater_obj])
+
+        result = build_graph(
+            leaves,
+            ContactReport(),
+            materials,
+            warnings=[],
+            role_components=[role_component],
+            role_contact_tolerance_mm=0.1,
+        )
+
+        self.assertEqual(len(result.edges), 1)
+        self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
+
     def test_graph_build_adds_near_contact_edges_for_near_face_cells(self) -> None:
         materials = self.make_materials()
         leaves = [

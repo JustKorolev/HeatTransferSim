@@ -11,7 +11,7 @@ import numpy as np
 from .load_gltf import MeshObject
 from .load_contact_report import ContactReport
 from .materials import DEFAULT_ASSIGNED_MATERIAL_NAME, Material, resolve_material
-from .octree import OctreeCell, _physical_material_name
+from .octree import OctreeCell, _physical_material_name, _triangle_intersects_aabb
 
 
 _DEFAULT_ROLE_CONTACT_G_W_K = 0.1
@@ -134,7 +134,7 @@ def build_graph(
             }
         )
     cell_to_node = {node["cell_id"]: node for node in nodes}
-    role_nodes = _append_role_nodes(
+    role_contacts = _append_role_nodes(
         nodes,
         role_components or [],
         contact_report,
@@ -204,7 +204,7 @@ def build_graph(
     edge_index = _add_role_node_contact_edges(
         solid,
         cell_to_node,
-        role_nodes,
+        role_contacts,
         edges,
         edge_index,
         contact_detection_distance_mm,
@@ -323,8 +323,8 @@ def _append_role_nodes(
     contact_report: ContactReport,
     materials: dict[str, Material],
     warnings: list[str],
-) -> list[dict]:
-    role_nodes: list[dict] = []
+) -> list[tuple[dict, RoleComponent]]:
+    role_contacts: list[tuple[dict, RoleComponent]] = []
     known_materials = set(materials)
     for component in components:
         node_id = len(nodes)
@@ -372,8 +372,8 @@ def _append_role_nodes(
             },
         }
         nodes.append(node)
-        role_nodes.append(node)
-    return role_nodes
+        role_contacts.append((node, component))
+    return role_contacts
 
 
 def _role_component_material_name(
@@ -409,7 +409,7 @@ def _role_component_volume_m3(component: RoleComponent) -> float:
 def _add_role_node_contact_edges(
     cells: list[OctreeCell],
     cell_to_node: dict[str, dict],
-    role_nodes: list[dict],
+    role_contacts: list[tuple[dict, RoleComponent]],
     edges: list[dict],
     edge_index: int,
     max_gap_mm: float,
@@ -417,13 +417,13 @@ def _add_role_node_contact_edges(
     warnings: list[str],
     role_contact_tolerance_mm: float,
 ) -> int:
-    if not cells or not role_nodes:
+    if not cells or not role_contacts:
         return edge_index
     search_gap_mm = max(0.0, float(role_contact_tolerance_mm))
-    for role_node in role_nodes:
+    for role_node, role_component in role_contacts:
         contacts: list[tuple[OctreeCell, float, float, float]] = []
         for cell in cells:
-            contact = _node_cell_contact(role_node, cell, search_gap_mm)
+            contact = _role_cell_contact(role_node, role_component, cell, search_gap_mm)
             if contact is None:
                 continue
             area_mm2, gap_mm, distance_mm = contact
@@ -474,6 +474,43 @@ def _add_role_node_contact_edges(
             role_node.setdefault("warnings", []).append(warning)
             warnings.append(warning)
     return edge_index
+
+
+def _role_cell_contact(
+    role_node: dict,
+    role_component: RoleComponent,
+    cell: OctreeCell,
+    max_gap_mm: float,
+) -> tuple[float, float, float] | None:
+    contact = _node_cell_contact(role_node, cell, max_gap_mm)
+    if contact is not None:
+        return contact
+    if not _role_component_intersects_cell_bounds(role_component, cell, max_gap_mm):
+        return None
+    return 0.0, 0.0, _node_cell_center_distance_mm(role_node, cell)
+
+
+def _role_component_intersects_cell_bounds(
+    role_component: RoleComponent,
+    cell: OctreeCell,
+    tolerance_mm: float,
+) -> bool:
+    cell_min, cell_max = _cell_bounds_mm(cell)
+    expanded_min = cell_min - max(0.0, float(tolerance_mm))
+    expanded_max = cell_max + max(0.0, float(tolerance_mm))
+    center = (expanded_min + expanded_max) * 0.5
+    half_size = np.maximum((expanded_max - expanded_min) * 0.5, 1.0e-9)
+    for obj in role_component.objects:
+        obj_min, obj_max = obj.bounds_mm
+        if np.any(expanded_max < obj_min) or np.any(obj_max < expanded_min):
+            continue
+        triangles = np.asarray(getattr(obj.mesh, "triangles", []), dtype=float)
+        if triangles.ndim != 3 or triangles.shape[1:] != (3, 3):
+            continue
+        for triangle in triangles:
+            if _triangle_intersects_aabb(triangle, center, half_size):
+                return True
+    return False
 
 
 def _nearest_role_cell_gaps(
