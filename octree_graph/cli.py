@@ -208,6 +208,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Defaults to 0 for normal mesh-contained graphs and min_cell_size_mm for bbox-fallback graphs."
         ),
     )
+    parser.add_argument(
+        "--role-contact-tolerance-mm",
+        type=float,
+        default=1.0e-6,
+        help=(
+            "Maximum AABB gap for connecting detected heater/sensor role nodes to voxelized body cells. "
+            "No nearest-cell fallback is used; isolated role nodes are reported in graph warnings."
+        ),
+    )
     parser.add_argument("--proximity-contact-distance-mm", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--radiation-reference-temperature-K", type=float, default=293.15)
     parser.add_argument(
@@ -374,6 +383,7 @@ def _build_graph_with_optional_fallback(
         contact_detection_distance_mm=contact_distance_mm,
         component_bounds_mm=_component_bounds_mm(voxel_scene),
         role_components=getattr(args, "role_components", None),
+        role_contact_tolerance_mm=args.role_contact_tolerance_mm,
     )
     return (leaves, graph_result, diagnostics) if include_diagnostics else (leaves, graph_result)
 

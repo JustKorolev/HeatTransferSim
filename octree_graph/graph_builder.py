@@ -86,6 +86,7 @@ def build_graph(
     contact_detection_distance_mm: float = 0.0,
     component_bounds_mm: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
     role_components: list[RoleComponent] | None = None,
+    role_contact_tolerance_mm: float = _ROLE_NODE_CONTACT_TOLERANCE_MM,
 ) -> GraphBuildResult:
     contact_report = contact_report or ContactReport()
     solid = [cell for cell in leaves if not cell.is_empty]
@@ -209,6 +210,7 @@ def build_graph(
         contact_detection_distance_mm,
         connected_node_pairs,
         warnings,
+        role_contact_tolerance_mm,
     )
     return GraphBuildResult(nodes=nodes, edges=edges, warnings=warnings)
 
@@ -413,10 +415,11 @@ def _add_role_node_contact_edges(
     max_gap_mm: float,
     connected_node_pairs: set[tuple[int, int]],
     warnings: list[str],
+    role_contact_tolerance_mm: float,
 ) -> int:
     if not cells or not role_nodes:
         return edge_index
-    search_gap_mm = _ROLE_NODE_CONTACT_TOLERANCE_MM
+    search_gap_mm = max(0.0, float(role_contact_tolerance_mm))
     for role_node in role_nodes:
         contacts: list[tuple[OctreeCell, float, float, float]] = []
         for cell in cells:
@@ -456,14 +459,38 @@ def _add_role_node_contact_edges(
             edge_index += 1
             added_edges += 1
         if added_edges == 0:
+            nearest = _nearest_role_cell_gaps(role_node, cells, limit=3)
+            nearest_text = "; ".join(
+                f"{cell.cell_id} gap={gap_mm:.6g} mm center_distance={distance_mm:.6g} mm"
+                for cell, gap_mm, distance_mm in nearest
+            )
+            nearest_clause = f" Nearest body cells: {nearest_text}." if nearest_text else ""
             warning = (
                 f"Detected {role_node.get('node_type', 'heater/sensor')} role node "
                 f"{role_node.get('node_id')} ({role_node.get('component_name', '?')}) has 0 contact edges; "
-                "it will be thermally isolated in the simulation."
+                f"it will be thermally isolated in the simulation. "
+                f"Role contact tolerance was {search_gap_mm:.6g} mm.{nearest_clause}"
             )
             role_node.setdefault("warnings", []).append(warning)
             warnings.append(warning)
     return edge_index
+
+
+def _nearest_role_cell_gaps(
+    role_node: dict,
+    cells: list[OctreeCell],
+    limit: int = 3,
+) -> list[tuple[OctreeCell, float, float]]:
+    ranked = [
+        (
+            cell,
+            _node_cell_gap_mm(role_node, cell),
+            _node_cell_center_distance_mm(role_node, cell),
+        )
+        for cell in cells
+    ]
+    ranked.sort(key=lambda item: (item[1], item[2], item[0].cell_id))
+    return ranked[: max(0, int(limit))]
 
 
 def _node_cell_contact(
