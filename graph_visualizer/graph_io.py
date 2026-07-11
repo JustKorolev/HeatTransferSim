@@ -205,6 +205,12 @@ def _refresh_octree_auto_geometry(
 ) -> dict[str, np.ndarray]:
     if EdgeMode.normalize(model.metadata.edge_mode) != EdgeMode.AUTO.value:
         return matrices
+    if has_consolidated_role_edges(model):
+        model.octree_graph_data.setdefault("warnings", [])
+        model.octree_graph_data["warnings"].append(
+            "Preserved loaded consolidated heater/sensor conductance edges."
+        )
+        return matrices
     if not model.nodes:
         return matrices
     if any(node.center_mm is None or node.size_mm is None for node in model.nodes.values()):
@@ -219,6 +225,14 @@ def _refresh_octree_auto_geometry(
             "Regenerated auto geometry conductances from loaded material properties."
         )
     return build_matrices(model)
+
+
+def has_consolidated_role_edges(model: ThermalGraphModel) -> bool:
+    return any(
+        str(edge.edge_type) == "consolidated_role_contact"
+        or str(edge.source_metadata) == "voxel_role_consolidation"
+        for edge in model.edges.values()
+    )
 
 
 def _matrix_has_conduction(matrices: dict[str, np.ndarray]) -> bool:
