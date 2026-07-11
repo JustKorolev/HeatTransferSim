@@ -800,6 +800,12 @@ class ThermalGraphModel:
                 merged_tags.update(tag_payload)
                 raw_node["tags"] = merged_tags
             node = NodeProperties.from_dict(raw_node)
+            if node.coord in model.coord_index():
+                node.coord = _unique_loaded_coord(node.node_id, model.coord_index())
+                model.octree_graph_data.setdefault("warnings", [])
+                model.octree_graph_data["warnings"].append(
+                    f"Adjusted duplicate loaded coordinate for node {node.node_id}."
+                )
             model.add_node(node)
         for raw_edge in data.get("graph_edges", []):
             edge = EdgeProperties.from_dict(dict(raw_edge))
@@ -831,6 +837,18 @@ class ThermalGraphModel:
 
 def edge_key(source: int, target: int) -> tuple[int, int]:
     return (min(int(source), int(target)), max(int(source), int(target)))
+
+
+def _unique_loaded_coord(node_id: int, existing: dict[tuple[int, int, int], int]) -> tuple[int, int, int]:
+    base = (int(node_id), 0, 0)
+    if base not in existing:
+        return base
+    offset = 1
+    while True:
+        candidate = (int(node_id), offset, 0)
+        if candidate not in existing:
+            return candidate
+        offset += 1
 
 
 def _parse_controller_gain_matrix(raw: Any) -> dict[int, dict[int, float]]:

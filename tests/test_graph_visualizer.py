@@ -1108,6 +1108,39 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertFalse(sensor.is_heater)
         self.assertTrue(sensor.is_sensor)
 
+    def test_octree_load_adjusts_duplicate_loaded_coords(self) -> None:
+        model = ThermalGraphModel.from_octree_graph_dict(
+            {
+                "metadata": {"graph_name": "duplicate_coords"},
+                "graph_nodes": [
+                    {
+                        "node_id": 1,
+                        "coord": [1, 0, 0],
+                        "component_name": "body",
+                        "material_name": "Copper",
+                        "mass_kg": 0.01,
+                        "C_J_K": 1.0,
+                    },
+                    {
+                        "node_id": 2,
+                        "coord": [1, 0, 0],
+                        "component_name": "heater",
+                        "material_name": "Copper",
+                        "mass_kg": 0.02,
+                        "C_J_K": 2.0,
+                        "is_heater": True,
+                    },
+                ],
+                "graph_edges": [
+                    {"edge_id": "edge_0", "node_i": 1, "node_j": 2, "G_W_K": 0.5}
+                ],
+            }
+        )
+
+        self.assertEqual(set(model.nodes), {1, 2})
+        self.assertNotEqual(model.nodes[1].coord, model.nodes[2].coord)
+        self.assertIn("Adjusted duplicate loaded coordinate", " ".join(model.octree_graph_data["warnings"]))
+
     def test_octree_node_load_promotes_legacy_role_tags(self) -> None:
         node = NodeProperties.from_dict(
             {
