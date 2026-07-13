@@ -134,10 +134,11 @@ def build_graph(
                 "tags": {"notes": ""},
             }
         )
+    role_components = role_components or []
     role_groups = _tag_role_voxel_nodes(
         nodes,
         solid,
-        role_components or [],
+        role_components,
         warnings,
     )
     cell_to_node = {node["cell_id"]: node for node in nodes}
@@ -203,6 +204,36 @@ def build_graph(
         )
     if role_groups:
         nodes, edges = _consolidate_role_voxel_nodes(nodes, edges, role_groups, warnings)
+    missing_role_components = [
+        component
+        for component in role_components
+        if component.name not in role_groups
+    ]
+    if missing_role_components:
+        cell_to_node = {node["cell_id"]: node for node in nodes if node.get("cell_id")}
+        connected_node_pairs = {
+            tuple(sorted((int(edge["node_i"]), int(edge["node_j"]))))
+            for edge in edges
+            if "node_i" in edge and "node_j" in edge
+        }
+        role_contacts = _append_role_nodes(
+            nodes,
+            missing_role_components,
+            contact_report,
+            materials,
+            warnings,
+        )
+        _add_role_node_contact_edges(
+            solid,
+            cell_to_node,
+            role_contacts,
+            edges,
+            len(edges),
+            role_contact_tolerance_mm,
+            connected_node_pairs,
+            warnings,
+            role_contact_tolerance_mm,
+        )
     _attach_sensor_connections_and_pair_roles(
         nodes,
         edges,
@@ -360,7 +391,7 @@ def _tag_role_voxel_nodes(
             continue
         warning = (
             f"Detected {component.kind} CAD component {component.name!r}, but it produced 0 solid voxel cells; "
-            "no heater/sensor graph cells were tagged for that component."
+            "it will be represented as a dedicated CAD role node instead of being dropped."
         )
         warnings.append(warning)
     return {
@@ -671,6 +702,7 @@ def _append_role_nodes(
                 "notes": f"Detected from CAD component {component.name!r}.",
             },
             "source_components": [obj.name for obj in component.objects],
+            "role_source_components": [obj.name for obj in component.objects],
             "source_bounds_mm": {
                 "min": [float(value) for value in component.bounds_mm[0]],
                 "max": [float(value) for value in component.bounds_mm[1]],

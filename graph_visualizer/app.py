@@ -41,7 +41,7 @@ from .models import (
 from .pyvista_widget import GraphPyVistaWidget
 from .role_assignment import (
     assign_matching_nodes_to_role,
-    node_has_heater_sensor_role,
+    node_matches_heater_sensor_filters,
     node_matches_level_filter,
     node_matches_role_substring,
     normalize_role_match_text,
@@ -270,7 +270,8 @@ class GraphVisualizerApp:
         self.filter_component = self.QtWidgets.QComboBox()
         self.filter_level_min = self._int_spin(0, 99, 0)
         self.filter_level_max = self._int_spin(0, 99, 99)
-        self.filter_heater_sensor = self._checkbox("heater or sensor only", False, self._handle_visual_toggle)
+        self.filter_heater = self._checkbox("heaters only", False, self._handle_visual_toggle)
+        self.filter_sensor = self._checkbox("sensors only", False, self._handle_visual_toggle)
         self.filter_boundary = self._checkbox("contact/boundary only", False, self._handle_visual_toggle)
         for combo in (self.filter_material, self.filter_component):
             combo.currentTextChanged.connect(self._handle_visual_toggle)
@@ -280,7 +281,8 @@ class GraphVisualizerApp:
         form.addRow("component", self.filter_component)
         form.addRow("min level", self.filter_level_min)
         form.addRow("max level", self.filter_level_max)
-        form.addRow("", self.filter_heater_sensor)
+        form.addRow("", self.filter_heater)
+        form.addRow("", self.filter_sensor)
         form.addRow("", self.filter_boundary)
         self.left_layout.addWidget(box)
 
@@ -1222,7 +1224,9 @@ class GraphVisualizerApp:
                 "component": self.filter_component.currentText() if hasattr(self, "filter_component") and self.filter_component.count() else "All",
                 "level_min": int(self.filter_level_min.value()) if hasattr(self, "filter_level_min") else 0,
                 "level_max": int(self.filter_level_max.value()) if hasattr(self, "filter_level_max") else 99,
-                "heater_sensor_only": self.filter_heater_sensor.isChecked() if hasattr(self, "filter_heater_sensor") else False,
+                "heater_only": self.filter_heater.isChecked() if hasattr(self, "filter_heater") else False,
+                "sensor_only": self.filter_sensor.isChecked() if hasattr(self, "filter_sensor") else False,
+                "heater_sensor_only": self._role_filters_active(),
                 "boundary_only": self.filter_boundary.isChecked() if hasattr(self, "filter_boundary") else False,
             },
             "dark_mode": self.dark_mode,
@@ -1255,6 +1259,21 @@ class GraphVisualizerApp:
                 self.pair_distance_input.setValue(float(state["max_heater_sensor_pair_distance_mm"]))
             except (TypeError, ValueError):
                 pass
+        filters = state.get("filters", {})
+        if isinstance(filters, dict):
+            old_combined_role_filter = bool(filters.get("heater_sensor_only", False))
+            if hasattr(self, "filter_heater"):
+                self.filter_heater.blockSignals(True)
+                self.filter_heater.setChecked(bool(filters.get("heater_only", old_combined_role_filter)))
+                self.filter_heater.blockSignals(False)
+            if hasattr(self, "filter_sensor"):
+                self.filter_sensor.blockSignals(True)
+                self.filter_sensor.setChecked(bool(filters.get("sensor_only", old_combined_role_filter)))
+                self.filter_sensor.blockSignals(False)
+            if hasattr(self, "filter_boundary") and "boundary_only" in filters:
+                self.filter_boundary.blockSignals(True)
+                self.filter_boundary.setChecked(bool(filters["boundary_only"]))
+                self.filter_boundary.blockSignals(False)
         selected = state.get("selected_node_id")
         try:
             selected_id = int(selected)
@@ -1497,9 +1516,7 @@ class GraphVisualizerApp:
         self._sync_filter_options()
         visible_node_ids = self._filtered_node_ids()
         self._sync_selection_to_visible_nodes(visible_node_ids)
-        self.viewer.set_hover_tooltips_enabled(
-            not (hasattr(self, "filter_heater_sensor") and self.filter_heater_sensor.isChecked())
-        )
+        self.viewer.set_hover_tooltips_enabled(not self._role_filters_active())
         self.viewer.set_toggles(
             self.show_labels.isChecked(),
             self.show_edges.isChecked(),
@@ -1521,7 +1538,7 @@ class GraphVisualizerApp:
         self._refresh_details()
 
     def _sync_selection_to_visible_nodes(self, visible_node_ids: set[int]) -> None:
-        if not hasattr(self, "filter_heater_sensor") or not self.filter_heater_sensor.isChecked():
+        if not self._role_filters_active():
             return
         visible_selection = {node_id for node_id in self.selected_node_ids if node_id in visible_node_ids}
         active_id = self.selected_node_id if self.selected_node_id in visible_selection else None
@@ -1562,6 +1579,8 @@ class GraphVisualizerApp:
         component = self.filter_component.currentText() if self.filter_component.count() else "All"
         min_level = int(self.filter_level_min.value())
         max_level = int(self.filter_level_max.value())
+        heater_only = bool(hasattr(self, "filter_heater") and self.filter_heater.isChecked())
+        sensor_only = bool(hasattr(self, "filter_sensor") and self.filter_sensor.isChecked())
         contact_nodes = {
             endpoint
             for edge in self.model.edges.values()
@@ -1576,12 +1595,18 @@ class GraphVisualizerApp:
                 continue
             if not node_matches_level_filter(node, min_level, max_level):
                 continue
-            if self.filter_heater_sensor.isChecked() and not node_has_heater_sensor_role(node):
+            if not node_matches_heater_sensor_filters(node, heater_only, sensor_only):
                 continue
             if self.filter_boundary.isChecked() and node.confidence == "high" and node_id not in contact_nodes:
                 continue
             visible.add(node_id)
         return visible
+
+    def _role_filters_active(self) -> bool:
+        return bool(
+            (hasattr(self, "filter_heater") and self.filter_heater.isChecked())
+            or (hasattr(self, "filter_sensor") and self.filter_sensor.isChecked())
+        )
 
     def _refresh_details(self) -> None:
         selected_count = len(self.selected_node_ids)

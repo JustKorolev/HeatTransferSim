@@ -362,6 +362,15 @@ class NodeProperties:
         if material_name and "material" not in copied:
             copied["material"] = str(material_name)
         copied.pop("volume_m3", None)
+        center_tuple, center_warning = _finite_vector3(center_mm, field_name="center_mm")
+        size_tuple, size_warning = _finite_vector3(size_mm, field_name="size_mm", positive=True)
+        source_bounds_mm, bounds_warning = _finite_source_bounds(source_bounds_mm)
+        existing_warnings = list(copied.get("warnings", []) or [])
+        for warning in (center_warning, size_warning, bounds_warning):
+            if warning:
+                existing_warnings.append(warning)
+        if existing_warnings:
+            copied["warnings"] = existing_warnings
         radiation = copied.pop("radiation", {}) or {}
         copied.setdefault("is_exposed", bool(radiation.get("is_exposed", False)))
         copied.setdefault("radiating_area_m2", float(radiation.get("radiating_area_m2", 0.0)))
@@ -371,8 +380,8 @@ class NodeProperties:
         copied.pop("dominant_component", None)
         copied.pop("dominant_material", None)
         copied.pop("pos", None)
-        if size_mm is not None and "side_length_m" not in copied:
-            copied["side_length_m"] = max(float(v) for v in size_mm) / 1000.0
+        if size_tuple is not None and "side_length_m" not in copied:
+            copied["side_length_m"] = max(float(v) for v in size_tuple) / 1000.0
         is_sensor_for_migration = bool(copied.get("is_sensor", False))
         old_mode = str(heater_control_data.get("mode", "manual")) if isinstance(heater_control_data, dict) else "manual"
         old_pid = heater_control_data.get("pid", {}) if isinstance(heater_control_data, dict) else {}
@@ -408,13 +417,13 @@ class NodeProperties:
         node = cls(
             node_id=node_id,
             coord=coord,
-            center_mm=tuple(float(v) for v in center_mm) if center_mm is not None else None,
-            size_mm=tuple(float(v) for v in size_mm) if size_mm is not None else None,
+            center_mm=center_tuple,
+            size_mm=size_tuple,
             node_type=node_type,
             source_components=[str(value) for value in source_components],
             source_node_ids=[int(value) for value in source_node_ids],
             role_source_components=[str(value) for value in role_source_components],
-            source_bounds_mm=dict(source_bounds_mm) if isinstance(source_bounds_mm, dict) else {},
+            source_bounds_mm=source_bounds_mm,
             component_name=str(component_name),
             **copied,
         )
@@ -963,6 +972,41 @@ def _optional_float(value: Any) -> float | None:
 def _normalize_sensor_control_mode(value: Any) -> str:
     mode = str(value or "manual").strip().lower()
     return "mimo" if mode in {"mimo", "mimo_pid", "pid"} else "manual"
+
+
+def _finite_vector3(
+    values: Any,
+    *,
+    field_name: str,
+    positive: bool = False,
+) -> tuple[tuple[float, float, float] | None, str]:
+    if values is None:
+        return None, ""
+    try:
+        vector = tuple(float(value) for value in values)
+    except (TypeError, ValueError):
+        return None, f"Ignored invalid {field_name} while loading graph."
+    if len(vector) != 3 or not all(_is_finite(value) for value in vector):
+        return None, f"Ignored non-finite {field_name} while loading graph."
+    if positive and any(value <= 0.0 for value in vector):
+        return None, f"Ignored nonpositive {field_name} while loading graph."
+    return vector, ""
+
+
+def _finite_source_bounds(raw: Any) -> tuple[dict[str, list[float]], str]:
+    if not isinstance(raw, dict) or "min" not in raw or "max" not in raw:
+        return {}, ""
+    mins, min_warning = _finite_vector3(raw.get("min"), field_name="source_bounds_mm.min")
+    maxs, max_warning = _finite_vector3(raw.get("max"), field_name="source_bounds_mm.max")
+    if mins is None or maxs is None:
+        return {}, min_warning or max_warning or "Ignored invalid source_bounds_mm while loading graph."
+    if any(float(lo) > float(hi) for lo, hi in zip(mins, maxs)):
+        return {}, "Ignored inverted source_bounds_mm while loading graph."
+    return {"min": [float(value) for value in mins], "max": [float(value) for value in maxs]}, ""
+
+
+def _is_finite(value: float) -> bool:
+    return value == value and value not in (float("inf"), float("-inf"))
 
 
 def utc_now_iso() -> str:

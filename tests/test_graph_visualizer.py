@@ -38,6 +38,7 @@ from graph_visualizer.models import EdgeMode, GraphMetadata, NodeProperties, The
 from graph_visualizer.role_assignment import (
     assign_matching_nodes_to_role,
     node_has_heater_sensor_role,
+    node_matches_heater_sensor_filters,
     node_matches_level_filter,
     node_matches_role_substring,
     normalize_role_match_text,
@@ -593,6 +594,15 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertTrue(node_has_heater_sensor_role(sensor))
         self.assertFalse(node_has_heater_sensor_role(cooler))
         self.assertFalse(node_has_heater_sensor_role(body))
+
+        self.assertTrue(node_matches_heater_sensor_filters(body, False, False))
+        self.assertTrue(node_matches_heater_sensor_filters(heater, True, False))
+        self.assertFalse(node_matches_heater_sensor_filters(sensor, True, False))
+        self.assertTrue(node_matches_heater_sensor_filters(sensor, False, True))
+        self.assertFalse(node_matches_heater_sensor_filters(heater, False, True))
+        self.assertTrue(node_matches_heater_sensor_filters(heater, True, True))
+        self.assertTrue(node_matches_heater_sensor_filters(sensor, True, True))
+        self.assertFalse(node_matches_heater_sensor_filters(cooler, True, True))
 
     def test_node_connection_counts_reports_total_and_visible_neighbors(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="connection_counts"))
@@ -1269,6 +1279,36 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(set(model.nodes), {1, 2})
         self.assertNotEqual(model.nodes[1].coord, model.nodes[2].coord)
         self.assertIn("Adjusted duplicate loaded coordinate", " ".join(model.octree_graph_data["warnings"]))
+
+    def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
+        model = ThermalGraphModel.from_octree_graph_dict(
+            {
+                "metadata": {"graph_name": "bad_geometry"},
+                "graph_nodes": [
+                    {
+                        "node_id": 5,
+                        "coord": [5, 0, 0],
+                        "center_mm": [0.0, float("nan"), 0.0],
+                        "size_mm": [1.0, float("inf"), 1.0],
+                        "source_bounds_mm": {
+                            "min": [0.0, 0.0, 0.0],
+                            "max": [1.0, float("nan"), 1.0],
+                        },
+                        "component_name": "bad_sensor",
+                        "material_name": "Copper",
+                        "is_sensor": True,
+                    }
+                ],
+                "graph_edges": [],
+            }
+        )
+
+        node = model.nodes[5]
+        self.assertIsNone(node.center_mm)
+        self.assertIsNone(node.size_mm)
+        self.assertEqual(node.source_bounds_mm, {})
+        self.assertIn("non-finite center_mm", " ".join(node.warnings))
+        self.assertIn("non-finite size_mm", " ".join(node.warnings))
 
     def test_octree_node_load_promotes_legacy_role_tags(self) -> None:
         node = NodeProperties.from_dict(

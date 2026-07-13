@@ -74,6 +74,19 @@ def node_has_heater_sensor_role(node: NodeProperties) -> bool:
     return bool(getattr(node, "is_heater", False) or getattr(node, "is_sensor", False))
 
 
+def node_matches_heater_sensor_filters(
+    node: NodeProperties,
+    heater_only: bool,
+    sensor_only: bool,
+) -> bool:
+    if not heater_only and not sensor_only:
+        return True
+    return bool(
+        (heater_only and getattr(node, "is_heater", False))
+        or (sensor_only and getattr(node, "is_sensor", False))
+    )
+
+
 def node_matches_level_filter(node: NodeProperties, min_level: int, max_level: int) -> bool:
     if getattr(node, "is_cad_role_node", False):
         return True

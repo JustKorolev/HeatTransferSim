@@ -218,13 +218,11 @@ class GraphPyVistaWidget:
             if node_id not in visible:
                 continue
             node = model.nodes[node_id]
-            center = np.array(node.center, dtype=float)
-            if node.size_mm is not None:
-                lengths = tuple(max(1.0e-6, float(v)) for v in node.size_mm)
-                marker_side = max(lengths)
-            else:
-                marker_side = max(1.0e-6, float(node.side_length_m))
-                lengths = (marker_side, marker_side, marker_side)
+            geometry = _safe_node_cube_geometry(node)
+            if geometry is None:
+                continue
+            center, lengths = geometry
+            marker_side = max(lengths)
             mesh = self.pv.Cube(
                 center=center,
                 x_length=lengths[0],
@@ -837,13 +835,15 @@ class GraphPyVistaWidget:
         mins = np.array([np.inf, np.inf, np.inf], dtype=float)
         maxs = np.array([-np.inf, -np.inf, -np.inf], dtype=float)
         for node in model.nodes.values():
-            center = np.array(node.center, dtype=float)
-            if node.size_mm is not None:
-                half = np.array(node.size_mm, dtype=float) * 0.5
-            else:
-                half = np.full(3, max(1.0e-6, float(node.side_length_m)) * 0.5)
+            geometry = _safe_node_cube_geometry(node)
+            if geometry is None:
+                continue
+            center, lengths = geometry
+            half = np.array(lengths, dtype=float) * 0.5
             mins = np.minimum(mins, center - half)
             maxs = np.maximum(maxs, center + half)
+        if not np.all(np.isfinite(mins)) or not np.all(np.isfinite(maxs)):
+            return None
         padding = np.maximum(0.5, 0.05 * np.maximum(maxs - mins, 1.0))
         mins -= padding
         maxs += padding
@@ -955,12 +955,10 @@ class GraphPyVistaWidget:
             if node_id not in visible:
                 continue
             node = model.nodes[node_id]
-            center = np.array(node.center, dtype=float)
-            if node.size_mm is not None:
-                lengths = tuple(max(1.0e-6, float(v)) for v in node.size_mm)
-            else:
-                side = max(1.0e-6, float(node.side_length_m))
-                lengths = (side, side, side)
+            geometry = _safe_node_cube_geometry(node)
+            if geometry is None:
+                continue
+            center, lengths = geometry
             half = np.array(lengths, dtype=float) * 0.5
             base = len(points)
             for signs in (
@@ -1405,3 +1403,24 @@ class GraphPyVistaWidget:
             return [int(cleaned[index : index + 2], 16) for index in (0, 2, 4)]
         except ValueError:
             return [88, 166, 255]
+
+
+def _safe_node_cube_geometry(node: Any) -> tuple[np.ndarray, tuple[float, float, float]] | None:
+    try:
+        center = np.asarray(node.center, dtype=float)
+    except Exception:
+        return None
+    if center.shape != (3,) or not np.all(np.isfinite(center)):
+        return None
+    try:
+        if getattr(node, "size_mm", None) is not None:
+            lengths = np.asarray(node.size_mm, dtype=float)
+        else:
+            side = float(getattr(node, "side_length_m", 0.0))
+            lengths = np.array([side, side, side], dtype=float)
+    except Exception:
+        return None
+    if lengths.shape != (3,) or not np.all(np.isfinite(lengths)):
+        return None
+    lengths = np.maximum(lengths, 1.0e-6)
+    return center, tuple(float(value) for value in lengths)

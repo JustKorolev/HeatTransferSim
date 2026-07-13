@@ -541,7 +541,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(edge["edge_type"], "consolidated_role_contact")
         self.assertGreater(edge["G_W_K"], 0.0)
 
-    def test_graph_build_warns_when_detected_role_component_has_no_voxel_cells(self) -> None:
+    def test_graph_build_adds_dedicated_role_node_when_detected_component_has_no_voxel_cells(self) -> None:
         materials = self.make_materials()
         leaves = [
             OctreeCell(
@@ -571,9 +571,54 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             role_components=[role_component],
         )
 
-        self.assertEqual(len(result.nodes), 1)
-        self.assertFalse(any(node["is_heater"] for node in result.nodes))
+        self.assertEqual(len(result.nodes), 2)
+        heater_nodes = [node for node in result.nodes if node["is_heater"]]
+        self.assertEqual(len(heater_nodes), 1)
+        self.assertEqual(heater_nodes[0]["component_name"], "heater_strip")
+        self.assertEqual(heater_nodes[0]["source_components"], ["heater_strip_1"])
+        self.assertEqual(heater_nodes[0]["role_source_components"], ["heater_strip_1"])
+        self.assertEqual(result.edges, [])
         self.assertIn("produced 0 solid voxel cells", warnings[0])
+        self.assertIn("0 contact edges", " ".join(warnings))
+
+    def test_graph_build_connects_dedicated_sensor_node_to_contacting_body_cell(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"body_panel": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="body_panel",
+                dominant_material="Copper",
+                confidence="high",
+            )
+        ]
+        sensor_obj = _mesh_object("temperature_probe_A", "Copper", [4.0, -2.0, -2.0], [6.0, 2.0, 2.0])
+        role_component = RoleComponent(name="temperature_probe", kind="sensor", objects=[sensor_obj])
+        warnings: list[str] = []
+
+        result = build_graph(
+            leaves,
+            ContactReport(),
+            materials,
+            warnings=warnings,
+            role_components=[role_component],
+        )
+
+        sensor_nodes = [node for node in result.nodes if node["is_sensor"]]
+        self.assertEqual(len(sensor_nodes), 1)
+        sensor = sensor_nodes[0]
+        self.assertEqual(sensor["component_name"], "temperature_probe")
+        self.assertEqual(sensor["source_components"], ["temperature_probe_A"])
+        self.assertEqual(len(result.edges), 1)
+        self.assertEqual({result.edges[0]["node_i"], result.edges[0]["node_j"]}, {0, sensor["node_id"]})
+        self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
+        self.assertGreater(result.edges[0]["G_W_K"], 0.0)
 
     def test_graph_build_adds_near_contact_edges_for_near_face_cells(self) -> None:
         materials = self.make_materials()
