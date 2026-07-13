@@ -1273,6 +1273,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
                 "C_J_K": 3.85,
                 "source_components": ["heater_strip_1"],
                 "source_node_ids": [2, 8],
+                "source_cell_ids": ["cell_heater_left", "cell_heater_right"],
                 "role_source_components": ["heater_strip_1", "heater_strip_2"],
             }
         )
@@ -1282,6 +1283,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(node.node_type, "heater")
         self.assertEqual(node.component_name, "heater_strip")
         self.assertEqual(node.source_node_ids, [2, 8])
+        self.assertEqual(node.source_cell_ids, ["cell_heater_left", "cell_heater_right"])
         self.assertEqual(node.role_source_components, ["heater_strip_1", "heater_strip_2"])
         self.assertTrue(node.is_heater)
         self.assertFalse(node.is_sensor)
@@ -1292,6 +1294,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertTrue(saved["is_heater"])
         self.assertFalse(saved["is_sensor"])
         self.assertEqual(saved["source_node_ids"], [2, 8])
+        self.assertEqual(saved["source_cell_ids"], ["cell_heater_left", "cell_heater_right"])
         self.assertEqual(saved["role_source_components"], ["heater_strip_1", "heater_strip_2"])
         self.assertNotIn("heater", saved["tags"])
         self.assertNotIn("sensor", saved["tags"])

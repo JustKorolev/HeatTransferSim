@@ -620,11 +620,11 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
         self.assertGreater(result.edges[0]["G_W_K"], 0.0)
 
-    def test_graph_build_embedded_sensor_uses_contacting_heater_body_neighbors(self) -> None:
+    def test_graph_build_embedded_sensor_uses_consolidated_heater_body_neighbors(self) -> None:
         materials = self.make_materials()
         leaves = [
             OctreeCell(
-                cell_id="cell_heater",
+                cell_id="cell_heater_left",
                 parent_id=None,
                 children_ids=[],
                 level=0,
@@ -633,6 +633,19 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
                 occupancy={"heater_strip_1": 1.0},
                 material_fractions={"Copper": 1.0},
                 dominant_component="heater_strip_1",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_heater_right",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(-10.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"heater_strip_2": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="heater_strip_2",
                 dominant_material="Copper",
                 confidence="high",
             ),
@@ -651,8 +664,9 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             ),
         ]
         heater_obj = _mesh_object("heater_strip_1", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        heater_obj_2 = _mesh_object("heater_strip_2", "Copper", [-15.0, -5.0, -5.0], [-5.0, 5.0, 5.0])
         sensor_obj = _mesh_object("temperature_probe_A", "Copper", [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
-        heater_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj])
+        heater_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj, heater_obj_2])
         sensor_component = RoleComponent(name="temperature_probe", kind="sensor", objects=[sensor_obj])
         warnings: list[str] = []
 
@@ -670,6 +684,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(len(sensors), 1)
         self.assertEqual(len(heaters), 1)
         self.assertEqual(len(bodies), 1)
+        self.assertEqual(sorted(heaters[0]["source_cell_ids"]), ["cell_heater_left", "cell_heater_right"])
         self.assertEqual(sensors[0]["sensor_connected_node_ids"], [bodies[0]["node_id"]])
         self.assertTrue(sensors[0]["sensor_valid"])
         self.assertEqual(heaters[0]["assigned_sensor_id"], sensors[0]["node_id"])

@@ -147,6 +147,7 @@ class NodeProperties:
     node_type: str = ""
     source_components: list[str] = field(default_factory=list)
     source_node_ids: list[int] = field(default_factory=list)
+    source_cell_ids: list[str] = field(default_factory=list)
     role_source_components: list[str] = field(default_factory=list)
     source_bounds_mm: dict[str, Any] = field(default_factory=dict)
     center_mm: tuple[float, float, float] | None = None
@@ -234,6 +235,7 @@ class NodeProperties:
         node_type = str(copied.pop("node_type", ""))
         source_components = copied.pop("source_components", []) or []
         source_node_ids = copied.pop("source_node_ids", []) or []
+        source_cell_ids = copied.pop("source_cell_ids", []) or []
         role_source_components = copied.pop("role_source_components", []) or []
         source_bounds_mm = copied.pop("source_bounds_mm", {}) or {}
         is_heater_value = copied.pop("is_heater", None)
@@ -429,6 +431,7 @@ class NodeProperties:
             node_type=node_type,
             source_components=[str(value) for value in source_components],
             source_node_ids=[int(value) for value in source_node_ids],
+            source_cell_ids=[str(value) for value in source_cell_ids],
             role_source_components=[str(value) for value in role_source_components],
             source_bounds_mm=source_bounds_mm,
             component_name=str(component_name),
@@ -530,6 +533,8 @@ class NodeProperties:
             data["source_components"] = list(self.source_components)
         if self.source_node_ids:
             data["source_node_ids"] = [int(value) for value in self.source_node_ids]
+        if self.source_cell_ids:
+            data["source_cell_ids"] = [str(value) for value in self.source_cell_ids]
         if self.role_source_components:
             data["role_source_components"] = list(self.role_source_components)
         if self.source_bounds_mm:

@@ -210,7 +210,7 @@ def build_graph(
         if component.name not in role_groups
     ]
     if missing_role_components:
-        cell_to_node = {node["cell_id"]: node for node in nodes if node.get("cell_id")}
+        cell_to_node = _cell_to_node_lookup(nodes)
         connected_node_pairs = {
             tuple(sorted((int(edge["node_i"]), int(edge["node_j"]))))
             for edge in edges
@@ -484,6 +484,7 @@ def _make_consolidated_role_node(node_id: int, component: RoleComponent, group_n
         "tags": {"notes": notes},
         "source_components": source_components,
         "source_node_ids": [int(node["node_id"]) for node in group_nodes],
+        "source_cell_ids": [str(node["cell_id"]) for node in group_nodes if node.get("cell_id")],
         "source_bounds_mm": {
             "min": [float(value) for value in mins],
             "max": [float(value) for value in maxs],
@@ -532,6 +533,17 @@ def _rewrite_edges_for_consolidated_roles(
     for index, edge in enumerate(rewritten):
         edge["edge_id"] = f"edge_{index}"
     return rewritten
+
+
+def _cell_to_node_lookup(nodes: list[dict]) -> dict[str, dict]:
+    lookup: dict[str, dict] = {}
+    for node in nodes:
+        cell_id = node.get("cell_id")
+        if cell_id:
+            lookup[str(cell_id)] = node
+        for source_cell_id in node.get("source_cell_ids", []) or []:
+            lookup[str(source_cell_id)] = node
+    return lookup
 
 
 def _attach_sensor_connections_and_pair_roles(
@@ -708,8 +720,10 @@ def _append_role_nodes(
 ) -> list[tuple[dict, RoleComponent]]:
     role_contacts: list[tuple[dict, RoleComponent]] = []
     known_materials = set(materials)
+    next_node_id = max((int(node.get("node_id", -1)) for node in nodes), default=-1) + 1
     for component in components:
-        node_id = len(nodes)
+        node_id = next_node_id
+        next_node_id += 1
         material_name = _role_component_material_name(component, contact_report, known_materials)
         material = resolve_material(material_name, materials, warnings)
         center_mm = component.center_mm
