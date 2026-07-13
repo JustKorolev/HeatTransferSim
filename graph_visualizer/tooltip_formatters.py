@@ -42,10 +42,6 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
     ]
     if getattr(attrs, "is_heater", False):
         heater = getattr(attrs, "heater", None)
-        control = getattr(attrs, "heater_control", None)
-        pid = getattr(control, "pid", None)
-        manual = getattr(control, "manual", None)
-        state = getattr(control, "pid_state", None)
         lines.extend(
             [
                 "-- heater --",
@@ -53,16 +49,8 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"heater min: {_fmt(getattr(heater, 'heater_min_power_W', None))} W",
                 f"heater max: {_fmt(getattr(heater, 'heater_max_power_W', None))} W",
                 f"efficiency: {_fmt(getattr(heater, 'heater_efficiency', None))}",
-                f"control mode: {getattr(control, 'mode', '?')}",
-                f"manual power: {_fmt(getattr(manual, 'power', None))} W",
-                f"PID kp: {_fmt(getattr(pid, 'kp', None))}",
-                f"PID ki: {_fmt(getattr(pid, 'ki', None))}",
-                f"PID kd: {_fmt(getattr(pid, 'kd', None))}",
-                f"PID lambda: {_fmt(getattr(pid, 'lambda_order', None))}",
-                f"PID mu: {_fmt(getattr(pid, 'mu_order', None))}",
-                f"PID setpoint: {_fmt(getattr(pid, 'setpoint', None))} K",
-                f"PID integral: {_fmt(getattr(state, 'integral', None))}",
-                f"PID prev error: {_fmt(getattr(state, 'previous_error', None))} K",
+                f"assigned sensor: {getattr(attrs, 'assigned_sensor_id', None) or '?'}",
+                f"pair gap: {_fmt(getattr(attrs, 'sensor_pair_distance_mm', None))} mm",
             ]
         )
     if getattr(attrs, "is_sensor", False):
@@ -74,9 +62,16 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"noise: {_fmt(getattr(sensor, 'sensor_noise_std_K', None))} K",
                 f"bias: {_fmt(getattr(sensor, 'sensor_bias_K', None))} K",
                 f"tau: {_fmt(getattr(sensor, 'sensor_time_constant_s', None))} s",
-                f"MIMO setpoint: {_fmt(getattr(attrs, 'controller_setpoint_K', None))} K",
-                f"MIMO weight: {_fmt(getattr(attrs, 'controller_weight', None))}",
-                f"MIMO settling: {_fmt(getattr(attrs, 'sensor_settling_time_s', None))} s",
+                f"assigned heater: {getattr(attrs, 'assigned_heater_id', None) or '?'}",
+                f"pair gap: {_fmt(getattr(attrs, 'sensor_pair_distance_mm', None))} mm",
+                f"connected nodes: {len(getattr(attrs, 'sensor_connected_node_ids', []) or [])}",
+                f"monitor-only: {'yes' if getattr(attrs, 'sensor_monitor_only', False) else 'no'}",
+                f"valid: {'yes' if getattr(attrs, 'sensor_valid', True) else 'no'}",
+                f"control mode: {getattr(attrs, 'sensor_control_mode', '?')}",
+                f"manual power: {_fmt(getattr(attrs, 'sensor_manual_power_W', None))} W",
+                f"setpoint: {_fmt(getattr(attrs, 'controller_setpoint_K', None))} K",
+                f"weight: {_fmt(getattr(attrs, 'controller_weight', None))}",
+                f"settling: {_fmt(getattr(attrs, 'sensor_settling_time_s', None))} s",
                 f"coarse kP: {_fmt(getattr(attrs, 'controller_kp_coarse', None))}",
                 f"coarse kI: {_fmt(getattr(attrs, 'controller_ki_coarse', None))}",
                 f"coarse kD: {_fmt(getattr(attrs, 'controller_kd_coarse', None))}",

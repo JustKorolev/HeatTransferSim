@@ -176,6 +176,14 @@ class NodeProperties:
     heater_control: HeaterControl = field(default_factory=HeaterControl)
     is_sensor: bool = False
     sensor: SensorProperties = field(default_factory=SensorProperties)
+    assigned_sensor_id: int | None = None
+    assigned_heater_id: int | None = None
+    sensor_pair_distance_mm: float | None = None
+    sensor_connected_node_ids: list[int] = field(default_factory=list)
+    sensor_monitor_only: bool = False
+    sensor_valid: bool = True
+    sensor_control_mode: str = "manual"
+    sensor_manual_power_W: float = 0.0
     has_cryocooler: bool = False
     controller_setpoint_K: float = 293.15
     controller_weight: float = 0.0
@@ -238,6 +246,11 @@ class NodeProperties:
         heater_control_data = copied.pop("heater_control", copied.pop("heaterControl", {}) or {}) or {}
         sensor_data = copied.pop("sensor", {}) or {}
         controller_data = copied.pop("controller", copied.pop("mimo_controller", {}) or {}) or {}
+        raw_had_sensor_control_mode = "sensor_control_mode" in copied
+        raw_had_controller_setpoint = (
+            "controller_setpoint_K" in copied
+            or (isinstance(controller_data, dict) and ("setpoint_K" in controller_data or "setpoint" in controller_data))
+        )
         if isinstance(controller_data, dict):
             copied.setdefault(
                 "controller_setpoint_K",
@@ -360,6 +373,38 @@ class NodeProperties:
         copied.pop("pos", None)
         if size_mm is not None and "side_length_m" not in copied:
             copied["side_length_m"] = max(float(v) for v in size_mm) / 1000.0
+        is_sensor_for_migration = bool(copied.get("is_sensor", False))
+        old_mode = str(heater_control_data.get("mode", "manual")) if isinstance(heater_control_data, dict) else "manual"
+        old_pid = heater_control_data.get("pid", {}) if isinstance(heater_control_data, dict) else {}
+        old_manual = heater_control_data.get("manual", {}) if isinstance(heater_control_data, dict) else {}
+        if is_sensor_for_migration and not raw_had_sensor_control_mode:
+            has_controller_gains = any(
+                float(copied.get(key, 0.0) or 0.0) > 0.0
+                for key in (
+                    "controller_weight",
+                    "controller_kp_coarse",
+                    "controller_ki_coarse",
+                    "controller_kd_coarse",
+                    "controller_kp_hold",
+                    "controller_ki_hold",
+                    "controller_kd_hold",
+                )
+            )
+            copied["sensor_control_mode"] = "mimo" if old_mode == "mimo" or has_controller_gains else "manual"
+        copied["sensor_control_mode"] = _normalize_sensor_control_mode(copied.get("sensor_control_mode", "manual"))
+        if is_sensor_for_migration and not raw_had_controller_setpoint and isinstance(old_pid, dict):
+            if "setpoint" in old_pid:
+                copied["controller_setpoint_K"] = float(old_pid.get("setpoint", copied.get("controller_setpoint_K", 293.15)))
+        if "sensor_manual_power_W" not in copied and isinstance(old_manual, dict):
+            copied["sensor_manual_power_W"] = float(old_manual.get("power", 0.0))
+        copied["assigned_sensor_id"] = _optional_int(copied.get("assigned_sensor_id"))
+        copied["assigned_heater_id"] = _optional_int(copied.get("assigned_heater_id"))
+        copied["sensor_pair_distance_mm"] = _optional_float(copied.get("sensor_pair_distance_mm"))
+        copied["sensor_connected_node_ids"] = [
+            int(value)
+            for value in (copied.get("sensor_connected_node_ids", []) or [])
+            if _can_int(value)
+        ]
         node = cls(
             node_id=node_id,
             coord=coord,
@@ -473,6 +518,18 @@ class NodeProperties:
             data["role_source_components"] = list(self.role_source_components)
         if self.source_bounds_mm:
             data["source_bounds_mm"] = dict(self.source_bounds_mm)
+        if self.assigned_sensor_id is not None:
+            data["assigned_sensor_id"] = int(self.assigned_sensor_id)
+        if self.assigned_heater_id is not None:
+            data["assigned_heater_id"] = int(self.assigned_heater_id)
+        if self.sensor_pair_distance_mm is not None:
+            data["sensor_pair_distance_mm"] = float(self.sensor_pair_distance_mm)
+        if self.sensor_connected_node_ids:
+            data["sensor_connected_node_ids"] = [int(value) for value in self.sensor_connected_node_ids]
+        data["sensor_monitor_only"] = bool(self.sensor_monitor_only)
+        data["sensor_valid"] = bool(self.sensor_valid)
+        data["sensor_control_mode"] = _normalize_sensor_control_mode(self.sensor_control_mode)
+        data["sensor_manual_power_W"] = float(self.sensor_manual_power_W)
         return data
 
     @property
@@ -874,6 +931,38 @@ def _parse_controller_gain_matrix(raw: Any) -> dict[int, dict[int, float]]:
         if row:
             parsed[sensor_id] = row
     return parsed
+
+
+def _can_int(value: Any) -> bool:
+    try:
+        int(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number else None
+
+
+def _normalize_sensor_control_mode(value: Any) -> str:
+    mode = str(value or "manual").strip().lower()
+    return "mimo" if mode in {"mimo", "mimo_pid", "pid"} else "manual"
 
 
 def utc_now_iso() -> str:

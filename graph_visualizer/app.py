@@ -46,6 +46,12 @@ from .role_assignment import (
     node_matches_role_substring,
     normalize_role_match_text,
 )
+from .role_pairing import (
+    DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM,
+    assign_heater_to_sensor,
+    recompute_heater_sensor_pairing,
+    refresh_sensor_connected_nodes,
+)
 from .tooltip_formatters import format_node_tooltip
 from .two_d_graph_widget import TwoDGraphWidget
 from .validation import raise_if_errors, validate_model
@@ -364,30 +370,14 @@ class GraphVisualizerApp:
         self.inputs["heater_efficiency"] = self._double_spin(0.0, 1.0e6, 1.0, 0.05)
         for key in ("heater_id", "heater_min_power_W", "heater_max_power_W", "heater_efficiency"):
             heater_form.addRow(key, self.inputs[key])
-        self.inputs["heater_mode_pid"] = self.QtWidgets.QRadioButton("PID control (per cell)")
-        self.inputs["heater_mode_mimo"] = self.QtWidgets.QRadioButton("MIMO PID")
-        self.inputs["heater_mode_manual"] = self.QtWidgets.QRadioButton("Manual override")
-        self.heater_mode_group = self.QtWidgets.QButtonGroup(self.window)
-        self.heater_mode_group.setExclusive(True)
-        self.heater_mode_group.addButton(self.inputs["heater_mode_pid"])
-        self.heater_mode_group.addButton(self.inputs["heater_mode_mimo"])
-        self.heater_mode_group.addButton(self.inputs["heater_mode_manual"])
-        self.inputs["heater_mode_manual"].setChecked(True)
-        self.inputs["heater_mode_pid"].toggled.connect(self._handle_heater_mode_change)
-        self.inputs["heater_mode_mimo"].toggled.connect(self._handle_heater_mode_change)
-        self.inputs["heater_mode_manual"].toggled.connect(self._handle_heater_mode_change)
-        heater_form.addRow("control", self.inputs["heater_mode_pid"])
-        heater_form.addRow("", self.inputs["heater_mode_mimo"])
-        heater_form.addRow("", self.inputs["heater_mode_manual"])
-        self.inputs["heater_pid_kp"] = self._double_spin(-1.0e12, 1.0e12, 0.0, 0.1)
-        self.inputs["heater_pid_ki"] = self._double_spin(-1.0e12, 1.0e12, 0.0, 0.1)
-        self.inputs["heater_pid_kd"] = self._double_spin(-1.0e12, 1.0e12, 0.0, 0.1)
-        self.inputs["heater_pid_lambda_order"] = self._double_spin(0.0, 2.0, 1.0, 0.05)
-        self.inputs["heater_pid_mu_order"] = self._double_spin(0.0, 2.0, 1.0, 0.05)
-        self.inputs["heater_pid_setpoint"] = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
-        self.inputs["heater_manual_power"] = self._double_spin(0.0, 1.0e9, 0.0, 1.0)
+        self.heater_assigned_sensor_combo = self.QtWidgets.QComboBox()
+        self.heater_assigned_sensor_combo.currentIndexChanged.connect(self._handle_assigned_sensor_changed)
+        heater_form.addRow("assigned sensor", self.heater_assigned_sensor_combo)
+        self.heater_pair_label = self.QtWidgets.QLabel("")
+        heater_form.addRow("pair", self.heater_pair_label)
         self.inputs["controller_setpoint_K"] = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
         self.inputs["controller_weight"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
+        self.inputs["sensor_manual_power_W"] = self._double_spin(0.0, 1.0e9, 0.0, 1.0)
         self.inputs["sensor_settling_time_s"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
         self.inputs["controller_kp_coarse"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
         self.inputs["controller_ki_coarse"] = self._double_spin(0.0, 1.0e9, 0.0, 0.01)
@@ -400,17 +390,6 @@ class GraphVisualizerApp:
         self.inputs["sensor_settling_time_s"].setToolTip(
             "MIMO sensor settling time used for lag compensation. For a first-order sensor, settling time is roughly 5*tau."
         )
-        self.inputs["heater_pid_setpoint"].valueChanged.connect(self._handle_heater_setpoint_change)
-        for key in (
-            "heater_pid_kp",
-            "heater_pid_ki",
-            "heater_pid_kd",
-            "heater_pid_lambda_order",
-            "heater_pid_mu_order",
-            "heater_pid_setpoint",
-            "heater_manual_power",
-        ):
-            heater_form.addRow(key, self.inputs[key])
 
         self.inputs["is_sensor"] = self._checkbox("is sensor", False, self._update_optional_sections)
         self.inputs["is_sensor"].setVisible(False)
@@ -430,18 +409,36 @@ class GraphVisualizerApp:
             ("time constant tau s", "sensor_time_constant_s"),
         ):
             sensor_form.addRow(label, self.inputs[key])
+        self.sensor_assigned_heater_label = self.QtWidgets.QLabel("")
+        self.sensor_connected_count_label = self.QtWidgets.QLabel("")
+        self.sensor_monitor_label = self.QtWidgets.QLabel("")
+        sensor_form.addRow("assigned heater", self.sensor_assigned_heater_label)
+        sensor_form.addRow("connected nodes", self.sensor_connected_count_label)
+        sensor_form.addRow("status", self.sensor_monitor_label)
+        self.inputs["sensor_mode_manual"] = self.QtWidgets.QRadioButton("Manual")
+        self.inputs["sensor_mode_mimo"] = self.QtWidgets.QRadioButton("MIMO PID")
+        self.sensor_mode_group = self.QtWidgets.QButtonGroup(self.window)
+        self.sensor_mode_group.setExclusive(True)
+        self.sensor_mode_group.addButton(self.inputs["sensor_mode_manual"])
+        self.sensor_mode_group.addButton(self.inputs["sensor_mode_mimo"])
+        self.inputs["sensor_mode_manual"].setChecked(True)
+        self.inputs["sensor_mode_manual"].toggled.connect(self._handle_sensor_mode_change)
+        self.inputs["sensor_mode_mimo"].toggled.connect(self._handle_sensor_mode_change)
+        sensor_form.addRow("control", self.inputs["sensor_mode_manual"])
+        sensor_form.addRow("", self.inputs["sensor_mode_mimo"])
+        sensor_form.addRow("manual power W", self.inputs["sensor_manual_power_W"])
         for label, key in (
-            ("MIMO setpoint K", "controller_setpoint_K"),
-            ("MIMO sensor weight", "controller_weight"),
-            ("MIMO settling time s", "sensor_settling_time_s"),
-            ("MIMO coarse kP", "controller_kp_coarse"),
-            ("MIMO coarse kI", "controller_ki_coarse"),
-            ("MIMO coarse kD", "controller_kd_coarse"),
-            ("MIMO hold kP", "controller_kp_hold"),
-            ("MIMO hold kI", "controller_ki_hold"),
-            ("MIMO hold kD", "controller_kd_hold"),
-            ("MIMO lambda", "controller_lambda_order"),
-            ("MIMO mu", "controller_mu_order"),
+            ("setpoint K", "controller_setpoint_K"),
+            ("sensor weight", "controller_weight"),
+            ("settling time s", "sensor_settling_time_s"),
+            ("coarse kP", "controller_kp_coarse"),
+            ("coarse kI", "controller_ki_coarse"),
+            ("coarse kD", "controller_kd_coarse"),
+            ("hold kP", "controller_kp_hold"),
+            ("hold kI", "controller_ki_hold"),
+            ("hold kD", "controller_kd_hold"),
+            ("lambda", "controller_lambda_order"),
+            ("mu", "controller_mu_order"),
         ):
             sensor_form.addRow(label, self.inputs[key])
 
@@ -489,6 +486,13 @@ class GraphVisualizerApp:
         button = self.QtWidgets.QPushButton("Assign Matching Cells")
         button.clicked.connect(self.apply_bulk_role_assignment)
         layout.addWidget(button)
+        pair_form = self.QtWidgets.QFormLayout()
+        self.pair_distance_input = self._double_spin(0.0, 1.0e9, DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM, 1.0)
+        pair_form.addRow("max pair gap mm", self.pair_distance_input)
+        layout.addLayout(pair_form)
+        pair_button = self.QtWidgets.QPushButton("Recompute Heater-Sensor Pairs")
+        pair_button.clicked.connect(self.recompute_heater_sensor_pairs)
+        layout.addWidget(pair_button)
         self.left_layout.addWidget(box)
 
     def _build_details_panel(self) -> None:
@@ -568,17 +572,11 @@ class GraphVisualizerApp:
             "heater_min_power_W",
             "heater_max_power_W",
             "heater_efficiency",
-            "heater_pid_kp",
-            "heater_pid_ki",
-            "heater_pid_kd",
-            "heater_pid_lambda_order",
-            "heater_pid_mu_order",
-            "heater_manual_power",
-            "heater_pid_setpoint",
             "sensor_id",
             "sensor_noise_std_K",
             "sensor_bias_K",
             "sensor_time_constant_s",
+            "sensor_manual_power_W",
             "controller_setpoint_K",
             "controller_weight",
             "sensor_settling_time_s",
@@ -605,6 +603,88 @@ class GraphVisualizerApp:
             target_ids = [int(self.selected_node_id)]
         return target_ids
 
+    def _selected_assigned_sensor_id(self) -> int | None:
+        combo = getattr(self, "heater_assigned_sensor_combo", None)
+        if combo is None:
+            return None
+        value = combo.currentData()
+        return None if value in (None, "") else int(value)
+
+    def _populate_assigned_sensor_combo(self, node: NodeProperties) -> None:
+        combo = getattr(self, "heater_assigned_sensor_combo", None)
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("None", None)
+        for sensor_id, sensor in sorted(self.model.nodes.items(), key=lambda item: int(item[0])):
+            if not sensor.is_sensor:
+                continue
+            name = sensor.component_name or f"sensor {sensor_id}"
+            status = "invalid" if not sensor.sensor_valid else "monitor" if sensor.sensor_monitor_only else "paired"
+            combo.addItem(f"{sensor_id}: {name} ({status})", int(sensor_id))
+        assigned = getattr(node, "assigned_sensor_id", None)
+        index = 0
+        if assigned is not None:
+            for candidate in range(combo.count()):
+                if combo.itemData(candidate) == int(assigned):
+                    index = candidate
+                    break
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+
+    def _sync_pairing_labels(self, node: NodeProperties) -> None:
+        if hasattr(self, "heater_pair_label"):
+            assigned = getattr(node, "assigned_sensor_id", None)
+            distance = getattr(node, "sensor_pair_distance_mm", None)
+            self.heater_pair_label.setText(
+                "unpaired"
+                if assigned is None
+                else f"sensor {int(assigned)}, gap {float(distance or 0.0):.3g} mm"
+            )
+        if hasattr(self, "sensor_assigned_heater_label"):
+            assigned = getattr(node, "assigned_heater_id", None)
+            distance = getattr(node, "sensor_pair_distance_mm", None)
+            self.sensor_assigned_heater_label.setText(
+                "unpaired"
+                if assigned is None
+                else f"heater {int(assigned)}, gap {float(distance or 0.0):.3g} mm"
+            )
+        if hasattr(self, "sensor_connected_count_label"):
+            self.sensor_connected_count_label.setText(str(len(getattr(node, "sensor_connected_node_ids", []) or [])))
+        if hasattr(self, "sensor_monitor_label"):
+            if not bool(getattr(node, "sensor_valid", True)):
+                text = "invalid: no connected body nodes"
+            elif bool(getattr(node, "sensor_monitor_only", False)):
+                text = "monitor-only"
+            else:
+                text = "controlled"
+            self.sensor_monitor_label.setText(text)
+
+    def _handle_assigned_sensor_changed(self, *_: Any) -> None:
+        if self._building_form or self.selected_node_id is None:
+            return
+        node = self.model.nodes.get(int(self.selected_node_id))
+        if node is None or not node.is_heater:
+            return
+        try:
+            warnings = assign_heater_to_sensor(self.model, int(node.node_id), self._selected_assigned_sensor_id())
+        except ValueError as exc:
+            self._set_status(str(exc), error=True)
+            return
+        self._mark_dirty()
+        self._load_node_into_form(self.model.nodes[int(node.node_id)])
+        self._refresh_all(reset_camera=False)
+        self._sync_simulation_from_editor(reinitialize=True)
+        self._set_status("; ".join(warnings[:2]) if warnings else "Updated heater/sensor pairing.")
+
+    def _handle_sensor_mode_change(self, *_: Any) -> None:
+        if self._building_form:
+            self._sync_heater_control_enabled()
+            return
+        self._sync_heater_control_enabled()
+        self._handle_node_form_changed()
+
     def _apply_node_template_to_existing_node(self, target_id: int, template: NodeProperties) -> None:
         target = self.model.nodes[target_id]
         existing_heater_id = target.heater.heater_id or target.node_id
@@ -615,13 +695,17 @@ class GraphVisualizerApp:
             target.heater = deepcopy(template.heater)
             if target_id != self.selected_node_id:
                 target.heater.heater_id = existing_heater_id
-            target.heater_control = deepcopy(template.heater_control)
+            target.assigned_sensor_id = template.assigned_sensor_id
+            target.sensor_pair_distance_mm = template.sensor_pair_distance_mm
         else:
             target.heater_control.reset_pid_state()
+            target.assigned_sensor_id = None
         if target.is_sensor:
             target.sensor = deepcopy(template.sensor)
             if target_id != self.selected_node_id:
                 target.sensor.sensor_id = existing_sensor_id
+            target.sensor_control_mode = template.sensor_control_mode
+            target.sensor_manual_power_W = template.sensor_manual_power_W
         target.has_cryocooler = bool(template.has_cryocooler)
         target.controller_setpoint_K = template.controller_setpoint_K
         target.controller_weight = template.controller_weight
@@ -648,6 +732,7 @@ class GraphVisualizerApp:
         if not matched:
             self._set_status(f"No cells matched substring {substring!r}.", error=True)
             return
+        refresh_sensor_connected_nodes(self.model)
         self.model.prune_controller_gain_matrix()
         self._mark_dirty()
         if self.selected_node_id in self.model.nodes:
@@ -658,6 +743,38 @@ class GraphVisualizerApp:
         self._set_status(
             f"Assigned {len(matched)} existing cell(s) as {label}s from substring {substring!r}."
         )
+
+    def recompute_heater_sensor_pairs(self) -> None:
+        distance = (
+            float(self.pair_distance_input.value())
+            if hasattr(self, "pair_distance_input")
+            else DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM
+        )
+        warnings = recompute_heater_sensor_pairing(self.model, distance)
+        self.model.octree_graph_data.setdefault("parameters", {})
+        self.model.octree_graph_data["parameters"]["max_heater_sensor_pair_distance_mm"] = float(distance)
+        self._mark_dirty()
+        if self.selected_node_id in self.model.nodes:
+            self._load_node_into_form(self.model.nodes[int(self.selected_node_id)])
+        self._refresh_all(reset_camera=False)
+        self._sync_simulation_from_editor(reinitialize=True)
+        heaters = [node for node in self.model.nodes.values() if node.is_heater]
+        sensors = [node for node in self.model.nodes.values() if node.is_sensor]
+        paired = sum(1 for node in heaters if node.assigned_sensor_id is not None)
+        message = f"Paired {paired}/{len(heaters)} heater(s) to {len(sensors)} sensor(s)."
+        if warnings:
+            message += " " + "; ".join(warnings[:2])
+        self._set_status(message, error=bool(warnings and paired == 0))
+
+    def _sync_pair_distance_from_model(self) -> None:
+        if not hasattr(self, "pair_distance_input"):
+            return
+        params = self.model.octree_graph_data.get("parameters", {}) if self.model.octree_graph_data else {}
+        value = params.get("max_heater_sensor_pair_distance_mm", DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM)
+        try:
+            self.pair_distance_input.setValue(float(value))
+        except (TypeError, ValueError):
+            self.pair_distance_input.setValue(DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM)
 
     def _visual_tag_snapshot(self, node_ids: list[int]) -> tuple[tuple[int, bool, bool, bool], ...]:
         return tuple(
@@ -693,30 +810,7 @@ class GraphVisualizerApp:
         while self.controller_gain_form.rowCount():
             self.controller_gain_form.removeRow(0)
         self.controller_gain_inputs = {}
-        active_id = self.selected_node_id
-        if active_id is None or active_id not in self.model.nodes:
-            self.controller_gain_box.setVisible(False)
-            return
-        active_node = self.model.nodes[int(active_id)]
-        if not active_node.is_sensor:
-            self.controller_gain_box.setVisible(False)
-            return
-        self.controller_gain_box.setVisible(True)
-        heater_ids = [
-            int(node_id)
-            for node_id, node in sorted(self.model.nodes.items(), key=lambda item: int(item[0]))
-            if node.is_heater
-        ]
-        if not heater_ids:
-            self.controller_gain_form.addRow(self.QtWidgets.QLabel("No heater cells are tagged."))
-            return
-        for heater_id in heater_ids:
-            widget = self._double_spin(-1.0e12, 1.0e12, self.model.controller_gain(active_id, heater_id), 0.01)
-            widget.valueChanged.connect(
-                lambda value, heater_id=heater_id: self._handle_controller_gain_changed(heater_id, value)
-            )
-            self.controller_gain_inputs[heater_id] = widget
-            self.controller_gain_form.addRow(f"G[{active_id},{heater_id}]", widget)
+        self.controller_gain_box.setVisible(False)
 
     def _handle_controller_gain_changed(self, heater_id: int, value: float) -> None:
         if self._building_form or self.selected_node_id is None:
@@ -877,6 +971,7 @@ class GraphVisualizerApp:
             return
         try:
             self.model, _matrices = load_graph_folder(folder)
+            refresh_sensor_connected_nodes(self.model)
             self.current_folder = folder
             self.autosave_enabled = True
             self.selected_node_id = None
@@ -884,6 +979,7 @@ class GraphVisualizerApp:
             self.dirty = False
             self.cancel_draw_preview()
             self._sync_metadata_widgets()
+            self._sync_pair_distance_from_model()
             self.prepare_new_node()
             self._load_ui_state(folder)
             self._refresh_all(reset_camera=True)
@@ -1130,6 +1226,11 @@ class GraphVisualizerApp:
                 "boundary_only": self.filter_boundary.isChecked() if hasattr(self, "filter_boundary") else False,
             },
             "dark_mode": self.dark_mode,
+            "max_heater_sensor_pair_distance_mm": (
+                float(self.pair_distance_input.value())
+                if hasattr(self, "pair_distance_input")
+                else DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM
+            ),
         }
         self._atomic_write_json(folder / "ui_state.json", state, indent=2)
 
@@ -1149,6 +1250,11 @@ class GraphVisualizerApp:
                 self.theme_toggle.setChecked(self.dark_mode)
                 self.theme_toggle.blockSignals(False)
             self._apply_theme()
+        if "max_heater_sensor_pair_distance_mm" in state and hasattr(self, "pair_distance_input"):
+            try:
+                self.pair_distance_input.setValue(float(state["max_heater_sensor_pair_distance_mm"]))
+            except (TypeError, ValueError):
+                pass
         selected = state.get("selected_node_id")
         try:
             selected_id = int(selected)
@@ -1204,25 +1310,6 @@ class GraphVisualizerApp:
                 heater_max_power_W=float(self.inputs["heater_max_power_W"].value()),
                 heater_efficiency=float(self.inputs["heater_efficiency"].value()),
             ),
-            heater_control=HeaterControl(
-                mode=(
-                    "pid"
-                    if self.inputs["heater_mode_pid"].isChecked()
-                    else "mimo"
-                    if self.inputs["heater_mode_mimo"].isChecked()
-                    else "manual"
-                ),
-                pid=PIDControlSettings(
-                    kp=float(self.inputs["heater_pid_kp"].value()),
-                    ki=float(self.inputs["heater_pid_ki"].value()),
-                    kd=float(self.inputs["heater_pid_kd"].value()),
-                    lambda_order=float(self.inputs["heater_pid_lambda_order"].value()),
-                    mu_order=float(self.inputs["heater_pid_mu_order"].value()),
-                    setpoint=float(self.inputs["heater_pid_setpoint"].value()),
-                ),
-                manual=ManualHeaterSettings(power=float(self.inputs["heater_manual_power"].value())),
-                pid_state=PIDState(),
-            ),
             is_sensor=is_sensor,
             sensor=SensorProperties(
                 sensor_id=int(self.inputs["sensor_id"].value()),
@@ -1230,6 +1317,9 @@ class GraphVisualizerApp:
                 sensor_bias_K=float(self.inputs["sensor_bias_K"].value()),
                 sensor_time_constant_s=float(self.inputs["sensor_time_constant_s"].value()),
             ),
+            assigned_sensor_id=self._selected_assigned_sensor_id(),
+            sensor_control_mode="mimo" if self.inputs["sensor_mode_mimo"].isChecked() else "manual",
+            sensor_manual_power_W=float(self.inputs["sensor_manual_power_W"].value()),
             has_cryocooler=has_cryocooler,
             controller_setpoint_K=float(self.inputs["controller_setpoint_K"].value()),
             controller_weight=float(self.inputs["controller_weight"].value()),
@@ -1280,32 +1370,15 @@ class GraphVisualizerApp:
         self.inputs["heater_min_power_W"].setValue(node.heater.heater_min_power_W)
         self.inputs["heater_max_power_W"].setValue(node.heater.heater_max_power_W)
         self.inputs["heater_efficiency"].setValue(node.heater.heater_efficiency)
-        if isinstance(node.heater_control, HeaterControl):
-            heater_control = node.heater_control
-        else:
-            heater_control = HeaterControl.from_dict(
-                {},
-                initial_temperature_K=node.initial_temperature_K,
-                default_manual_power_W=float(node.heater.heater_max_power_W) * float(node.heater.heater_efficiency),
-            )
-        self.inputs["heater_mode_pid"].setChecked(heater_control.mode == "pid")
-        self.inputs["heater_mode_mimo"].setChecked(heater_control.mode == "mimo")
-        self.inputs["heater_mode_manual"].setChecked(heater_control.mode not in {"pid", "mimo"})
-        self.inputs["heater_pid_kp"].setValue(heater_control.pid.kp)
-        self.inputs["heater_pid_ki"].setValue(heater_control.pid.ki)
-        self.inputs["heater_pid_kd"].setValue(heater_control.pid.kd)
-        self.inputs["heater_pid_lambda_order"].setValue(float(getattr(heater_control.pid, "lambda_order", 1.0)))
-        self.inputs["heater_pid_mu_order"].setValue(float(getattr(heater_control.pid, "mu_order", 1.0)))
-        self.inputs["heater_pid_setpoint"].setValue(heater_control.pid.setpoint)
-        manual_power = heater_control.manual.power
-        if node.is_heater and heater_control.mode == "manual" and manual_power <= 0.0:
-            manual_power = self._default_heater_manual_power()
-        self.inputs["heater_manual_power"].setValue(manual_power)
+        self._populate_assigned_sensor_combo(node)
         self.inputs["is_sensor"].setChecked(node.is_sensor)
         self.inputs["sensor_id"].setValue(node.sensor.sensor_id or node.node_id)
         self.inputs["sensor_noise_std_K"].setValue(node.sensor.sensor_noise_std_K)
         self.inputs["sensor_bias_K"].setValue(node.sensor.sensor_bias_K)
         self.inputs["sensor_time_constant_s"].setValue(node.sensor.sensor_time_constant_s)
+        self.inputs["sensor_mode_mimo"].setChecked(str(getattr(node, "sensor_control_mode", "manual")) == "mimo")
+        self.inputs["sensor_mode_manual"].setChecked(str(getattr(node, "sensor_control_mode", "manual")) != "mimo")
+        self.inputs["sensor_manual_power_W"].setValue(float(getattr(node, "sensor_manual_power_W", 0.0)))
         self.inputs["controller_setpoint_K"].setValue(float(getattr(node, "controller_setpoint_K", 293.15)))
         self.inputs["controller_weight"].setValue(float(getattr(node, "controller_weight", 0.0)))
         self.inputs["sensor_settling_time_s"].setValue(float(getattr(node, "sensor_settling_time_s", 0.0)))
@@ -1318,6 +1391,7 @@ class GraphVisualizerApp:
         self.inputs["controller_lambda_order"].setValue(float(getattr(node, "controller_lambda_order", 1.0)))
         self.inputs["controller_mu_order"].setValue(float(getattr(node, "controller_mu_order", 1.0)))
         self.inputs["has_cryocooler"].setChecked(node.has_cryocooler)
+        self._sync_pairing_labels(node)
         self._sync_node_role_label(node)
         self._update_optional_sections()
         self._update_C_enabled()
@@ -1362,18 +1436,9 @@ class GraphVisualizerApp:
     def _update_optional_sections(self, *_: Any) -> None:
         if "is_heater" not in self.inputs:
             return
-        if (
-            not self._building_form
-            and self.inputs["is_heater"].isChecked()
-            and self.inputs["heater_mode_manual"].isChecked()
-            and self.inputs["heater_manual_power"].value() <= 0.0
-        ):
-            self.inputs["heater_manual_power"].setValue(self._default_heater_manual_power())
         self.heater_box.setVisible(self.inputs["is_heater"].isChecked())
         self.sensor_box.setVisible(self.inputs["is_sensor"].isChecked())
-        self.controller_gain_box.setVisible(
-            self.inputs["is_sensor"].isChecked()
-        )
+        self.controller_gain_box.setVisible(False)
         node_id = int(self.inputs["node_id"].value())
         if self.inputs["heater_id"].value() == 0:
             self.inputs["heater_id"].setValue(node_id)
@@ -1384,39 +1449,17 @@ class GraphVisualizerApp:
             self._rebuild_controller_gain_fields()
         self._handle_node_form_changed()
 
-    def _handle_heater_mode_change(self, *_: Any) -> None:
-        if self._building_form:
-            self._sync_heater_control_enabled()
-            return
-        self._reset_form_pid_state()
-        self._sync_heater_control_enabled()
-        self._handle_node_form_changed()
-
-    def _handle_heater_setpoint_change(self, *_: Any) -> None:
-        if not self._building_form:
-            self._reset_form_pid_state()
-            self._handle_node_form_changed()
-
     def _reset_form_pid_state(self) -> None:
         for node_id in self._selected_target_ids():
             self.model.nodes[int(node_id)].heater_control.reset_pid_state()
 
     def _sync_heater_control_enabled(self) -> None:
-        if "heater_mode_pid" not in self.inputs:
+        if "sensor_mode_mimo" not in self.inputs:
             return
-        pid_active = self.inputs["is_heater"].isChecked() and self.inputs["heater_mode_pid"].isChecked()
-        mimo_active = self.inputs["is_sensor"].isChecked()
-        manual_active = self.inputs["is_heater"].isChecked() and self.inputs["heater_mode_manual"].isChecked()
-        for key in (
-            "heater_pid_kp",
-            "heater_pid_ki",
-            "heater_pid_kd",
-            "heater_pid_lambda_order",
-            "heater_pid_mu_order",
-            "heater_pid_setpoint",
-        ):
-            self.inputs[key].setEnabled(pid_active)
-            self.inputs[key].setSpecialValueText("" if not pid_active else "")
+        sensor_active = self.inputs["is_sensor"].isChecked()
+        mimo_active = sensor_active and self.inputs["sensor_mode_mimo"].isChecked()
+        manual_active = sensor_active and self.inputs["sensor_mode_manual"].isChecked()
+        self.inputs["sensor_manual_power_W"].setEnabled(manual_active)
         for key in (
             "controller_setpoint_K",
             "controller_weight",
@@ -1432,9 +1475,8 @@ class GraphVisualizerApp:
         ):
             self.inputs[key].setEnabled(mimo_active)
             self.inputs[key].setSpecialValueText("" if not mimo_active else "")
-        self.inputs["heater_manual_power"].setEnabled(manual_active)
         if hasattr(self, "controller_gain_box"):
-            self.controller_gain_box.setEnabled(mimo_active)
+            self.controller_gain_box.setEnabled(False)
 
     def _default_heater_manual_power(self) -> float:
         return max(

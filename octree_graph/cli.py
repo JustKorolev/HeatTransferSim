@@ -138,6 +138,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     progress.done()
     run_log.log(f"Completed graph with {len(graph_result.nodes)} nodes and {len(graph_result.edges)} edges.")
     print(f"Wrote octree graph with {len(graph_result.nodes)} nodes and {len(graph_result.edges)} edges to {output}")
+    _print_role_summary(graph_result.nodes)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -285,6 +286,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-heater-sensor-pair-distance-mm",
+        type=float,
+        default=25.0,
+        help="Maximum AABB surface gap for automatically pairing each heater to one valid sensor.",
+    )
+    parser.add_argument(
         "--no-detect-role-nodes",
         action="store_true",
         help="Disable CAD name/path detection for heater and sensor graph nodes.",
@@ -384,6 +391,7 @@ def _build_graph_with_optional_fallback(
         component_bounds_mm=_component_bounds_mm(voxel_scene),
         role_components=getattr(args, "role_components", None),
         role_contact_tolerance_mm=args.role_contact_tolerance_mm,
+        max_heater_sensor_pair_distance_mm=float(getattr(args, "max_heater_sensor_pair_distance_mm", 25.0)),
     )
     return (leaves, graph_result, diagnostics) if include_diagnostics else (leaves, graph_result)
 
@@ -732,12 +740,32 @@ def _mesh_diagnostics(scene) -> dict:
 
 
 def _graph_diagnostics(nodes: list[dict], edges: list[dict]) -> dict:
+    heaters = [node for node in nodes if bool(node.get("is_heater"))]
+    sensors = [node for node in nodes if bool(node.get("is_sensor"))]
     return {
         "node_count_before_pruning": len(nodes),
         "node_count_after_pruning": len(nodes),
         "edge_count": len(edges),
         "connected_components": _connected_component_count(nodes, edges),
+        "heater_count": len(heaters),
+        "sensor_count": len(sensors),
+        "paired_heater_count": sum(1 for node in heaters if node.get("assigned_sensor_id") is not None),
+        "valid_sensor_count": sum(1 for node in sensors if bool(node.get("sensor_valid", True))),
+        "paired_sensor_count": sum(1 for node in sensors if node.get("assigned_heater_id") is not None),
     }
+
+
+def _print_role_summary(nodes: list[dict]) -> None:
+    heaters = [node for node in nodes if bool(node.get("is_heater"))]
+    sensors = [node for node in nodes if bool(node.get("is_sensor"))]
+    paired_heaters = [node for node in heaters if node.get("assigned_sensor_id") is not None]
+    valid_sensors = [node for node in sensors if bool(node.get("sensor_valid", True))]
+    paired_sensors = [node for node in sensors if node.get("assigned_heater_id") is not None]
+    print(
+        "Heater/sensor detection: "
+        f"heaters={len(heaters)} paired_heaters={len(paired_heaters)} "
+        f"sensors={len(sensors)} valid_sensors={len(valid_sensors)} paired_sensors={len(paired_sensors)}"
+    )
 
 
 def _connected_component_count(nodes: list[dict], edges: list[dict]) -> int:

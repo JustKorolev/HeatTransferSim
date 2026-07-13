@@ -17,6 +17,11 @@ from .mimo_controller import (
     weighted_rms_error,
 )
 from .models import ThermalGraphModel
+from .role_pairing import (
+    average_inverse_capacitance_for_sensor,
+    refresh_sensor_connected_nodes,
+    sensor_readout_temperature_K,
+)
 from .simulation_parameters import SimulationParameters
 
 STEFAN_BOLTZMANN_W_M2K4 = 5.670374419e-8
@@ -363,41 +368,13 @@ class PreparedSimulation:
         ) + self._radiation_source_vector(temperatures)
 
     def _reset_pid_states(self) -> None:
-        if self.model is None:
-            return
-        for node_id in self.node_ids:
-            node = self.model.nodes.get(int(node_id))
-            if node is not None and node.is_heater:
-                node.heater_control.reset_pid_state()
+        return
 
     def _pid_state_snapshot(self) -> dict[int, tuple[float, float | None, tuple[float, ...]]]:
-        if self.model is None:
-            return {}
-        snapshot: dict[int, tuple[float, float | None, tuple[float, ...]]] = {}
-        for node_id in self.node_ids:
-            node = self.model.nodes.get(int(node_id))
-            if node is not None and node.is_heater:
-                state = node.heater_control.pid_state
-                snapshot[int(node_id)] = (
-                    float(state.integral),
-                    state.previous_error,
-                    tuple(float(value) for value in getattr(state, "error_history", [])),
-                )
-        return snapshot
+        return {}
 
     def _restore_pid_state_snapshot(self, snapshot: dict[int, tuple[float, float | None] | tuple[float, float | None, tuple[float, ...]]]) -> None:
-        if self.model is None:
-            return
-        for node_id, values in snapshot.items():
-            node = self.model.nodes.get(int(node_id))
-            if node is not None and node.is_heater:
-                node.heater_control.pid_state.integral = float(values[0])
-                node.heater_control.pid_state.previous_error = values[1]
-                node.heater_control.pid_state.error_history = (
-                    [float(value) for value in values[2]]
-                    if len(values) > 2
-                    else []
-                )
+        return
 
     def heater_power_by_node(self) -> dict[int, float]:
         if (
@@ -491,20 +468,31 @@ class PreparedSimulation:
         )
         enabled_heater_ids = _enabled_node_id_set(self.params.enabled_heater_node_ids)
         enabled_sensor_ids = _enabled_node_id_set(self.params.enabled_sensor_node_ids)
-        sensor_ids = [
-            int(node_id)
-            for node_id in self.node_ids
-            if _node_is_mimo_sensor(self.model.nodes[int(node_id)])
-            and _node_id_enabled(enabled_sensor_ids, int(node_id))
-        ]
-        heater_ids = [
-            int(node_id)
-            for node_id in self.node_ids
-            if _node_is_mimo_heater(self.model.nodes[int(node_id)])
-            and _node_id_enabled(enabled_heater_ids, int(node_id))
-        ]
+        pair_warnings = refresh_sensor_connected_nodes(self.model)
+        sensor_ids: list[int] = []
+        heater_ids: list[int] = []
+        for node_id in self.node_ids:
+            sensor_id = int(node_id)
+            sensor = self.model.nodes[sensor_id]
+            if not _node_is_mimo_sensor(sensor) or not _node_id_enabled(enabled_sensor_ids, sensor_id):
+                continue
+            heater_id = getattr(sensor, "assigned_heater_id", None)
+            if heater_id is None and sensor.is_heater and str(getattr(getattr(sensor, "heater_control", None), "mode", "")) == "mimo":
+                heater_id = sensor_id
+            if heater_id is None:
+                continue
+            heater_id = int(heater_id)
+            heater = self.model.nodes.get(heater_id)
+            if heater is None or not heater.is_heater:
+                continue
+            if not _node_id_enabled(enabled_heater_ids, heater_id):
+                continue
+            sensor_ids.append(sensor_id)
+            heater_ids.append(heater_id)
         if not sensor_ids or not heater_ids:
-            self.controller_warnings = ["MIMO controller enabled, but at least one sensor and one heater are required."]
+            self.controller_warnings = pair_warnings + [
+                "MIMO controller enabled, but at least one paired valid MIMO sensor and heater are required."
+            ]
             self.controller_allocator_diagnostics = {
                 "active_sensor_count": len(sensor_ids),
                 "active_heater_count": len(heater_ids),
@@ -522,7 +510,25 @@ class PreparedSimulation:
             return powers
 
         node_index = {int(node_id): row for row, node_id in enumerate(self.node_ids)}
-        y = np.array([float(self.temperatures_K[node_index[sensor_id]]) for sensor_id in sensor_ids], dtype=float)
+        readouts = [
+            sensor_readout_temperature_K(self.model, node_index, self.temperatures_K, sensor_id)
+            for sensor_id in sensor_ids
+        ]
+        valid_pairs = [
+            (sensor_id, heater_id, readout)
+            for sensor_id, heater_id, readout in zip(sensor_ids, heater_ids, readouts)
+            if np.isfinite(float(readout))
+        ]
+        if len(valid_pairs) != len(sensor_ids):
+            pair_warnings.append("One or more MIMO sensors have invalid averaged readouts and were excluded.")
+        sensor_ids = [int(sensor_id) for sensor_id, _heater_id, _readout in valid_pairs]
+        heater_ids = [int(heater_id) for _sensor_id, heater_id, _readout in valid_pairs]
+        if not sensor_ids or not heater_ids:
+            self.controller_warnings = pair_warnings + ["No valid paired MIMO sensor readouts are available."]
+            if update_state:
+                self.controller_last_power_by_heater = {}
+            return powers
+        y = np.array([float(readout) for _sensor_id, _heater_id, readout in valid_pairs], dtype=float)
         estimates = []
         for sensor_id, measured in zip(sensor_ids, y):
             node = self.model.nodes[sensor_id]
@@ -639,14 +645,11 @@ class PreparedSimulation:
         )
         slew_rate = max(0.0, float(getattr(self.params, "mimo_heater_slew_rate_W_per_s", 0.0)))
         max_delta_power = np.full(len(heater_ids), slew_rate * dt, dtype=float) if slew_rate > 0.0 else None
-        sensor_rows = np.array([node_index[sensor_id] for sensor_id in sensor_ids], dtype=int)
-        heater_rows = np.array([node_index[heater_id] for heater_id in heater_ids], dtype=int)
         raw_dTdt, dTdt_hat = self._mimo_sensor_drift_estimate(sensor_ids, y, dt)
         B_s = self._mimo_dynamic_gain_matrix(
             sensor_ids,
             heater_ids,
-            sensor_rows,
-            heater_rows,
+            node_index,
         )
         allocation = allocate_thermal_rate_qp(
             B_s,
@@ -667,10 +670,16 @@ class PreparedSimulation:
         predicted_dTdt = dTdt_hat + heater_delta_dTdt
         residual = predicted_dTdt - v_cmd
         gain_warnings = list((self.controller_dynamic_gain_cache or {}).get("warnings", ()))
-        self.controller_warnings = gain_warnings + list(allocation.warnings)
+        self.controller_warnings = pair_warnings + gain_warnings + list(allocation.warnings)
         self.controller_allocator_diagnostics = {
             "active_sensor_count": len(sensor_ids),
             "active_heater_count": len(heater_ids),
+            "sensor_ids": [int(value) for value in sensor_ids],
+            "heater_ids": [int(value) for value in heater_ids],
+            "sensor_connected_node_ids": {
+                str(sensor_id): [int(value) for value in getattr(self.model.nodes[int(sensor_id)], "sensor_connected_node_ids", [])]
+                for sensor_id in sensor_ids
+            },
             "rate_command_norm": float(np.linalg.norm(v_cmd)),
             "heater_command_norm": float(np.linalg.norm(u)),
             "measured_drift_dTdt_norm": float(np.linalg.norm(dTdt_hat)),
@@ -690,6 +699,7 @@ class PreparedSimulation:
             "raw_dTdt_s": [float(value) for value in raw_dTdt],
             "filtered_dTdt_hat_s": [float(value) for value in dTdt_hat],
             "B_s": [[float(value) for value in row] for row in B_s],
+            "average_inverse_C_s": list((self.controller_dynamic_gain_cache or {}).get("average_inverse_C_s", [])),
             "B_s_delta_u_dTdt_s": [float(value) for value in heater_delta_dTdt],
             "v_cmd_s": [float(value) for value in v_cmd],
             "predicted_dTdt_s": [float(value) for value in predicted_dTdt],
@@ -786,16 +796,19 @@ class PreparedSimulation:
         self,
         sensor_ids: list[int],
         heater_ids: list[int],
-        sensor_rows: np.ndarray,
-        heater_rows: np.ndarray,
+        node_index: dict[int, int],
     ) -> np.ndarray:
         inv_C = np.asarray(self.inv_C, dtype=float).reshape(-1) if self.inv_C is not None else np.zeros(len(self.node_ids))
+        connected_key = tuple(
+            tuple(int(value) for value in getattr(self.model.nodes[int(sensor_id)], "sensor_connected_node_ids", []))
+            for sensor_id in sensor_ids
+        ) if self.model is not None else tuple()
         key = (
             tuple(int(value) for value in sensor_ids),
             tuple(int(value) for value in heater_ids),
-            tuple(int(value) for value in sensor_rows),
-            tuple(int(value) for value in heater_rows),
-            tuple(round(float(inv_C[int(row)]), 12) for row in sensor_rows),
+            connected_key,
+            float(getattr(self.params, "heater_sensor_pair_alpha", 1.0)),
+            tuple(round(float(inv_C[int(row)]), 12) for row in range(len(inv_C))),
         )
         cache = self.controller_dynamic_gain_cache
         if (
@@ -804,30 +817,43 @@ class PreparedSimulation:
             and "B_dyn" in cache
         ):
             return np.asarray(cache["B_dyn"], dtype=float).copy()
-        B_dyn = np.zeros((len(sensor_rows), len(heater_rows)), dtype=float)
-        heater_col_by_row = {int(row): col for col, row in enumerate(heater_rows)}
+        B_dyn = np.zeros((len(sensor_ids), len(heater_ids)), dtype=float)
+        heater_col_by_id = {int(heater_id): col for col, heater_id in enumerate(heater_ids)}
         warnings: list[str] = []
-        for sensor_index, sensor_row in enumerate(sensor_rows):
-            heater_col = heater_col_by_row.get(int(sensor_row))
-            if heater_col is not None:
-                inverse_capacitance = float(inv_C[int(sensor_row)])
-                if np.isfinite(inverse_capacitance) and inverse_capacitance > 0.0:
-                    B_dyn[sensor_index, heater_col] = inverse_capacitance
-                else:
-                    warnings.append(
-                        f"MIMO sensor cell {int(sensor_ids[sensor_index])} has invalid capacitance; B_s row set to zero."
-                    )
-                continue
+        average_inverse_C_s: list[float] = []
+        alpha = max(0.0, float(getattr(self.params, "heater_sensor_pair_alpha", 1.0)))
+        for sensor_index, sensor_id in enumerate(sensor_ids):
             if self.model is None:
+                average_inverse_C_s.append(0.0)
                 continue
-            for heater_index, heater_id in enumerate(heater_ids):
-                gain = float(self.model.controller_gain(int(sensor_ids[sensor_index]), int(heater_id)))
-                if np.isfinite(gain) and abs(gain) > 0.0:
-                    B_dyn[sensor_index, heater_index] = gain
+            sensor = self.model.nodes[int(sensor_id)]
+            average_inverse_C, valid_node_ids = average_inverse_capacitance_for_sensor(
+                self.model,
+                node_index,
+                inv_C,
+                int(sensor_id),
+            )
+            average_inverse_C_s.append(float(average_inverse_C))
+            heater_id = getattr(sensor, "assigned_heater_id", None)
+            if heater_id is None and sensor.is_heater and str(getattr(getattr(sensor, "heater_control", None), "mode", "")) == "mimo":
+                heater_id = int(sensor_id)
+            heater_col = heater_col_by_id.get(int(heater_id)) if heater_id is not None else None
+            if heater_col is None:
+                warnings.append(f"MIMO sensor {int(sensor_id)} has no active paired heater; B_s row set to zero.")
+                continue
+            if np.isfinite(average_inverse_C) and average_inverse_C > 0.0:
+                B_dyn[sensor_index, heater_col] = alpha * float(average_inverse_C)
+            else:
+                warnings.append(
+                    f"MIMO sensor {int(sensor_id)} has no valid connected-node capacitance; B_s row set to zero."
+                )
+            if not valid_node_ids:
+                warnings.append(f"MIMO sensor {int(sensor_id)} has no valid connected nodes for average inverse C.")
         self.controller_dynamic_gain_cache = {
             "key": key,
             "B_dyn": B_dyn.copy(),
             "warnings": tuple(warnings),
+            "average_inverse_C_s": [float(value) for value in average_inverse_C_s],
         }
         return B_dyn
 
@@ -869,6 +895,8 @@ def prepare_simulation(
     radiation_coeff = _radiation_coefficient_vector(matrices, model, node_ids, G_rad, params)
     inv_C = 1.0 / C
     b = np.zeros(n, dtype=float)
+    pairing_warnings = refresh_sensor_connected_nodes(model)
+    warnings.extend(pairing_warnings)
     has_cryocooler = any(model.nodes[int(node_id)].has_cryocooler for node_id in node_ids)
     has_mimo_controller = _mimo_controller_is_active(model, node_ids, params)
     has_nonlinear_radiation = bool(params.use_ambient_radiation and np.any(radiation_coeff > 0.0))
@@ -890,11 +918,11 @@ def prepare_simulation(
     elif params.input_mode != "zero":
         warnings.append(f"Unknown input mode {params.input_mode!r}; using zero input.")
     if params.input_mode == "heater_inputs" and any(
-        getattr(model.nodes[int(node_id)].heater_control, "mode", "manual") == "mimo"
+        str(getattr(model.nodes[int(node_id)], "sensor_control_mode", "manual")) == "mimo"
         for node_id in node_ids
-        if model.nodes[int(node_id)].is_heater
+        if model.nodes[int(node_id)].is_sensor
     ) and not has_mimo_controller:
-        warnings.append("MIMO heater control is selected, but no valid MIMO heater/sensor cells are tagged.")
+        warnings.append("MIMO sensor control is selected, but no valid paired MIMO sensor/heater set is available.")
 
     sparse_stepper = n > 512
     if sparse_stepper:
@@ -1125,47 +1153,37 @@ def _controlled_heater_power_vector(
     include_cryocoolers: bool = True,
 ) -> np.ndarray:
     powers = np.zeros(len(node_ids), dtype=float)
-    dt = max(float(dt_s), 1.0e-12)
     skipped_modes = excluded_modes or set()
+    node_index = {int(node_id): row for row, node_id in enumerate(node_ids)}
     for row, node_id in enumerate(node_ids):
         node = model.nodes[int(node_id)]
         if include_cryocoolers and node.has_cryocooler:
             powers[row] -= _cryocooler_power_for_temperature(float(temperatures_K[row]), params)
-        if not include_heater_inputs or not node.is_heater:
+    if not include_heater_inputs:
+        return powers
+    enabled_heaters = _enabled_node_id_set(params.enabled_heater_node_ids)
+    enabled_sensors = _enabled_node_id_set(params.enabled_sensor_node_ids)
+    for sensor_id, sensor in sorted(model.nodes.items(), key=lambda item: int(item[0])):
+        if not sensor.is_sensor:
             continue
-        if not _node_id_enabled(_enabled_node_id_set(params.enabled_heater_node_ids), int(node_id)):
+        if not _node_id_enabled(enabled_sensors, int(sensor_id)):
             continue
-        control = node.heater_control
-        if str(control.mode) in skipped_modes:
+        if str(getattr(sensor, "sensor_control_mode", "manual")) in skipped_modes:
             continue
-        max_power = max(0.0, float(node.heater.heater_max_power_W) * float(node.heater.heater_efficiency))
-        if control.mode == "pid":
-            current_temperature = float(temperatures_K[row])
-            error = float(control.pid.setpoint) - current_temperature
-            state = control.pid_state
-            lambda_order = max(0.0, float(getattr(control.pid, "lambda_order", 1.0)))
-            mu_order = max(0.0, float(getattr(control.pid, "mu_order", 1.0)))
-            history = [float(value) for value in getattr(state, "error_history", [])]
-            candidate_history = history + [error]
-            derivative = _fractional_derivative(
-                candidate_history,
-                dt,
-                mu_order,
-                zero_initial_integer_order=True,
-            )
-            candidate_integral = _fractional_integral(candidate_history, dt, lambda_order)
-            raw_output = (
-                float(control.pid.kp) * error
-                + float(control.pid.ki) * candidate_integral
-                + float(control.pid.kd) * derivative
-            )
-            powers[row] += min(max(raw_output, 0.0), max_power)
-            if update_pid_state:
-                state.integral = candidate_integral
-                state.error_history = candidate_history
-                state.previous_error = error
-        else:
-            powers[row] += min(max(float(control.manual.power), 0.0), max_power)
+        if str(getattr(sensor, "sensor_control_mode", "manual")) != "manual":
+            continue
+        heater_id = getattr(sensor, "assigned_heater_id", None)
+        if heater_id is None:
+            continue
+        heater_id = int(heater_id)
+        if not _node_id_enabled(enabled_heaters, heater_id):
+            continue
+        heater = model.nodes.get(heater_id)
+        heater_row = node_index.get(heater_id)
+        if heater is None or heater_row is None or not heater.is_heater:
+            continue
+        max_power = max(0.0, float(heater.heater.heater_max_power_W) * float(heater.heater.heater_efficiency))
+        powers[heater_row] += min(max(float(getattr(sensor, "sensor_manual_power_W", 0.0)), 0.0), max_power)
     return powers
 
 
@@ -1194,7 +1212,7 @@ def _controller_sensor_weight(node: Any) -> float:
     explicit = max(0.0, float(getattr(node, "controller_weight", 0.0)))
     if explicit > 0.0:
         return explicit
-    return 1.0 if bool(getattr(node, "is_heater", False)) else 0.5
+    return 0.5
 
 
 def _controller_heater_max_power(node: Any, params: SimulationParameters) -> float:
@@ -1229,14 +1247,26 @@ def _node_has_mimo_controller_tags(node: Any) -> bool:
 
 
 def _node_is_mimo_heater(node: Any) -> bool:
-    return (
-        bool(getattr(node, "is_heater", False))
-        and str(getattr(getattr(node, "heater_control", None), "mode", "manual")) == "mimo"
+    return bool(getattr(node, "is_heater", False)) and (
+        getattr(node, "assigned_sensor_id", None) is not None
+        or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
     )
 
 
 def _node_is_mimo_sensor(node: Any) -> bool:
-    return bool(getattr(node, "is_sensor", False))
+    return (
+        bool(getattr(node, "is_sensor", False))
+        and bool(getattr(node, "sensor_valid", True))
+        and not bool(getattr(node, "sensor_monitor_only", False))
+        and (
+            str(getattr(node, "sensor_control_mode", "manual")) == "mimo"
+            or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
+        )
+        and (
+            getattr(node, "assigned_heater_id", None) is not None
+            or bool(getattr(node, "is_heater", False))
+        )
+    )
 
 
 def _node_uses_mimo_controller(
@@ -1265,8 +1295,17 @@ def _mimo_controller_is_active(
         for node_id in node_ids
     )
     is_heater = any(
-        _node_is_mimo_heater(model.nodes[int(node_id)])
+        bool(getattr(model.nodes[int(node_id)], "is_heater", False))
         and _node_id_enabled(enabled_heater_ids, int(node_id))
+        and any(
+            _node_is_mimo_sensor(model.nodes[int(sensor_id)])
+            and (
+                getattr(model.nodes[int(sensor_id)], "assigned_heater_id", None) == int(node_id)
+                or int(sensor_id) == int(node_id)
+            )
+            and _node_id_enabled(enabled_sensor_ids, int(sensor_id))
+            for sensor_id in node_ids
+        )
         for node_id in node_ids
     )
     return is_sensor and is_heater

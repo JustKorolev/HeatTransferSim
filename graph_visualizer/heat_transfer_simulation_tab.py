@@ -17,6 +17,7 @@ from .graph_io import has_consolidated_role_edges, load_graph_folder, save_graph
 from .matrix_builder import build_matrices, refresh_geometry_edges, refresh_radiation_from_exposed_faces
 from .models import EdgeMode, ThermalGraphModel
 from .pyvista_widget import GraphPyVistaWidget
+from .role_pairing import sensor_readout_temperature_K
 from .simulation_model import PreparedSimulation, prepare_simulation, save_trajectory
 from .simulation_parameters import (
     SimulationParameters,
@@ -209,6 +210,7 @@ class HeatTransferSimulationTab:
             ("mimo_rho_du", "rho_du power change", 0.0, 1.0e9, 0.01),
             ("mimo_heater_slew_rate_W_per_s", "hard slew W/s", 0.0, 1.0e9, 1.0),
             ("mimo_v_cmd_abs_max_K_per_s", "max rate cmd K/s", 0.0, 1.0e9, 0.01),
+            ("heater_sensor_pair_alpha", "pair alpha", 0.0, 1.0e9, 0.01),
             ("drift_lpf_tau_s", "drift LPF tau s", 0.0, 1.0e9, 0.1),
             ("derivative_dt_floor_s", "derivative dt floor s", 0.0, 1.0e9, 1.0e-6),
             ("mimo_integral_abs_max", "integral abs max", 0.0, 1.0e12, 1.0),
@@ -1014,9 +1016,14 @@ class HeatTransferSimulationTab:
         index = {int(node_id): row for row, node_id in enumerate(self.prepared.node_ids)}
         values = []
         for sensor_id in sensor_ids:
-            row = index.get(int(sensor_id))
-            # Match the MIMO controller's raw sensor signal: the sensor-associated cell temperature before lag compensation.
-            values.append(float(self.prepared.temperatures_K[row]) if row is not None else np.nan)
+            values.append(
+                sensor_readout_temperature_K(
+                    self.model,
+                    index,
+                    self.prepared.temperatures_K,
+                    int(sensor_id),
+                )
+            )
         return np.asarray(values, dtype=float)
 
     def _populate_G_ctrl_matrix(self, sensor_ids: list[int], heater_ids: list[int], G: np.ndarray) -> None:
@@ -1192,6 +1199,7 @@ class HeatTransferSimulationTab:
             mimo_rho_du=float(self.inputs["mimo_rho_du"].value()),
             mimo_heater_slew_rate_W_per_s=float(self.inputs["mimo_heater_slew_rate_W_per_s"].value()),
             mimo_v_cmd_abs_max_K_per_s=float(self.inputs["mimo_v_cmd_abs_max_K_per_s"].value()),
+            heater_sensor_pair_alpha=float(self.inputs["heater_sensor_pair_alpha"].value()),
             drift_lpf_tau_s=float(self.inputs["drift_lpf_tau_s"].value()),
             derivative_dt_floor_s=float(self.inputs["derivative_dt_floor_s"].value()),
             mimo_integral_abs_max=float(self.inputs["mimo_integral_abs_max"].value()),
@@ -1404,10 +1412,27 @@ class HeatTransferSimulationTab:
             else {}
         )
         cryocooler_powers = self.prepared.cryocooler_power_by_node() if self.prepared is not None else {}
+        node_index = (
+            {int(node_id): row for row, node_id in enumerate(self.prepared.node_ids)}
+            if self.prepared is not None
+            else {}
+        )
         for row, node in enumerate(sorted(readout_nodes, key=lambda item: item.node_id)):
-            temperature = float(temperatures.get(node.node_id, node.initial_temperature_K))
+            if node.is_sensor and self.prepared is not None:
+                temperature = sensor_readout_temperature_K(
+                    self.model,
+                    node_index,
+                    self.prepared.temperatures_K,
+                    int(node.node_id),
+                )
+            else:
+                temperature = float(temperatures.get(node.node_id, node.initial_temperature_K))
             id_item = self.QtWidgets.QTableWidgetItem(str(node.node_id))
-            temp_item = self.QtWidgets.QTableWidgetItem(f"{temperature:.3f} K / {temperature - 273.15:.3f} C")
+            temp_item = self.QtWidgets.QTableWidgetItem(
+                "invalid"
+                if not np.isfinite(float(temperature))
+                else f"{temperature:.3f} K / {temperature - 273.15:.3f} C"
+            )
             power_text = (
                 f"{float(heater_powers.get(node.node_id, 0.0)):.3f} W"
                 if node.is_heater or node.has_cryocooler
@@ -1432,12 +1457,7 @@ class HeatTransferSimulationTab:
                 desired_temperature = float(getattr(node, "controller_setpoint_K", 293.15))
                 error = desired_temperature - temperature
                 desired_text = f"{desired_temperature:.3f} K / {desired_temperature - 273.15:.3f} C"
-                error_text = f"{error:.3f} K"
-            elif node.is_heater and node.heater_control.mode == "pid":
-                desired_temperature = float(node.heater_control.pid.setpoint)
-                error = desired_temperature - temperature
-                desired_text = f"{desired_temperature:.3f} K / {desired_temperature - 273.15:.3f} C"
-                error_text = f"{error:.3f} K"
+                error_text = "invalid" if not np.isfinite(float(error)) else f"{error:.3f} K"
             desired_item = self.QtWidgets.QTableWidgetItem(desired_text)
             error_item = self.QtWidgets.QTableWidgetItem(error_text)
             id_item.setData(self.QtCore.Qt.UserRole, int(node.node_id))
@@ -1586,10 +1606,20 @@ def _node_uses_mimo_controller(
     heater_enabled: bool = True,
     sensor_enabled: bool = True,
 ) -> bool:
-    return (
-        bool(getattr(node, "is_heater", False))
-        and bool(getattr(node, "is_sensor", False))
-        and bool(heater_enabled)
-        and bool(sensor_enabled)
-        and str(getattr(getattr(node, "heater_control", None), "mode", "manual")) == "mimo"
-    )
+    if bool(getattr(node, "is_sensor", False)):
+        return (
+            bool(sensor_enabled)
+            and (
+                str(getattr(node, "sensor_control_mode", "manual")) == "mimo"
+                or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
+            )
+            and (getattr(node, "assigned_heater_id", None) is not None or bool(getattr(node, "is_heater", False)))
+            and bool(getattr(node, "sensor_valid", True))
+            and not bool(getattr(node, "sensor_monitor_only", False))
+        )
+    if bool(getattr(node, "is_heater", False)):
+        return bool(heater_enabled) and (
+            getattr(node, "assigned_sensor_id", None) is not None
+            or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
+        )
+    return False

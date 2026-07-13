@@ -55,12 +55,19 @@ def assign_node_role(node: NodeProperties, role: str) -> None:
         node.heater.heater_id = node.node_id
         node.heater_control.reset_pid_state()
         node.sensor.sensor_id = node.node_id
+        node.assigned_heater_id = None
+        node.sensor_connected_node_ids = []
+        node.sensor_valid = True
+        node.sensor_monitor_only = False
     elif role == "sensor":
         node.is_heater = False
         node.is_sensor = True
         node.heater_control.reset_pid_state()
         node.heater.heater_id = node.node_id
         node.sensor.sensor_id = node.node_id
+        node.assigned_sensor_id = None
+        node.sensor_control_mode = "manual"
+        node.sensor_monitor_only = True
 
 
 def node_has_heater_sensor_role(node: NodeProperties) -> bool:

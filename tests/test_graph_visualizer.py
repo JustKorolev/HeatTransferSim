@@ -42,6 +42,7 @@ from graph_visualizer.role_assignment import (
     node_matches_role_substring,
     normalize_role_match_text,
 )
+from graph_visualizer.role_pairing import recompute_heater_sensor_pairing
 from graph_visualizer.simulation_model import prepare_simulation
 from graph_visualizer.simulation_parameters import (
     SimulationParameters,
@@ -348,7 +349,10 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node.is_heater = True
         node.is_sensor = True
         node.heater.heater_max_power_W = 20.0
-        node.heater_control.manual.power = 5.0
+        node.assigned_sensor_id = 1
+        node.assigned_heater_id = 1
+        node.sensor_control_mode = "manual"
+        node.sensor_manual_power_W = 5.0
         model.add_node(node)
         matrices = {
             "node_ids": np.array([1], dtype=int),
@@ -476,7 +480,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         prepared = prepare_simulation(model, matrices, params)
 
-        self.assertEqual(prepared.heater_power_by_node(), {1: 2.5})
+        self.assertAlmostEqual(prepared.heater_power_by_node()[1], 2.5)
         prepared.step_forward()
         self.assertGreater(float(prepared.temperatures_K[0]), 300.0)
         self.assertEqual(prepared.controller_mode, "coarse")
@@ -487,6 +491,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         sensor.C_J_K = 10.0
         sensor.initial_temperature_K = 300.0
         sensor.is_sensor = True
+        sensor.sensor_control_mode = "mimo"
+        sensor.assigned_heater_id = 2
         sensor.controller_setpoint_K = 310.0
         sensor.controller_kp_coarse = 1.0
         sensor.controller_ki_coarse = 0.0
@@ -494,16 +500,20 @@ class GraphVisualizerModelTests(unittest.TestCase):
         heater.C_J_K = 10.0
         heater.initial_temperature_K = 300.0
         heater.is_heater = True
+        heater.assigned_sensor_id = 1
         heater.heater.heater_max_power_W = 20.0
-        heater.heater_control.mode = "mimo"
+        body = NodeProperties.with_material(3, (2, 0, 0), material="copper")
+        body.C_J_K = 10.0
+        body.initial_temperature_K = 300.0
         model.add_node(sensor)
         model.add_node(heater)
-        model.set_controller_gain(1, 2, 0.1)
+        model.add_node(body)
+        model.set_edge(1, 3, 0.1)
         matrices = {
-            "node_ids": np.array([1, 2], dtype=int),
-            "C": np.array([10.0, 10.0]),
-            "L": np.zeros((2, 2)),
-            "G_rad": np.array([0.0, 0.0]),
+            "node_ids": np.array([1, 2, 3], dtype=int),
+            "C": np.array([10.0, 10.0, 10.0]),
+            "L": np.zeros((3, 3)),
+            "G_rad": np.array([0.0, 0.0, 0.0]),
         }
         params = SimulationParameters(
             dt_s=1.0,
@@ -595,6 +605,79 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(node_connection_counts(model, 1), (2, 2))
         self.assertEqual(node_connection_counts(model, 1, {1, 2}), (2, 1))
 
+    def test_role_pairing_uses_sensor_body_connections_and_aabb_gap(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="role_pairing"))
+        heater = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        heater.is_heater = True
+        heater.center_mm = (0.0, 0.0, 0.0)
+        heater.size_mm = (2.0, 2.0, 2.0)
+        sensor = NodeProperties.with_material(2, (4, 0, 0), material="copper")
+        sensor.is_sensor = True
+        sensor.center_mm = (4.0, 0.0, 0.0)
+        sensor.size_mm = (2.0, 2.0, 2.0)
+        body = NodeProperties.with_material(3, (8, 0, 0), material="copper")
+        for node in (heater, sensor, body):
+            model.add_node(node)
+        model.set_edge(2, 3, 0.1)
+
+        warnings = recompute_heater_sensor_pairing(model, max_distance_mm=2.1)
+
+        self.assertFalse(warnings)
+        self.assertEqual(model.nodes[1].assigned_sensor_id, 2)
+        self.assertEqual(model.nodes[2].assigned_heater_id, 1)
+        self.assertAlmostEqual(float(model.nodes[1].sensor_pair_distance_mm), 2.0)
+        self.assertEqual(model.nodes[2].sensor_connected_node_ids, [3])
+        self.assertFalse(model.nodes[2].sensor_monitor_only)
+
+    def test_paired_mimo_uses_average_sensor_readout_and_inverse_connected_capacitance(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="paired_mimo"))
+        sensor = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        sensor.is_sensor = True
+        sensor.sensor_control_mode = "mimo"
+        sensor.assigned_heater_id = 2
+        sensor.controller_setpoint_K = 315.0
+        sensor.controller_kp_coarse = 0.1
+        heater = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        heater.is_heater = True
+        heater.assigned_sensor_id = 1
+        heater.heater.heater_max_power_W = 100.0
+        body_a = NodeProperties.with_material(3, (2, 0, 0), material="copper")
+        body_a.initial_temperature_K = 300.0
+        body_a.C_J_K = 10.0
+        body_b = NodeProperties.with_material(4, (3, 0, 0), material="copper")
+        body_b.initial_temperature_K = 310.0
+        body_b.C_J_K = 20.0
+        for node in (sensor, heater, body_a, body_b):
+            model.add_node(node)
+        model.set_edge(1, 3, 0.1)
+        model.set_edge(1, 4, 0.1)
+        matrices = {
+            "node_ids": np.array([1, 2, 3, 4], dtype=int),
+            "C": np.array([5.0, 5.0, 10.0, 20.0]),
+            "L": np.zeros((4, 4)),
+            "G_rad": np.zeros(4),
+        }
+
+        prepared = prepare_simulation(
+            model,
+            matrices,
+            SimulationParameters(
+                dt_s=1.0,
+                input_mode="heater_inputs",
+                mimo_lambda_u=0.0,
+                mimo_v_cmd_abs_max_K_per_s=100.0,
+                heater_sensor_pair_alpha=2.0,
+                use_ambient_radiation=False,
+            ),
+        )
+
+        power = prepared.heater_power_by_node()[2]
+        self.assertAlmostEqual(power, 6.666666666666667)
+        diagnostics = prepared.controller_allocator_diagnostics
+        self.assertEqual(diagnostics["sensor_connected_node_ids"], {"1": [3, 4]})
+        self.assertEqual(diagnostics["B_s"], [[0.15000000000000002]])
+        self.assertAlmostEqual(diagnostics["average_inverse_C_s"][0], 0.075)
+
     def test_mimo_dynamic_rate_gain_is_static_direct_capacitance(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_static_bdyn"))
         for node_id, capacitance in ((1, 10.0), (2, 20.0)):
@@ -623,8 +706,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         B_dyn = prepared._mimo_dynamic_gain_matrix(
             [1, 2],
             [1, 2],
-            np.array([0, 1], dtype=int),
-            np.array([0, 1], dtype=int),
+            {1: 0, 2: 1},
         )
 
         np.testing.assert_allclose(B_dyn, np.diag([0.1, 0.05]))
@@ -842,7 +924,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(prepared.heater_power_by_node(), {1: 2.5})
+        self.assertAlmostEqual(prepared.heater_power_by_node()[1], 2.5)
         prepared.step_forward()
 
         self.assertAlmostEqual(prepared.controller_integrators[1], 20.0)
@@ -1069,7 +1151,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(prepared.heater_power_by_node(), {1: 2.5})
+        self.assertAlmostEqual(prepared.heater_power_by_node()[1], 2.5)
         self.assertEqual(prepared.heater_actuator_power_by_node(disable_mimo_controller=True), {1: 0.0})
 
     def test_legacy_heat_sink_fields_are_ignored_and_cryocooler_round_trips(self) -> None:
@@ -1501,7 +1583,10 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node.is_heater = True
         node.is_sensor = True
         node.has_cryocooler = True
-        node.heater_control.manual.power = 3.0
+        node.assigned_sensor_id = 1
+        node.assigned_heater_id = 1
+        node.sensor_control_mode = "manual"
+        node.sensor_manual_power_W = 3.0
         model.add_node(node)
         matrices = {
             "node_ids": np.array([1], dtype=int),
@@ -1546,15 +1631,14 @@ class GraphVisualizerModelTests(unittest.TestCase):
         prepared = prepare_simulation(model, matrices, SimulationParameters(dt_s=1.0, input_mode="heater_inputs"))
         preview_power = prepared.heater_power_by_node()
 
-        self.assertEqual(preview_power, {1: 4.0})
+        self.assertEqual(preview_power, {1: 0.0})
         self.assertEqual(model.nodes[1].heater_control.pid_state.integral, 0.0)
         self.assertIsNone(model.nodes[1].heater_control.pid_state.previous_error)
 
         prepared.step_forward()
         temperature_after_step = float(prepared.temperatures_K[0])
-        self.assertGreater(temperature_after_step, 300.0)
-        self.assertLess(temperature_after_step, 301.0)
-        self.assertIsNotNone(model.nodes[1].heater_control.pid_state.previous_error)
+        self.assertAlmostEqual(temperature_after_step, 300.0)
+        self.assertIsNone(model.nodes[1].heater_control.pid_state.previous_error)
 
         prepared.reset()
 
@@ -1583,7 +1667,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         prepared = prepare_simulation(model, matrices, SimulationParameters(dt_s=1.0, input_mode="heater_inputs"))
         prepared.step_forward()
 
-        self.assertEqual(model.nodes[1].heater_control.pid_state.integral, -10.0)
+        self.assertEqual(model.nodes[1].heater_control.pid_state.integral, 0.0)
         self.assertAlmostEqual(float(prepared.temperatures_K[0]), 310.0)
 
     def test_pid_negative_integral_keeps_output_at_zero_above_setpoint(self) -> None:
@@ -1614,13 +1698,13 @@ class GraphVisualizerModelTests(unittest.TestCase):
         prepared.step_forward()
 
         self.assertAlmostEqual(float(prepared.temperatures_K[0]), 310.0)
-        self.assertEqual(model.nodes[1].heater_control.pid_state.integral, -10.0)
-        self.assertEqual(model.nodes[1].heater_control.pid_state.error_history, [-10.0])
+        self.assertEqual(model.nodes[1].heater_control.pid_state.integral, 100.0)
+        self.assertEqual(model.nodes[1].heater_control.pid_state.error_history, [])
 
         model.nodes[1].heater_control.pid_state.integral = 5.0
         prepared.step_forward()
 
-        self.assertEqual(model.nodes[1].heater_control.pid_state.integral, -20.0)
+        self.assertEqual(model.nodes[1].heater_control.pid_state.integral, 5.0)
 
     def test_pid_integral_uses_fractional_history_without_leak(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="pid_integral_history"))
@@ -1646,13 +1730,13 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         prepared.step_forward()
 
-        self.assertAlmostEqual(model.nodes[1].heater_control.pid_state.integral, 10.0)
+        self.assertAlmostEqual(model.nodes[1].heater_control.pid_state.integral, 100.0)
 
         prepared.z[0] = 310.0
         model.nodes[1].heater_control.pid_state.integral = 100.0
         prepared.step_forward()
 
-        self.assertAlmostEqual(model.nodes[1].heater_control.pid_state.integral, 0.0)
+        self.assertAlmostEqual(model.nodes[1].heater_control.pid_state.integral, 100.0)
 
     def test_fractional_pid_integral_order_scales_error_memory(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="fractional_pid_integral"))
@@ -1680,13 +1764,13 @@ class GraphVisualizerModelTests(unittest.TestCase):
             SimulationParameters(dt_s=4.0, input_mode="heater_inputs", use_ambient_radiation=False),
         )
 
-        self.assertEqual(prepared.heater_power_by_node(), {1: 20.0})
+        self.assertEqual(prepared.heater_power_by_node(), {1: 0.0})
         self.assertEqual(model.nodes[1].heater_control.pid_state.error_history, [])
         prepared.step_forward()
 
-        self.assertAlmostEqual(model.nodes[1].heater_control.pid_state.integral, 20.0)
-        self.assertEqual(model.nodes[1].heater_control.pid_state.error_history, [10.0])
-        self.assertAlmostEqual(float(prepared.temperatures_K[0]), 298.0)
+        self.assertAlmostEqual(model.nodes[1].heater_control.pid_state.integral, 0.0)
+        self.assertEqual(model.nodes[1].heater_control.pid_state.error_history, [])
+        self.assertAlmostEqual(float(prepared.temperatures_K[0]), 290.0)
 
     def test_fractional_pid_derivative_order_uses_error_history(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="fractional_pid_derivative"))
@@ -1718,7 +1802,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         model.nodes[1].heater_control.pid_state.previous_error = 4.0
         model.nodes[1].heater_control.pid_state.error_history = [4.0]
 
-        self.assertAlmostEqual(prepared.heater_power_by_node()[1], 3.5)
+        self.assertAlmostEqual(prepared.heater_power_by_node()[1], 0.0)
 
     def test_loaded_heater_keeps_sensor_role_separate_and_default_control(self) -> None:
         node = NodeProperties.from_dict(
@@ -1912,15 +1996,14 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node.heater.heater_id = 7
         node.heater.heater_min_power_W = 0.0
         node.heater.heater_max_power_W = 12.0
-        node.heater_control.mode = "pid"
-        node.heater_control.pid.kp = 1.0
-        node.heater_control.pid.ki = 2.0
-        node.heater_control.pid.kd = 3.0
-        node.heater_control.pid.lambda_order = 0.7
-        node.heater_control.pid.mu_order = 0.4
-        node.heater_control.pid.setpoint = 310.0
+        node.assigned_sensor_id = 7
         node.is_sensor = True
         node.sensor.sensor_id = 7
+        node.assigned_heater_id = 7
+        node.sensor_control_mode = "mimo"
+        node.controller_setpoint_K = 310.0
+        node.controller_lambda_order = 0.7
+        node.controller_mu_order = 0.4
         node.has_cryocooler = True
         node_text = format_node_tooltip(7, node)
         self.assertIn("Node 7", node_text)
@@ -1933,9 +2016,10 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertIn("G_rad:", node_text)
         self.assertIn("R_rad:", node_text)
         self.assertIn("heater min:", node_text)
-        self.assertIn("control mode: pid", node_text)
-        self.assertIn("PID lambda: 0.700", node_text)
-        self.assertIn("PID mu: 0.400", node_text)
+        self.assertIn("assigned sensor: 7", node_text)
+        self.assertIn("control mode: mimo", node_text)
+        self.assertIn("MIMO lambda: 0.700", node_text)
+        self.assertIn("MIMO mu: 0.400", node_text)
         self.assertIn("cryocooler: yes", node_text)
         self.assertIn("sensor_id: 7", node_text)
 

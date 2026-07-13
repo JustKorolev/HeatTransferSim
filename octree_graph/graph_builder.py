@@ -87,6 +87,7 @@ def build_graph(
     component_bounds_mm: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
     role_components: list[RoleComponent] | None = None,
     role_contact_tolerance_mm: float = _ROLE_NODE_CONTACT_TOLERANCE_MM,
+    max_heater_sensor_pair_distance_mm: float = 25.0,
 ) -> GraphBuildResult:
     contact_report = contact_report or ContactReport()
     solid = [cell for cell in leaves if not cell.is_empty]
@@ -202,6 +203,12 @@ def build_graph(
         )
     if role_groups:
         nodes, edges = _consolidate_role_voxel_nodes(nodes, edges, role_groups, warnings)
+    _attach_sensor_connections_and_pair_roles(
+        nodes,
+        edges,
+        warnings,
+        max_heater_sensor_pair_distance_mm=max_heater_sensor_pair_distance_mm,
+    )
     return GraphBuildResult(nodes=nodes, edges=edges, warnings=warnings)
 
 
@@ -494,6 +501,96 @@ def _rewrite_edges_for_consolidated_roles(
     for index, edge in enumerate(rewritten):
         edge["edge_id"] = f"edge_{index}"
     return rewritten
+
+
+def _attach_sensor_connections_and_pair_roles(
+    nodes: list[dict],
+    edges: list[dict],
+    warnings: list[str],
+    *,
+    max_heater_sensor_pair_distance_mm: float,
+) -> None:
+    node_by_id = {int(node["node_id"]): node for node in nodes}
+    heaters = [node for node in nodes if bool(node.get("is_heater"))]
+    sensors = [node for node in nodes if bool(node.get("is_sensor"))]
+    if not heaters and not sensors:
+        return
+    for heater in heaters:
+        heater["assigned_sensor_id"] = None
+        heater["sensor_pair_distance_mm"] = None
+    for sensor in sensors:
+        connected: set[int] = set()
+        sensor_id = int(sensor["node_id"])
+        for edge in edges:
+            node_i = int(edge["node_i"])
+            node_j = int(edge["node_j"])
+            other_id: int | None = None
+            if node_i == sensor_id:
+                other_id = node_j
+            elif node_j == sensor_id:
+                other_id = node_i
+            if other_id is None:
+                continue
+            other = node_by_id.get(other_id)
+            if other is None or bool(other.get("is_heater")) or bool(other.get("is_sensor")):
+                continue
+            connected.add(other_id)
+        sensor["sensor_connected_node_ids"] = sorted(connected)
+        sensor["sensor_valid"] = bool(connected)
+        sensor["assigned_heater_id"] = None
+        sensor["sensor_pair_distance_mm"] = None
+        sensor["sensor_control_mode"] = str(sensor.get("sensor_control_mode") or "manual")
+        sensor["sensor_manual_power_W"] = float(sensor.get("sensor_manual_power_W", 0.0) or 0.0)
+        sensor["sensor_monitor_only"] = not bool(connected)
+        if not connected:
+            warnings.append(
+                f"Sensor node {sensor_id} has no connected body nodes; marked monitor-only and excluded from MIMO control."
+            )
+    max_distance = max(0.0, float(max_heater_sensor_pair_distance_mm))
+    used_sensors: set[int] = set()
+    for heater in sorted(heaters, key=lambda item: int(item["node_id"])):
+        candidates: list[tuple[float, int, dict]] = []
+        for sensor in sensors:
+            sensor_id = int(sensor["node_id"])
+            if sensor_id in used_sensors or not bool(sensor.get("sensor_valid", False)):
+                continue
+            distance = _node_aabb_gap_mm(heater, sensor)
+            if distance <= max_distance:
+                candidates.append((distance, sensor_id, sensor))
+        if not candidates:
+            warnings.append(
+                f"Heater node {int(heater['node_id'])} has no available valid sensor within {max_distance:g} mm."
+            )
+            continue
+        distance, sensor_id, sensor = min(candidates, key=lambda item: (item[0], item[1]))
+        heater["assigned_sensor_id"] = sensor_id
+        heater["sensor_pair_distance_mm"] = float(distance)
+        sensor["assigned_heater_id"] = int(heater["node_id"])
+        sensor["sensor_pair_distance_mm"] = float(distance)
+        sensor["sensor_monitor_only"] = False
+        sensor["sensor_control_mode"] = "mimo"
+        used_sensors.add(sensor_id)
+    for sensor in sensors:
+        if sensor.get("assigned_heater_id") is None:
+            sensor["sensor_monitor_only"] = True
+            warnings.append(f"Sensor node {int(sensor['node_id'])} has no assigned heater; marked monitor-only.")
+
+
+def _node_aabb_gap_mm(left: dict, right: dict) -> float:
+    left_min, left_max = _node_bounds_mm(left)
+    right_min, right_max = _node_bounds_mm(right)
+    gaps = np.maximum(np.maximum(left_min - right_max, right_min - left_max), 0.0)
+    return float(np.linalg.norm(gaps))
+
+
+def _node_bounds_mm(node: dict) -> tuple[np.ndarray, np.ndarray]:
+    bounds = node.get("source_bounds_mm") or {}
+    if isinstance(bounds, dict) and "min" in bounds and "max" in bounds:
+        return np.asarray(bounds["min"], dtype=float), np.asarray(bounds["max"], dtype=float)
+    center = np.asarray(node.get("center_mm", (0.0, 0.0, 0.0)), dtype=float)
+    size = np.asarray(node.get("size_mm", (0.0, 0.0, 0.0)), dtype=float)
+    half = np.maximum(size, 0.0) * 0.5
+    return center - half, center + half
 
 
 def _weighted_node_average(group_nodes: list[dict], field: str, total_C: float, default: float) -> float:
