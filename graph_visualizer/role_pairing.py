@@ -22,6 +22,7 @@ def refresh_sensor_connected_nodes(model: ThermalGraphModel) -> list[str]:
             node.sensor_monitor_only = False
             continue
         connected: set[int] = set()
+        connected_role_ids: set[int] = set()
         for edge in model.edges.values():
             other_id: int | None = None
             if int(edge.source) == int(node.node_id):
@@ -31,9 +32,20 @@ def refresh_sensor_connected_nodes(model: ThermalGraphModel) -> list[str]:
             if other_id is None:
                 continue
             other = model.nodes.get(other_id)
-            if other is None or other.is_heater or other.is_sensor:
+            if other is None:
+                continue
+            if other.is_heater or other.is_sensor:
+                connected_role_ids.add(other_id)
                 continue
             connected.add(other_id)
+        inherited_from_heaters = False
+        if not connected and connected_role_ids:
+            for role_id in sorted(connected_role_ids):
+                role_node = model.nodes.get(int(role_id))
+                if role_node is None or not role_node.is_heater:
+                    continue
+                connected.update(_external_body_neighbors(model, int(role_id)))
+            inherited_from_heaters = bool(connected)
         node.sensor_connected_node_ids = sorted(connected)
         if not node.sensor_connected_node_ids and node.is_heater and str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo":
             node.sensor_connected_node_ids = [int(node.node_id)]
@@ -45,6 +57,11 @@ def refresh_sensor_connected_nodes(model: ThermalGraphModel) -> list[str]:
         if not node.sensor_valid:
             node.sensor_monitor_only = True
             warnings.append(f"Sensor node {node.node_id} has no connected body nodes; marked monitor-only.")
+        elif inherited_from_heaters:
+            warnings.append(
+                f"Sensor node {node.node_id} has no direct body-node contacts but contacts heater node(s) "
+                f"{sorted(connected_role_ids)}; using heater-adjacent body node(s) {sorted(connected)} for readout."
+            )
     _refresh_sensor_assignment_summaries(model)
     return warnings
 
@@ -132,6 +149,23 @@ def aabb_surface_gap_mm(left: Any, right: Any) -> float:
     right_min, right_max = node_bounds_mm(right)
     gaps = np.maximum(np.maximum(left_min - right_max, right_min - left_max), 0.0)
     return float(np.linalg.norm(gaps))
+
+
+def _external_body_neighbors(model: ThermalGraphModel, node_id: int) -> set[int]:
+    connected: set[int] = set()
+    for edge in model.edges.values():
+        other_id: int | None = None
+        if int(edge.source) == int(node_id):
+            other_id = int(edge.target)
+        elif int(edge.target) == int(node_id):
+            other_id = int(edge.source)
+        if other_id is None:
+            continue
+        other = model.nodes.get(int(other_id))
+        if other is None or other.is_heater or other.is_sensor:
+            continue
+        connected.add(int(other_id))
+    return connected
 
 
 def node_bounds_mm(node: Any) -> tuple[np.ndarray, np.ndarray]:

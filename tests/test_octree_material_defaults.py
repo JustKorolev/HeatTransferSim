@@ -620,6 +620,61 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
         self.assertGreater(result.edges[0]["G_W_K"], 0.0)
 
+    def test_graph_build_embedded_sensor_uses_contacting_heater_body_neighbors(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_heater",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"heater_strip_1": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="heater_strip_1",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_body",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(10.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"body_panel": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="body_panel",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+        ]
+        heater_obj = _mesh_object("heater_strip_1", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        sensor_obj = _mesh_object("temperature_probe_A", "Copper", [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
+        heater_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj])
+        sensor_component = RoleComponent(name="temperature_probe", kind="sensor", objects=[sensor_obj])
+        warnings: list[str] = []
+
+        result = build_graph(
+            leaves,
+            ContactReport(),
+            materials,
+            warnings=warnings,
+            role_components=[heater_component, sensor_component],
+        )
+
+        sensors = [node for node in result.nodes if node["is_sensor"]]
+        heaters = [node for node in result.nodes if node["is_heater"]]
+        bodies = [node for node in result.nodes if not node["is_heater"] and not node["is_sensor"]]
+        self.assertEqual(len(sensors), 1)
+        self.assertEqual(len(heaters), 1)
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(sensors[0]["sensor_connected_node_ids"], [bodies[0]["node_id"]])
+        self.assertTrue(sensors[0]["sensor_valid"])
+        self.assertEqual(heaters[0]["assigned_sensor_id"], sensors[0]["node_id"])
+        self.assertIn("heater-adjacent body node", " ".join(warnings))
+
     def test_graph_build_adds_near_contact_edges_for_near_face_cells(self) -> None:
         materials = self.make_materials()
         leaves = [

@@ -552,6 +552,7 @@ def _attach_sensor_connections_and_pair_roles(
     for sensor in sensors:
         connected: set[int] = set()
         sensor_id = int(sensor["node_id"])
+        connected_role_ids: set[int] = set()
         for edge in edges:
             node_i = int(edge["node_i"])
             node_j = int(edge["node_j"])
@@ -563,9 +564,20 @@ def _attach_sensor_connections_and_pair_roles(
             if other_id is None:
                 continue
             other = node_by_id.get(other_id)
-            if other is None or bool(other.get("is_heater")) or bool(other.get("is_sensor")):
+            if other is None:
+                continue
+            if bool(other.get("is_heater")) or bool(other.get("is_sensor")):
+                connected_role_ids.add(other_id)
                 continue
             connected.add(other_id)
+        inherited_from_heaters = False
+        if not connected and connected_role_ids:
+            for role_id in sorted(connected_role_ids):
+                role_node = node_by_id.get(role_id)
+                if role_node is None or not bool(role_node.get("is_heater")):
+                    continue
+                connected.update(_external_body_neighbors(int(role_id), edges, node_by_id))
+            inherited_from_heaters = bool(connected)
         sensor["sensor_connected_node_ids"] = sorted(connected)
         sensor["sensor_valid"] = bool(connected)
         sensor["assigned_heater_id"] = None
@@ -577,6 +589,11 @@ def _attach_sensor_connections_and_pair_roles(
         if not connected:
             warnings.append(
                 f"Sensor node {sensor_id} has no connected body nodes; marked monitor-only and excluded from MIMO control."
+            )
+        elif inherited_from_heaters:
+            warnings.append(
+                f"Sensor node {sensor_id} has no direct body-node contacts but contacts heater node(s) "
+                f"{sorted(connected_role_ids)}; using heater-adjacent body node(s) {sorted(connected)} for readout."
             )
     max_distance = max(0.0, float(max_heater_sensor_pair_distance_mm))
     for heater in sorted(heaters, key=lambda item: int(item["node_id"])):
@@ -612,6 +629,28 @@ def _attach_sensor_connections_and_pair_roles(
         if not sensor.get("assigned_heater_ids"):
             sensor["sensor_monitor_only"] = True
             warnings.append(f"Sensor node {int(sensor['node_id'])} has no assigned heater; marked monitor-only.")
+
+
+def _external_body_neighbors(
+    node_id: int,
+    edges: list[dict],
+    node_by_id: dict[int, dict],
+) -> set[int]:
+    connected: set[int] = set()
+    for edge in edges:
+        node_i = int(edge["node_i"])
+        node_j = int(edge["node_j"])
+        if node_i == int(node_id):
+            other_id = node_j
+        elif node_j == int(node_id):
+            other_id = node_i
+        else:
+            continue
+        other = node_by_id.get(int(other_id))
+        if other is None or bool(other.get("is_heater")) or bool(other.get("is_sensor")):
+            continue
+        connected.add(int(other_id))
+    return connected
 
 
 def _node_aabb_gap_mm(left: dict, right: dict) -> float:

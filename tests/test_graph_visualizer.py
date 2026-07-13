@@ -668,6 +668,29 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(model.nodes[3].assigned_heater_id, 1)
         self.assertFalse(model.nodes[3].sensor_monitor_only)
 
+    def test_sensor_touching_heater_inherits_heater_body_readout_nodes(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="embedded_sensor"))
+        heater = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        heater.is_heater = True
+        heater.center_mm = (0.0, 0.0, 0.0)
+        heater.size_mm = (2.0, 2.0, 2.0)
+        sensor = NodeProperties.with_material(2, (0, 1, 0), material="copper")
+        sensor.is_sensor = True
+        sensor.center_mm = (0.0, 0.0, 0.0)
+        sensor.size_mm = (1.0, 1.0, 1.0)
+        body = NodeProperties.with_material(3, (1, 0, 0), material="copper")
+        for node in (heater, sensor, body):
+            model.add_node(node)
+        model.set_edge(1, 2, 0.1)
+        model.set_edge(1, 3, 0.1)
+
+        warnings = recompute_heater_sensor_pairing(model, max_distance_mm=1.0)
+
+        self.assertEqual(model.nodes[2].sensor_connected_node_ids, [3])
+        self.assertTrue(model.nodes[2].sensor_valid)
+        self.assertEqual(model.nodes[1].assigned_sensor_id, 2)
+        self.assertIn("heater-adjacent body node", " ".join(warnings))
+
     def test_manual_pairing_does_not_steal_sensor_from_existing_heater(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="manual_many_to_one"))
         heater_a = NodeProperties.with_material(1, (0, 0, 0), material="copper")
