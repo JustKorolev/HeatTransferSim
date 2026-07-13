@@ -776,7 +776,8 @@ def _graph_diagnostics(nodes: list[dict], edges: list[dict]) -> dict:
         "sensor_count": len(sensors),
         "paired_heater_count": sum(1 for node in heaters if node.get("assigned_sensor_id") is not None),
         "valid_sensor_count": sum(1 for node in sensors if bool(node.get("sensor_valid", True))),
-        "paired_sensor_count": sum(1 for node in sensors if node.get("assigned_heater_id") is not None),
+        "paired_sensor_count": sum(1 for node in sensors if node.get("assigned_heater_ids") or node.get("assigned_heater_id") is not None),
+        "max_heaters_per_sensor": max((len(node.get("assigned_heater_ids") or []) for node in sensors), default=0),
     }
 
 
@@ -785,11 +786,13 @@ def _print_role_summary(nodes: list[dict]) -> None:
     sensors = [node for node in nodes if bool(node.get("is_sensor"))]
     paired_heaters = [node for node in heaters if node.get("assigned_sensor_id") is not None]
     valid_sensors = [node for node in sensors if bool(node.get("sensor_valid", True))]
-    paired_sensors = [node for node in sensors if node.get("assigned_heater_id") is not None]
+    paired_sensors = [node for node in sensors if node.get("assigned_heater_ids") or node.get("assigned_heater_id") is not None]
+    max_heaters_per_sensor = max((len(node.get("assigned_heater_ids") or []) for node in sensors), default=0)
     print(
         "Heater/sensor detection: "
         f"heaters={len(heaters)} paired_heaters={len(paired_heaters)} "
-        f"sensors={len(sensors)} valid_sensors={len(valid_sensors)} paired_sensors={len(paired_sensors)}"
+        f"sensors={len(sensors)} valid_sensors={len(valid_sensors)} paired_sensors={len(paired_sensors)} "
+        f"max_heaters_per_sensor={max_heaters_per_sensor}"
     )
 
 

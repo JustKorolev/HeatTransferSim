@@ -1613,7 +1613,11 @@ def _node_uses_mimo_controller(
                 str(getattr(node, "sensor_control_mode", "manual")) == "mimo"
                 or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
             )
-            and (getattr(node, "assigned_heater_id", None) is not None or bool(getattr(node, "is_heater", False)))
+            and (
+                bool(getattr(node, "assigned_heater_ids", []) or [])
+                or getattr(node, "assigned_heater_id", None) is not None
+                or bool(getattr(node, "is_heater", False))
+            )
             and bool(getattr(node, "sensor_valid", True))
             and not bool(getattr(node, "sensor_monitor_only", False))
         )

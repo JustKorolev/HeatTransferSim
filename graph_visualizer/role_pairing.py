@@ -45,6 +45,7 @@ def refresh_sensor_connected_nodes(model: ThermalGraphModel) -> list[str]:
         if not node.sensor_valid:
             node.sensor_monitor_only = True
             warnings.append(f"Sensor node {node.node_id} has no connected body nodes; marked monitor-only.")
+    _refresh_sensor_assignment_summaries(model)
     return warnings
 
 
@@ -52,7 +53,7 @@ def recompute_heater_sensor_pairing(
     model: ThermalGraphModel,
     max_distance_mm: float = DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM,
 ) -> list[str]:
-    """Pair each heater to the closest valid unpaired sensor within an AABB gap."""
+    """Pair each heater to its closest valid sensor within an AABB gap."""
     warnings = refresh_sensor_connected_nodes(model)
     max_distance = max(0.0, float(max_distance_mm))
     heaters = [node for _, node in sorted(model.nodes.items()) if node.is_heater]
@@ -62,14 +63,14 @@ def recompute_heater_sensor_pairing(
         heater.sensor_pair_distance_mm = None
     for sensor in sensors:
         sensor.assigned_heater_id = None
+        sensor.assigned_heater_ids = []
         sensor.sensor_pair_distance_mm = None
         sensor.sensor_monitor_only = not bool(sensor.sensor_valid)
 
-    used_sensors: set[int] = set()
     for heater in heaters:
         candidates: list[tuple[float, int, Any]] = []
         for sensor in sensors:
-            if int(sensor.node_id) in used_sensors or not bool(sensor.sensor_valid):
+            if not bool(sensor.sensor_valid):
                 continue
             distance = aabb_surface_gap_mm(heater, sensor)
             if distance <= max_distance:
@@ -82,10 +83,10 @@ def recompute_heater_sensor_pairing(
         distance, _sensor_id, sensor = min(candidates, key=lambda item: (item[0], item[1]))
         _assign_pair(heater, sensor, distance)
         sensor.sensor_monitor_only = False
-        used_sensors.add(int(sensor.node_id))
 
+    _refresh_sensor_assignment_summaries(model)
     for sensor in sensors:
-        if sensor.assigned_heater_id is None:
+        if not sensor.assigned_heater_ids:
             sensor.sensor_monitor_only = True
             warnings.append(f"Sensor node {sensor.node_id} has no assigned heater; marked monitor-only.")
     return warnings
@@ -96,7 +97,7 @@ def assign_heater_to_sensor(
     heater_id: int,
     sensor_id: int | None,
 ) -> list[str]:
-    """Manually assign one selected heater to one sensor, clearing conflicting pairs."""
+    """Manually assign one selected heater to one sensor; sensors may serve multiple heaters."""
     warnings = refresh_sensor_connected_nodes(model)
     heater = model.nodes.get(int(heater_id))
     if heater is None or not heater.is_heater:
@@ -104,25 +105,22 @@ def assign_heater_to_sensor(
     previous_sensor_id = heater.assigned_sensor_id
     if previous_sensor_id in model.nodes:
         previous = model.nodes[int(previous_sensor_id)]
-        if previous.assigned_heater_id == int(heater.node_id):
-            previous.assigned_heater_id = None
-            previous.sensor_pair_distance_mm = None
-            previous.sensor_monitor_only = True
+        previous.assigned_heater_ids = [
+            int(value)
+            for value in getattr(previous, "assigned_heater_ids", []) or []
+            if int(value) != int(heater.node_id)
+        ]
     heater.assigned_sensor_id = None
     heater.sensor_pair_distance_mm = None
     if sensor_id is None:
+        _refresh_sensor_assignment_summaries(model)
         return warnings
     sensor = model.nodes.get(int(sensor_id))
     if sensor is None or not sensor.is_sensor:
         raise ValueError(f"Node {sensor_id} is not a sensor.")
-    previous_heater_id = sensor.assigned_heater_id
-    if previous_heater_id in model.nodes:
-        previous_heater = model.nodes[int(previous_heater_id)]
-        if previous_heater.assigned_sensor_id == int(sensor.node_id):
-            previous_heater.assigned_sensor_id = None
-            previous_heater.sensor_pair_distance_mm = None
     distance = aabb_surface_gap_mm(heater, sensor)
     _assign_pair(heater, sensor, distance)
+    _refresh_sensor_assignment_summaries(model)
     sensor.sensor_monitor_only = not bool(sensor.sensor_valid)
     if not sensor.sensor_valid:
         warnings.append(f"Sensor node {sensor.node_id} has no connected body nodes; manual pair will be monitor-only.")
@@ -195,5 +193,38 @@ def average_inverse_capacitance_for_sensor(
 def _assign_pair(heater: Any, sensor: Any, distance_mm: float) -> None:
     heater.assigned_sensor_id = int(sensor.node_id)
     heater.sensor_pair_distance_mm = float(distance_mm)
-    sensor.assigned_heater_id = int(heater.node_id)
-    sensor.sensor_pair_distance_mm = float(distance_mm)
+    assigned = [int(value) for value in getattr(sensor, "assigned_heater_ids", []) or []]
+    assigned.append(int(heater.node_id))
+    sensor.assigned_heater_ids = sorted(set(assigned))
+    sensor.assigned_heater_id = int(sensor.assigned_heater_ids[0])
+    previous_distance = getattr(sensor, "sensor_pair_distance_mm", None)
+    sensor.sensor_pair_distance_mm = (
+        float(distance_mm)
+        if previous_distance is None
+        else min(float(previous_distance), float(distance_mm))
+    )
+
+
+def _refresh_sensor_assignment_summaries(model: ThermalGraphModel) -> None:
+    assigned_by_sensor: dict[int, list[tuple[int, float | None]]] = {
+        int(node.node_id): [] for node in model.nodes.values() if node.is_sensor
+    }
+    for heater in model.nodes.values():
+        if not heater.is_heater or heater.assigned_sensor_id is None:
+            continue
+        sensor_id = int(heater.assigned_sensor_id)
+        if sensor_id not in assigned_by_sensor:
+            continue
+        distance = getattr(heater, "sensor_pair_distance_mm", None)
+        assigned_by_sensor[sensor_id].append(
+            (int(heater.node_id), float(distance) if distance is not None else None)
+        )
+    for sensor_id, assignments in assigned_by_sensor.items():
+        sensor = model.nodes[int(sensor_id)]
+        heater_ids = sorted({int(heater_id) for heater_id, _distance in assignments})
+        sensor.assigned_heater_ids = heater_ids
+        sensor.assigned_heater_id = heater_ids[0] if heater_ids else None
+        distances = [float(distance) for _heater_id, distance in assignments if distance is not None]
+        sensor.sensor_pair_distance_mm = min(distances) if distances else None
+        if sensor.sensor_valid:
+            sensor.sensor_monitor_only = not bool(heater_ids)

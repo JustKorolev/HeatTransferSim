@@ -55,6 +55,7 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
         )
     if getattr(attrs, "is_sensor", False):
         sensor = getattr(attrs, "sensor", None)
+        assigned_heater_ids = list(getattr(attrs, "assigned_heater_ids", []) or [])
         lines.extend(
             [
                 "-- sensor --",
@@ -62,8 +63,8 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"noise: {_fmt(getattr(sensor, 'sensor_noise_std_K', None))} K",
                 f"bias: {_fmt(getattr(sensor, 'sensor_bias_K', None))} K",
                 f"tau: {_fmt(getattr(sensor, 'sensor_time_constant_s', None))} s",
-                f"assigned heater: {getattr(attrs, 'assigned_heater_id', None) or '?'}",
-                f"pair gap: {_fmt(getattr(attrs, 'sensor_pair_distance_mm', None))} mm",
+                f"assigned heaters: {', '.join(str(value) for value in assigned_heater_ids) if assigned_heater_ids else '?'}",
+                f"nearest pair gap: {_fmt(getattr(attrs, 'sensor_pair_distance_mm', None))} mm",
                 f"connected nodes: {len(getattr(attrs, 'sensor_connected_node_ids', []) or [])}",
                 f"monitor-only: {'yes' if getattr(attrs, 'sensor_monitor_only', False) else 'no'}",
                 f"valid: {'yes' if getattr(attrs, 'sensor_valid', True) else 'no'}",

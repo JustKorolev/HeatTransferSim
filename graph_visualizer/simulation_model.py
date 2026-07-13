@@ -469,26 +469,27 @@ class PreparedSimulation:
         enabled_heater_ids = _enabled_node_id_set(self.params.enabled_heater_node_ids)
         enabled_sensor_ids = _enabled_node_id_set(self.params.enabled_sensor_node_ids)
         pair_warnings = refresh_sensor_connected_nodes(self.model)
-        sensor_ids: list[int] = []
+        active_sensor_ids: set[int] = set()
         heater_ids: list[int] = []
         for node_id in self.node_ids:
-            sensor_id = int(node_id)
-            sensor = self.model.nodes[sensor_id]
-            if not _node_is_mimo_sensor(sensor) or not _node_id_enabled(enabled_sensor_ids, sensor_id):
+            heater_id = int(node_id)
+            heater = self.model.nodes[heater_id]
+            if not heater.is_heater or not _node_id_enabled(enabled_heater_ids, heater_id):
                 continue
-            heater_id = getattr(sensor, "assigned_heater_id", None)
-            if heater_id is None and sensor.is_heater and str(getattr(getattr(sensor, "heater_control", None), "mode", "")) == "mimo":
-                heater_id = sensor_id
-            if heater_id is None:
+            sensor_id = getattr(heater, "assigned_sensor_id", None)
+            if sensor_id is None and heater.is_sensor and str(getattr(getattr(heater, "heater_control", None), "mode", "")) == "mimo":
+                sensor_id = heater_id
+            if sensor_id is None:
                 continue
-            heater_id = int(heater_id)
-            heater = self.model.nodes.get(heater_id)
-            if heater is None or not heater.is_heater:
+            sensor_id = int(sensor_id)
+            sensor = self.model.nodes.get(sensor_id)
+            if sensor is None or not _node_is_mimo_sensor(sensor):
                 continue
-            if not _node_id_enabled(enabled_heater_ids, heater_id):
+            if not _node_id_enabled(enabled_sensor_ids, sensor_id):
                 continue
-            sensor_ids.append(sensor_id)
+            active_sensor_ids.add(sensor_id)
             heater_ids.append(heater_id)
+        sensor_ids = sorted(active_sensor_ids)
         if not sensor_ids or not heater_ids:
             self.controller_warnings = pair_warnings + [
                 "MIMO controller enabled, but at least one paired valid MIMO sensor and heater are required."
@@ -515,20 +516,34 @@ class PreparedSimulation:
             for sensor_id in sensor_ids
         ]
         valid_pairs = [
-            (sensor_id, heater_id, readout)
-            for sensor_id, heater_id, readout in zip(sensor_ids, heater_ids, readouts)
+            (sensor_id, readout)
+            for sensor_id, readout in zip(sensor_ids, readouts)
             if np.isfinite(float(readout))
         ]
         if len(valid_pairs) != len(sensor_ids):
             pair_warnings.append("One or more MIMO sensors have invalid averaged readouts and were excluded.")
-        sensor_ids = [int(sensor_id) for sensor_id, _heater_id, _readout in valid_pairs]
-        heater_ids = [int(heater_id) for _sensor_id, heater_id, _readout in valid_pairs]
+        sensor_ids = [int(sensor_id) for sensor_id, _readout in valid_pairs]
+        valid_sensor_id_set = set(sensor_ids)
+        filtered_heater_ids: list[int] = []
+        for heater_id in heater_ids:
+            heater = self.model.nodes[int(heater_id)]
+            assigned_sensor_id = getattr(heater, "assigned_sensor_id", None)
+            if assigned_sensor_id is not None and int(assigned_sensor_id) in valid_sensor_id_set:
+                filtered_heater_ids.append(int(heater_id))
+                continue
+            if (
+                int(heater_id) in valid_sensor_id_set
+                and heater.is_sensor
+                and str(getattr(getattr(heater, "heater_control", None), "mode", "")) == "mimo"
+            ):
+                filtered_heater_ids.append(int(heater_id))
+        heater_ids = filtered_heater_ids
         if not sensor_ids or not heater_ids:
             self.controller_warnings = pair_warnings + ["No valid paired MIMO sensor readouts are available."]
             if update_state:
                 self.controller_last_power_by_heater = {}
             return powers
-        y = np.array([float(readout) for _sensor_id, _heater_id, readout in valid_pairs], dtype=float)
+        y = np.array([float(readout) for _sensor_id, readout in valid_pairs], dtype=float)
         estimates = []
         for sensor_id, measured in zip(sensor_ids, y):
             node = self.model.nodes[sensor_id]
@@ -834,15 +849,22 @@ class PreparedSimulation:
                 int(sensor_id),
             )
             average_inverse_C_s.append(float(average_inverse_C))
-            heater_id = getattr(sensor, "assigned_heater_id", None)
-            if heater_id is None and sensor.is_heater and str(getattr(getattr(sensor, "heater_control", None), "mode", "")) == "mimo":
-                heater_id = int(sensor_id)
-            heater_col = heater_col_by_id.get(int(heater_id)) if heater_id is not None else None
-            if heater_col is None:
+            paired_heater_cols = [
+                col
+                for heater_id, col in heater_col_by_id.items()
+                if int(getattr(self.model.nodes[int(heater_id)], "assigned_sensor_id", -1) or -1) == int(sensor_id)
+                or (
+                    int(heater_id) == int(sensor_id)
+                    and sensor.is_heater
+                    and str(getattr(getattr(sensor, "heater_control", None), "mode", "")) == "mimo"
+                )
+            ]
+            if not paired_heater_cols:
                 warnings.append(f"MIMO sensor {int(sensor_id)} has no active paired heater; B_s row set to zero.")
                 continue
             if np.isfinite(average_inverse_C) and average_inverse_C > 0.0:
-                B_dyn[sensor_index, heater_col] = alpha * float(average_inverse_C)
+                for heater_col in paired_heater_cols:
+                    B_dyn[sensor_index, heater_col] = alpha * float(average_inverse_C)
             else:
                 warnings.append(
                     f"MIMO sensor {int(sensor_id)} has no valid connected-node capacitance; B_s row set to zero."
@@ -1163,23 +1185,23 @@ def _controlled_heater_power_vector(
         return powers
     enabled_heaters = _enabled_node_id_set(params.enabled_heater_node_ids)
     enabled_sensors = _enabled_node_id_set(params.enabled_sensor_node_ids)
-    for sensor_id, sensor in sorted(model.nodes.items(), key=lambda item: int(item[0])):
-        if not sensor.is_sensor:
+    for heater_id, heater in sorted(model.nodes.items(), key=lambda item: int(item[0])):
+        if not heater.is_heater or not _node_id_enabled(enabled_heaters, int(heater_id)):
             continue
-        if not _node_id_enabled(enabled_sensors, int(sensor_id)):
+        sensor_id = getattr(heater, "assigned_sensor_id", None)
+        if sensor_id is None:
+            continue
+        sensor_id = int(sensor_id)
+        sensor = model.nodes.get(sensor_id)
+        if sensor is None or not sensor.is_sensor:
+            continue
+        if not _node_id_enabled(enabled_sensors, sensor_id):
             continue
         if str(getattr(sensor, "sensor_control_mode", "manual")) in skipped_modes:
             continue
         if str(getattr(sensor, "sensor_control_mode", "manual")) != "manual":
             continue
-        heater_id = getattr(sensor, "assigned_heater_id", None)
-        if heater_id is None:
-            continue
-        heater_id = int(heater_id)
-        if not _node_id_enabled(enabled_heaters, heater_id):
-            continue
-        heater = model.nodes.get(heater_id)
-        heater_row = node_index.get(heater_id)
+        heater_row = node_index.get(int(heater_id))
         if heater is None or heater_row is None or not heater.is_heater:
             continue
         max_power = max(0.0, float(heater.heater.heater_max_power_W) * float(heater.heater.heater_efficiency))
@@ -1263,7 +1285,8 @@ def _node_is_mimo_sensor(node: Any) -> bool:
             or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
         )
         and (
-            getattr(node, "assigned_heater_id", None) is not None
+            bool(getattr(node, "assigned_heater_ids", []) or [])
+            or getattr(node, "assigned_heater_id", None) is not None
             or bool(getattr(node, "is_heater", False))
         )
     )
@@ -1297,15 +1320,26 @@ def _mimo_controller_is_active(
     is_heater = any(
         bool(getattr(model.nodes[int(node_id)], "is_heater", False))
         and _node_id_enabled(enabled_heater_ids, int(node_id))
-        and any(
-            _node_is_mimo_sensor(model.nodes[int(sensor_id)])
-            and (
-                getattr(model.nodes[int(sensor_id)], "assigned_heater_id", None) == int(node_id)
-                or int(sensor_id) == int(node_id)
-            )
-            and _node_id_enabled(enabled_sensor_ids, int(sensor_id))
-            for sensor_id in node_ids
-        )
+        and _heater_has_active_mimo_sensor(model, int(node_id), enabled_sensor_ids)
         for node_id in node_ids
     )
     return is_sensor and is_heater
+
+
+def _heater_has_active_mimo_sensor(
+    model: ThermalGraphModel,
+    heater_id: int,
+    enabled_sensor_ids: set[int] | None,
+) -> bool:
+    heater = model.nodes[int(heater_id)]
+    sensor_id = getattr(heater, "assigned_sensor_id", None)
+    if sensor_id is None and heater.is_sensor and str(getattr(getattr(heater, "heater_control", None), "mode", "")) == "mimo":
+        sensor_id = int(heater_id)
+    if sensor_id is None:
+        return False
+    sensor = model.nodes.get(int(sensor_id))
+    return bool(
+        sensor is not None
+        and _node_is_mimo_sensor(sensor)
+        and _node_id_enabled(enabled_sensor_ids, int(sensor_id))
+    )

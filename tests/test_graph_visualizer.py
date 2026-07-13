@@ -43,7 +43,7 @@ from graph_visualizer.role_assignment import (
     node_matches_role_substring,
     normalize_role_match_text,
 )
-from graph_visualizer.role_pairing import recompute_heater_sensor_pairing
+from graph_visualizer.role_pairing import assign_heater_to_sensor, recompute_heater_sensor_pairing
 from graph_visualizer.simulation_model import prepare_simulation
 from graph_visualizer.simulation_parameters import (
     SimulationParameters,
@@ -635,9 +635,58 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertFalse(warnings)
         self.assertEqual(model.nodes[1].assigned_sensor_id, 2)
         self.assertEqual(model.nodes[2].assigned_heater_id, 1)
+        self.assertEqual(model.nodes[2].assigned_heater_ids, [1])
         self.assertAlmostEqual(float(model.nodes[1].sensor_pair_distance_mm), 2.0)
         self.assertEqual(model.nodes[2].sensor_connected_node_ids, [3])
         self.assertFalse(model.nodes[2].sensor_monitor_only)
+
+    def test_role_pairing_allows_one_sensor_to_serve_multiple_heaters(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="many_to_one_pairing"))
+        heater_a = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        heater_a.is_heater = True
+        heater_a.center_mm = (0.0, 0.0, 0.0)
+        heater_a.size_mm = (2.0, 2.0, 2.0)
+        heater_b = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        heater_b.is_heater = True
+        heater_b.center_mm = (1.0, 0.0, 0.0)
+        heater_b.size_mm = (2.0, 2.0, 2.0)
+        sensor = NodeProperties.with_material(3, (3, 0, 0), material="copper")
+        sensor.is_sensor = True
+        sensor.center_mm = (3.0, 0.0, 0.0)
+        sensor.size_mm = (2.0, 2.0, 2.0)
+        body = NodeProperties.with_material(4, (4, 0, 0), material="copper")
+        for node in (heater_a, heater_b, sensor, body):
+            model.add_node(node)
+        model.set_edge(3, 4, 0.1)
+
+        warnings = recompute_heater_sensor_pairing(model, max_distance_mm=3.0)
+
+        self.assertFalse(warnings)
+        self.assertEqual(model.nodes[1].assigned_sensor_id, 3)
+        self.assertEqual(model.nodes[2].assigned_sensor_id, 3)
+        self.assertEqual(model.nodes[3].assigned_heater_ids, [1, 2])
+        self.assertEqual(model.nodes[3].assigned_heater_id, 1)
+        self.assertFalse(model.nodes[3].sensor_monitor_only)
+
+    def test_manual_pairing_does_not_steal_sensor_from_existing_heater(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="manual_many_to_one"))
+        heater_a = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        heater_a.is_heater = True
+        heater_b = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        heater_b.is_heater = True
+        sensor = NodeProperties.with_material(3, (2, 0, 0), material="copper")
+        sensor.is_sensor = True
+        body = NodeProperties.with_material(4, (3, 0, 0), material="copper")
+        for node in (heater_a, heater_b, sensor, body):
+            model.add_node(node)
+        model.set_edge(3, 4, 0.1)
+
+        assign_heater_to_sensor(model, 1, 3)
+        assign_heater_to_sensor(model, 2, 3)
+
+        self.assertEqual(model.nodes[1].assigned_sensor_id, 3)
+        self.assertEqual(model.nodes[2].assigned_sensor_id, 3)
+        self.assertEqual(model.nodes[3].assigned_heater_ids, [1, 2])
 
     def test_paired_mimo_uses_average_sensor_readout_and_inverse_connected_capacitance(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="paired_mimo"))

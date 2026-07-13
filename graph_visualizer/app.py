@@ -645,12 +645,12 @@ class GraphVisualizerApp:
                 else f"sensor {int(assigned)}, gap {float(distance or 0.0):.3g} mm"
             )
         if hasattr(self, "sensor_assigned_heater_label"):
-            assigned = getattr(node, "assigned_heater_id", None)
+            assigned_ids = list(getattr(node, "assigned_heater_ids", []) or [])
             distance = getattr(node, "sensor_pair_distance_mm", None)
             self.sensor_assigned_heater_label.setText(
                 "unpaired"
-                if assigned is None
-                else f"heater {int(assigned)}, gap {float(distance or 0.0):.3g} mm"
+                if not assigned_ids
+                else f"{len(assigned_ids)} heater(s), nearest gap {float(distance or 0.0):.3g} mm"
             )
         if hasattr(self, "sensor_connected_count_label"):
             self.sensor_connected_count_label.setText(str(len(getattr(node, "sensor_connected_node_ids", []) or [])))

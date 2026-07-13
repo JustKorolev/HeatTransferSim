@@ -178,6 +178,7 @@ class NodeProperties:
     sensor: SensorProperties = field(default_factory=SensorProperties)
     assigned_sensor_id: int | None = None
     assigned_heater_id: int | None = None
+    assigned_heater_ids: list[int] = field(default_factory=list)
     sensor_pair_distance_mm: float | None = None
     sensor_connected_node_ids: list[int] = field(default_factory=list)
     sensor_monitor_only: bool = False
@@ -408,6 +409,12 @@ class NodeProperties:
             copied["sensor_manual_power_W"] = float(old_manual.get("power", 0.0))
         copied["assigned_sensor_id"] = _optional_int(copied.get("assigned_sensor_id"))
         copied["assigned_heater_id"] = _optional_int(copied.get("assigned_heater_id"))
+        assigned_heater_ids = _int_list(copied.get("assigned_heater_ids", []))
+        if copied["assigned_heater_id"] is not None and int(copied["assigned_heater_id"]) not in assigned_heater_ids:
+            assigned_heater_ids.append(int(copied["assigned_heater_id"]))
+        copied["assigned_heater_ids"] = sorted(set(assigned_heater_ids))
+        if copied["assigned_heater_id"] is None and copied["assigned_heater_ids"]:
+            copied["assigned_heater_id"] = int(copied["assigned_heater_ids"][0])
         copied["sensor_pair_distance_mm"] = _optional_float(copied.get("sensor_pair_distance_mm"))
         copied["sensor_connected_node_ids"] = [
             int(value)
@@ -531,6 +538,10 @@ class NodeProperties:
             data["assigned_sensor_id"] = int(self.assigned_sensor_id)
         if self.assigned_heater_id is not None:
             data["assigned_heater_id"] = int(self.assigned_heater_id)
+        assigned_heater_ids = sorted({int(value) for value in self.assigned_heater_ids if _can_int(value)})
+        if assigned_heater_ids:
+            data["assigned_heater_ids"] = assigned_heater_ids
+            data["assigned_heater_id"] = int(assigned_heater_ids[0])
         if self.sensor_pair_distance_mm is not None:
             data["sensor_pair_distance_mm"] = float(self.sensor_pair_distance_mm)
         if self.sensor_connected_node_ids:
@@ -967,6 +978,22 @@ def _optional_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number == number else None
+
+
+def _int_list(values: Any) -> list[int]:
+    if values in (None, ""):
+        return []
+    if isinstance(values, (str, bytes)):
+        values = [values]
+    try:
+        iterator = iter(values)
+    except TypeError:
+        iterator = iter([values])
+    result: list[int] = []
+    for value in iterator:
+        if _can_int(value):
+            result.append(int(value))
+    return result
 
 
 def _normalize_sensor_control_mode(value: Any) -> str:

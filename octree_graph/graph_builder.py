@@ -569,6 +569,7 @@ def _attach_sensor_connections_and_pair_roles(
         sensor["sensor_connected_node_ids"] = sorted(connected)
         sensor["sensor_valid"] = bool(connected)
         sensor["assigned_heater_id"] = None
+        sensor["assigned_heater_ids"] = []
         sensor["sensor_pair_distance_mm"] = None
         sensor["sensor_control_mode"] = str(sensor.get("sensor_control_mode") or "manual")
         sensor["sensor_manual_power_W"] = float(sensor.get("sensor_manual_power_W", 0.0) or 0.0)
@@ -578,12 +579,11 @@ def _attach_sensor_connections_and_pair_roles(
                 f"Sensor node {sensor_id} has no connected body nodes; marked monitor-only and excluded from MIMO control."
             )
     max_distance = max(0.0, float(max_heater_sensor_pair_distance_mm))
-    used_sensors: set[int] = set()
     for heater in sorted(heaters, key=lambda item: int(item["node_id"])):
         candidates: list[tuple[float, int, dict]] = []
         for sensor in sensors:
             sensor_id = int(sensor["node_id"])
-            if sensor_id in used_sensors or not bool(sensor.get("sensor_valid", False)):
+            if not bool(sensor.get("sensor_valid", False)):
                 continue
             distance = _node_aabb_gap_mm(heater, sensor)
             if distance <= max_distance:
@@ -596,13 +596,20 @@ def _attach_sensor_connections_and_pair_roles(
         distance, sensor_id, sensor = min(candidates, key=lambda item: (item[0], item[1]))
         heater["assigned_sensor_id"] = sensor_id
         heater["sensor_pair_distance_mm"] = float(distance)
-        sensor["assigned_heater_id"] = int(heater["node_id"])
-        sensor["sensor_pair_distance_mm"] = float(distance)
+        assigned_heater_ids = [int(value) for value in sensor.get("assigned_heater_ids", []) if value is not None]
+        assigned_heater_ids.append(int(heater["node_id"]))
+        sensor["assigned_heater_ids"] = sorted(set(assigned_heater_ids))
+        sensor["assigned_heater_id"] = int(sensor["assigned_heater_ids"][0])
+        previous_distance = sensor.get("sensor_pair_distance_mm")
+        sensor["sensor_pair_distance_mm"] = (
+            float(distance)
+            if previous_distance is None
+            else min(float(previous_distance), float(distance))
+        )
         sensor["sensor_monitor_only"] = False
         sensor["sensor_control_mode"] = "mimo"
-        used_sensors.add(sensor_id)
     for sensor in sensors:
-        if sensor.get("assigned_heater_id") is None:
+        if not sensor.get("assigned_heater_ids"):
             sensor["sensor_monitor_only"] = True
             warnings.append(f"Sensor node {int(sensor['node_id'])} has no assigned heater; marked monitor-only.")
 
