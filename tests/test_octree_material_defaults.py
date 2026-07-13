@@ -379,7 +379,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel", "heater_strip_1", "temperature_probe_A"])
         self.assertEqual([component.kind for component in role_components], ["heater", "sensor"])
         self.assertEqual(args.role_components, role_components)
-        self.assertIn("kept them in voxelization", warnings[0])
+        self.assertIn("bounds will force local octree refinement", warnings[0])
 
     def test_cli_legacy_physical_device_disable_flag_disables_role_detection(self) -> None:
         args = build_parser().parse_args(
@@ -1187,6 +1187,54 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(len(coarse), 1)
         self.assertGreater(len(crowded), len(coarse))
         self.assertLess(min(max(cell.size_mm) for cell in crowded), max(coarse[0].size_mm))
+
+    def test_detected_role_bounds_force_local_octree_refinement(self) -> None:
+        materials = self.make_materials()
+        sensor = _mesh_object("temperature_probe_A", "Copper", [0.0, 0.0, 0.0], [8.0, 8.0, 8.0])
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[sensor],
+            bounds_mm=(np.array([0.0, 0.0, 0.0]), np.array([8.0, 8.0, 8.0])),
+            warnings=[],
+        )
+        coarse_diagnostics = OctreeDiagnostics()
+        role_diagnostics = OctreeDiagnostics()
+
+        coarse = build_octree(
+            scene,
+            ContactReport(),
+            materials,
+            OctreeParams(
+                min_cell_size_mm=2.0,
+                max_cell_size_mm=100.0,
+                max_depth=3,
+                contact_refine_distance_mm=0.0,
+            ),
+            warnings=[],
+            diagnostics=coarse_diagnostics,
+        )
+        role_refined = build_octree(
+            scene,
+            ContactReport(),
+            materials,
+            OctreeParams(
+                min_cell_size_mm=2.0,
+                max_cell_size_mm=100.0,
+                max_depth=3,
+                contact_refine_distance_mm=0.0,
+                role_refine_component_names=("temperature_probe_A",),
+                role_refine_max_depth=2,
+            ),
+            warnings=[],
+            diagnostics=role_diagnostics,
+        )
+
+        self.assertEqual(len(coarse), 1)
+        self.assertEqual(coarse_diagnostics.cells_subdivided, 0)
+        self.assertEqual(coarse_diagnostics.cells_role_component_hit, 0)
+        self.assertEqual(len(role_refined), 64)
+        self.assertEqual(role_diagnostics.cells_subdivided, 9)
+        self.assertEqual(role_diagnostics.cells_role_component_hit, 64)
 
     def test_empty_graph_guard_reports_actionable_failure(self) -> None:
         args = SimpleNamespace(bbox_fallback=False, max_leaf_cells=15000)

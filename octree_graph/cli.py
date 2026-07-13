@@ -86,6 +86,9 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         voxel_batch_size=args.voxel_batch_size,
         crowded_component_refine_count=args.crowded_component_refine_count,
         crowded_component_refine_distance_mm=args.crowded_component_refine_distance_mm,
+        role_refine_component_names=_role_refine_component_names(role_components),
+        role_refine_distance_mm=args.role_refine_distance_mm,
+        role_refine_max_depth=args.role_refine_max_depth,
         contains_backend=args.contains_backend,
     )
     leaves, graph_result, diagnostics = _build_graph_with_optional_fallback(
@@ -175,6 +178,23 @@ def build_parser() -> argparse.ArgumentParser:
             "Padding around each octree cell when counting nearby components for crowded-region refinement."
         ),
     )
+    parser.add_argument(
+        "--role-refine-distance-mm",
+        type=float,
+        default=0.0,
+        help=(
+            "Padding around detected heater/sensor CAD bounds for forced local octree refinement."
+        ),
+    )
+    parser.add_argument(
+        "--role-refine-max-depth",
+        type=int,
+        default=None,
+        help=(
+            "Optional depth cap for forced heater/sensor local refinement. "
+            "Defaults to the global --max-depth."
+        ),
+    )
     parser.add_argument("--bbox-fallback", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--voxel-workers",
@@ -214,8 +234,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0e-6,
         help=(
-            "Legacy compatibility option. Detected heater/sensor CAD parts are now voxelized and tagged "
-            "as normal graph cells, so no special role-node contact tolerance is used."
+            "AABB contact tolerance for detected heater/sensor CAD parts that require dedicated "
+            "fallback role nodes because they produced no solid voxel cells."
         ),
     )
     parser.add_argument("--proximity-contact-distance-mm", type=float, default=None, help=argparse.SUPPRESS)
@@ -432,7 +452,8 @@ def _split_role_components(
     extra = "" if len(role_components) <= 8 else f", ... and {len(role_components) - 8} more"
     warnings.append(
         f"Detected {len(role_components)} heater/sensor CAD component(s); "
-        f"kept them in voxelization and will tag matching voxel cells: {role_names}{extra}."
+        f"their bounds will force local octree refinement and matching voxel cells will be tagged: "
+        f"{role_names}{extra}."
     )
     return scene, role_components
 
@@ -562,6 +583,10 @@ def _role_components_payload(role_components: list) -> list[dict]:
             }
         )
     return payload
+
+
+def _role_refine_component_names(role_components: list) -> tuple[str, ...]:
+    return tuple(sorted({obj.name for component in role_components for obj in component.objects}))
 
 
 class RunLogger:

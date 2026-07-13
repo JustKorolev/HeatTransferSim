@@ -51,6 +51,9 @@ class OctreeParams:
     voxel_batch_size: int = 64
     crowded_component_refine_count: int = 0
     crowded_component_refine_distance_mm: float = 0.0
+    role_refine_component_names: tuple[str, ...] = field(default_factory=tuple)
+    role_refine_distance_mm: float = 0.0
+    role_refine_max_depth: int | None = None
     contains_backend: str = "trimesh"
 
 
@@ -91,6 +94,7 @@ class CellClassification:
     near_surface_mesh_ids: set[int]
     candidate_mesh_ids: set[int]
     crowded_component_count: int
+    role_component_count: int
     material_ids: set[str]
     part_ids: set[str]
     occupancy: dict[str, float]
@@ -132,6 +136,7 @@ class OctreeDiagnostics:
     cells_near_surface_hit: int = 0
     cells_bbox_only_hit: int = 0
     cells_crowded_component_hit: int = 0
+    cells_role_component_hit: int = 0
     triangle_candidate_tests: int = 0
     triangle_intersection_tests: int = 0
     max_depth_reached: int = 0
@@ -155,6 +160,7 @@ class OctreeDiagnostics:
             "cells_near_surface_hit": self.cells_near_surface_hit,
             "cells_bbox_only_hit": self.cells_bbox_only_hit,
             "cells_crowded_component_hit": self.cells_crowded_component_hit,
+            "cells_role_component_hit": self.cells_role_component_hit,
             "triangle_candidate_tests": self.triangle_candidate_tests,
             "triangle_intersection_tests": self.triangle_intersection_tests,
             "max_depth_reached": self.max_depth_reached,
@@ -322,6 +328,7 @@ def build_octree(
             classification.surface_hit or classification.near_surface_hit
         )
         crowded_component_refinement = _needs_crowded_component_refinement(classification, params)
+        role_component_refinement = _needs_role_component_refinement(classification, params, level)
         effective_queue_len = len(queue) + int(remaining_batch_items)
         budget_allows_children = (
             params.max_leaf_cells is None
@@ -340,6 +347,7 @@ def build_octree(
             or mixed_materials
             or high_contrast
             or crowded_component_refinement
+            or role_component_refinement
             or (needs_surface_refinement and float(max(size_mm)) > params.min_cell_size_mm)
             or (
                 classification.occupied
@@ -571,6 +579,8 @@ def _record_leaf_diagnostics(
         diagnostics.cells_bbox_only_hit += 1
     if int(classification.crowded_component_count) > 0:
         diagnostics.cells_crowded_component_hit += 1
+    if int(classification.role_component_count) > 0:
+        diagnostics.cells_role_component_hit += 1
     if diagnostics.debug_leaves and classification.occupied:
         diagnostics.leaf_records.append(
             {
@@ -585,6 +595,7 @@ def _record_leaf_diagnostics(
                 "near_surface_hit": classification.near_surface_hit,
                 "bbox_only_hit": classification.bbox_only_hit,
                 "crowded_component_count": int(classification.crowded_component_count),
+                "role_component_count": int(classification.role_component_count),
                 "accepted_by_exact_geometry": classification.occupied,
                 "accepted_by_bbox_fallback": False,
             }
@@ -627,6 +638,21 @@ def _classify_cell(
     crowded_objects = (
         _objects_intersecting_bounds(objects, cell_min - crowded_margin, cell_max + crowded_margin)
         if int(params.crowded_component_refine_count) > 0
+        else []
+    )
+    role_refine_names = set(getattr(params, "role_refine_component_names", ()) or ())
+    role_refine_margin = max(0.0, float(getattr(params, "role_refine_distance_mm", 0.0)))
+    role_refine_objects = (
+        [
+            obj
+            for obj in _objects_intersecting_bounds(
+                objects,
+                cell_min - role_refine_margin,
+                cell_max + role_refine_margin,
+            )
+            if obj.name in role_refine_names
+        ]
+        if role_refine_names
         else []
     )
     candidate_mesh_ids = {id(obj) for obj in candidate_objects}
@@ -728,6 +754,7 @@ def _classify_cell(
         near_surface_mesh_ids=near_surface_mesh_ids,
         candidate_mesh_ids=candidate_mesh_ids,
         crowded_component_count=len({id(obj) for obj in crowded_objects}),
+        role_component_count=len({id(obj) for obj in role_refine_objects}),
         material_ids=set(material_fractions),
         part_ids={obj.name for obj in hit_objects},
         occupancy=occupancy,
@@ -756,6 +783,19 @@ def _needs_crowded_component_refinement(
 ) -> bool:
     threshold = int(params.crowded_component_refine_count)
     return threshold > 0 and int(classification.crowded_component_count) >= threshold
+
+
+def _needs_role_component_refinement(
+    classification: CellClassification,
+    params: OctreeParams,
+    level: int,
+) -> bool:
+    if int(classification.role_component_count) <= 0:
+        return False
+    max_depth = getattr(params, "role_refine_max_depth", None)
+    if max_depth is None:
+        return True
+    return int(level) < int(max_depth)
 
 
 def _unique_objects(objects: list[MeshObject]) -> list[MeshObject]:
