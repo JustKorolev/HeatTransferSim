@@ -21,8 +21,11 @@ from octree_graph.cli import (
 from octree_graph.load_contact_report import ContactReport
 from octree_graph.graph_builder import (
     DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS,
+    _MeshTriangleLocator,
     RoleComponent,
     _candidate_cell_pairs,
+    _closest_point_on_mesh,
+    _closest_point_on_triangle,
     _exposed_areas_m2,
     _warn_overlapping_role_components,
     build_graph,
@@ -1395,6 +1398,22 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         matches = index.query(np.array([-1000.0, -1000.0, -1000.0]), np.array([1000.0, 1000.0, 1000.0]))
 
         self.assertEqual(matches.tolist(), [0, 1])
+
+    def test_mesh_triangle_locator_limits_closest_point_candidates(self) -> None:
+        triangles = np.array(
+            [
+                [[float(x), 0.0, 0.0], [float(x) + 1.0, 0.0, 0.0], [float(x), 1.0, 0.0]]
+                for x in range(0, 4000, 10)
+            ],
+            dtype=float,
+        )
+        locator = _MeshTriangleLocator.from_triangles(triangles)
+
+        with patch("octree_graph.graph_builder._closest_point_on_triangle", wraps=_closest_point_on_triangle) as wrapped:
+            _closest_point, distance = _closest_point_on_mesh(np.array([0.25, 0.25, 0.0]), locator)
+
+        self.assertAlmostEqual(distance, 0.0)
+        self.assertLess(wrapped.call_count, len(triangles) // 4)
 
     def test_bbox_fallback_does_not_assign_aabb_only_leaf_when_refinement_budget_stops(self) -> None:
         materials = self.make_materials()

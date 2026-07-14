@@ -17,6 +17,7 @@ from .octree import OctreeCell, _physical_material_name, _triangle_intersects_aa
 
 _DEFAULT_ROLE_CONTACT_G_W_K = 0.1
 _ROLE_NODE_CONTACT_TOLERANCE_MM = 1.0e-6
+_MESH_LOCATOR_CACHE: dict[int, tuple[object, "_MeshTriangleLocator"]] = {}
 DEFAULT_HEATER_NAME_PATTERNS = [
     r"heater",
     r"heat[_\s-]*strip",
@@ -96,6 +97,77 @@ class _RoleContactCandidate:
     sample_points_mm: list[np.ndarray]
     sample_areas_mm2: list[float]
     closest_points_mm: list[np.ndarray]
+
+
+@dataclass
+class _MeshTriangleLocator:
+    triangles: np.ndarray
+    bounds_min: np.ndarray
+    bounds_max: np.ndarray
+    bucket_size_mm: float
+    buckets: dict[tuple[int, int, int], list[int]]
+
+    @classmethod
+    def from_triangles(cls, triangles: np.ndarray) -> "_MeshTriangleLocator":
+        triangles = _sanitize_triangles_array(triangles)
+        if triangles.size == 0:
+            empty = np.empty((0, 3), dtype=float)
+            return cls(triangles, empty, empty, 1.0, {})
+        bounds_min = np.min(triangles, axis=1)
+        bounds_max = np.max(triangles, axis=1)
+        mesh_min = np.min(bounds_min, axis=0)
+        mesh_max = np.max(bounds_max, axis=0)
+        extent = float(np.max(mesh_max - mesh_min))
+        bucket_size = max(extent / 96.0, 1.0e-6)
+        buckets: dict[tuple[int, int, int], list[int]] = {}
+        for index, (tri_min, tri_max) in enumerate(zip(bounds_min, bounds_max)):
+            for key in _bounds_bucket_keys(tri_min, tri_max, bucket_size):
+                buckets.setdefault(key, []).append(index)
+        return cls(triangles, bounds_min, bounds_max, bucket_size, buckets)
+
+    def query_bounds(self, bounds_min: np.ndarray, bounds_max: np.ndarray) -> np.ndarray:
+        if self.triangles.size == 0:
+            return np.empty((0,), dtype=int)
+        min_key = np.floor(np.asarray(bounds_min, dtype=float) / self.bucket_size_mm).astype(int)
+        max_key = np.floor(np.asarray(bounds_max, dtype=float) / self.bucket_size_mm).astype(int)
+        bucket_span = np.maximum(max_key - min_key + 1, 1)
+        bucket_count = int(bucket_span[0] * bucket_span[1] * bucket_span[2])
+        if bucket_count > max(4096, len(self.buckets) * 2):
+            return self._query_all_bounds(bounds_min, bounds_max)
+        matches: set[int] = set()
+        for key in _bounds_bucket_keys(bounds_min, bounds_max, self.bucket_size_mm):
+            matches.update(self.buckets.get(key, ()))
+        if not matches:
+            return np.empty((0,), dtype=int)
+        candidates = np.fromiter(sorted(matches), dtype=int)
+        overlap = np.all(self.bounds_max[candidates] >= bounds_min, axis=1) & np.all(
+            self.bounds_min[candidates] <= bounds_max, axis=1
+        )
+        return candidates[overlap]
+
+    def _query_all_bounds(self, bounds_min: np.ndarray, bounds_max: np.ndarray) -> np.ndarray:
+        overlap = np.all(self.bounds_max >= bounds_min, axis=1) & np.all(self.bounds_min <= bounds_max, axis=1)
+        return np.nonzero(overlap)[0].astype(int)
+
+    def closest_point(self, point: np.ndarray, initial_radius_mm: float = 0.0) -> tuple[np.ndarray, float]:
+        point = np.asarray(point, dtype=float)
+        if self.triangles.size == 0:
+            return np.zeros(3, dtype=float), float("inf")
+        radius = max(float(initial_radius_mm), min(float(self.bucket_size_mm), 50.0), 1.0e-6)
+        mesh_min = np.min(self.bounds_min, axis=0)
+        mesh_max = np.max(self.bounds_max, axis=0)
+        max_radius = max(float(np.linalg.norm(mesh_max - mesh_min)), radius)
+        candidates = np.empty((0,), dtype=int)
+        for _ in range(12):
+            candidates = self.query_bounds(point - radius, point + radius)
+            if candidates.size:
+                break
+            if radius >= max_radius:
+                break
+            radius = min(max_radius, radius * 2.0)
+        if candidates.size == 0:
+            candidates = np.arange(len(self.triangles), dtype=int)
+        return _closest_point_on_triangles(point, self.triangles[candidates])
 
 
 def build_graph(
@@ -788,15 +860,15 @@ def _evaluate_role_body_contact(
     body: MeshObject,
     tolerance_mm: float,
 ) -> _RoleContactCandidate | None:
-    triangles = _mesh_triangles_array(body)
-    if triangles.size == 0:
+    locator = _mesh_triangle_locator(body)
+    if locator.triangles.size == 0:
         return None
     contact_points: list[np.ndarray] = []
     contact_areas: list[float] = []
     closest_points: list[np.ndarray] = []
     min_distance = float("inf")
     for sample in samples:
-        closest, distance = _closest_point_on_mesh(sample.point, triangles)
+        closest, distance = _closest_point_on_mesh(sample.point, locator, search_radius_mm=tolerance_mm)
         min_distance = min(min_distance, distance)
         penetrates_body = _point_inside_mesh_object(sample.point, body)
         if distance <= tolerance_mm + 1.0e-9 or penetrates_body:
@@ -830,10 +902,10 @@ def _nearest_body_candidate_diagnostic(component: RoleComponent, body_objects: l
         return None
     best: tuple[str, float] | None = None
     for body in body_objects:
-        triangles = _mesh_triangles_array(body)
-        if triangles.size == 0:
+        locator = _mesh_triangle_locator(body)
+        if locator.triangles.size == 0:
             continue
-        distance = min(_closest_point_on_mesh(sample.point, triangles)[1] for sample in samples)
+        distance = min(_closest_point_on_mesh(sample.point, locator)[1] for sample in samples)
         if best is None or distance < best[1]:
             best = (body.name, float(distance))
     return best
@@ -841,14 +913,6 @@ def _nearest_body_candidate_diagnostic(component: RoleComponent, body_objects: l
 
 def _point_inside_mesh_object(point_mm: np.ndarray, obj: MeshObject) -> bool:
     point = np.asarray(point_mm, dtype=float)
-    try:
-        contains = getattr(obj.mesh, "contains", None)
-        if callable(contains):
-            result = np.asarray(contains([point]), dtype=bool)
-            if result.size:
-                return bool(result[0])
-    except Exception:
-        pass
     mins, maxs = obj.bounds_mm
     return bool(np.all(point >= np.asarray(mins, dtype=float) - 1.0e-9) and np.all(point <= np.asarray(maxs, dtype=float) + 1.0e-9))
 
@@ -930,9 +994,37 @@ def _mesh_triangles_array(obj: MeshObject) -> np.ndarray:
         triangles = np.asarray(getattr(obj.mesh, "triangles", []), dtype=float)
     except Exception:
         return np.empty((0, 3, 3), dtype=float)
-    if triangles.ndim != 3 or triangles.shape[1:] != (3, 3) or not np.all(np.isfinite(triangles)):
+    return _sanitize_triangles_array(triangles)
+
+
+def _sanitize_triangles_array(triangles: np.ndarray) -> np.ndarray:
+    triangles = np.asarray(triangles, dtype=float)
+    if triangles.ndim != 3 or triangles.shape[1:] != (3, 3):
         return np.empty((0, 3, 3), dtype=float)
-    return triangles
+    if triangles.size == 0:
+        return np.empty((0, 3, 3), dtype=float)
+    finite = np.all(np.isfinite(triangles), axis=(1, 2))
+    if not np.all(finite):
+        triangles = triangles[finite]
+    return np.ascontiguousarray(triangles, dtype=float)
+
+
+def _mesh_triangle_locator(obj: MeshObject) -> _MeshTriangleLocator:
+    cache_key = id(obj.mesh)
+    cached = _MESH_LOCATOR_CACHE.get(cache_key)
+    if cached is not None and cached[0] is obj.mesh:
+        return cached[1]
+    locator = _MeshTriangleLocator.from_triangles(_mesh_triangles_array(obj))
+    _MESH_LOCATOR_CACHE[cache_key] = (obj.mesh, locator)
+    return locator
+
+
+def _triangle_locator_from_objects(objects: list[MeshObject]) -> _MeshTriangleLocator:
+    triangle_arrays = [_mesh_triangles_array(obj) for obj in objects]
+    valid = [triangles for triangles in triangle_arrays if triangles.size]
+    if not valid:
+        return _MeshTriangleLocator.from_triangles(np.empty((0, 3, 3), dtype=float))
+    return _MeshTriangleLocator.from_triangles(np.concatenate(valid, axis=0))
 
 
 def _triangle_area_mm2(triangle: np.ndarray) -> float:
@@ -943,7 +1035,20 @@ def _triangle_area_mm2(triangle: np.ndarray) -> float:
     return area if np.isfinite(area) and area > 0.0 else 0.0
 
 
-def _closest_point_on_mesh(point: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, float]:
+def _closest_point_on_mesh(
+    point: np.ndarray,
+    mesh: np.ndarray | _MeshTriangleLocator,
+    *,
+    search_radius_mm: float = 0.0,
+) -> tuple[np.ndarray, float]:
+    if isinstance(mesh, _MeshTriangleLocator):
+        return mesh.closest_point(point, initial_radius_mm=search_radius_mm)
+    triangles = _sanitize_triangles_array(mesh)
+    locator = _MeshTriangleLocator.from_triangles(triangles)
+    return locator.closest_point(point, initial_radius_mm=search_radius_mm)
+
+
+def _closest_point_on_triangles(point: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, float]:
     best_point = np.zeros(3, dtype=float)
     best_distance = float("inf")
     for triangle in triangles:
@@ -1263,6 +1368,8 @@ def _attach_sensor_connections_and_pair_roles(
             sensor_id = int(sensor["node_id"])
             if not bool(sensor.get("sensor_valid", False)):
                 continue
+            if _node_aabb_gap_mm(heater, sensor) > max_distance:
+                continue
             distance = _role_pair_distance_mm(heater, sensor, component_by_name)
             if distance <= max_distance:
                 candidate_pairs.append((distance, int(heater["node_id"]), sensor_id, heater, sensor))
@@ -1395,21 +1502,15 @@ def _role_pair_distance_mm(
 
 def _role_component_distance_mm(left: RoleComponent, right: RoleComponent) -> float:
     left_samples = _role_surface_samples(left)
-    right_triangles = np.concatenate(
-        [triangles for triangles in (_mesh_triangles_array(obj) for obj in right.objects) if triangles.size],
-        axis=0,
-    ) if any(_mesh_triangles_array(obj).size for obj in right.objects) else np.empty((0, 3, 3), dtype=float)
-    if not left_samples or right_triangles.size == 0:
+    right_locator = _triangle_locator_from_objects(right.objects)
+    if not left_samples or right_locator.triangles.size == 0:
         return float("inf")
-    left_to_right = min(_closest_point_on_mesh(sample.point, right_triangles)[1] for sample in left_samples)
+    left_to_right = min(_closest_point_on_mesh(sample.point, right_locator)[1] for sample in left_samples)
     right_samples = _role_surface_samples(right)
-    left_triangles = np.concatenate(
-        [triangles for triangles in (_mesh_triangles_array(obj) for obj in left.objects) if triangles.size],
-        axis=0,
-    ) if any(_mesh_triangles_array(obj).size for obj in left.objects) else np.empty((0, 3, 3), dtype=float)
-    if not right_samples or left_triangles.size == 0:
+    left_locator = _triangle_locator_from_objects(left.objects)
+    if not right_samples or left_locator.triangles.size == 0:
         return float(left_to_right)
-    right_to_left = min(_closest_point_on_mesh(sample.point, left_triangles)[1] for sample in right_samples)
+    right_to_left = min(_closest_point_on_mesh(sample.point, left_locator)[1] for sample in right_samples)
     return float(min(left_to_right, right_to_left))
 
 
