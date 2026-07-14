@@ -289,7 +289,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual([obj.name for obj in body_objects], ["body_panel"])
         self.assertEqual([component.kind for component in role_components], ["heater", "sensor"])
-        self.assertEqual({component.name for component in role_components}, {"assembly/temperature_probe_A", "kapton_heater"})
+        self.assertEqual({component.name for component in role_components}, {"assembly/temperature_probe_A", "kapton_heater_1"})
 
     def test_role_component_detection_excludes_cables_and_breakout_boards_by_default(self) -> None:
         flex = _mesh_object(
@@ -315,9 +315,9 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual([obj.name for obj in body_objects], [flex.name, breakout.name])
         self.assertEqual(len(role_components), 1)
-        self.assertEqual(role_components[0].name, "kapton_heater")
+        self.assertEqual(role_components[0].name, "kapton_heater_1")
 
-    def test_role_component_detection_splits_distant_same_named_instances(self) -> None:
+    def test_role_component_detection_preserves_numeric_instance_identity(self) -> None:
         left = _mesh_object("safe_heater_1", "Copper", [0.0, 0.0, 0.0], [5.0, 5.0, 1.0])
         right = _mesh_object("safe_heater_2", "Copper", [100.0, 0.0, 0.0], [105.0, 5.0, 1.0])
         bridge = _mesh_object("safe_heater_3", "Copper", [108.0, 0.0, 0.0], [112.0, 5.0, 1.0])
@@ -331,8 +331,29 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         )
 
         self.assertEqual(body_objects, [])
+        self.assertEqual(
+            [component.name for component in role_components],
+            ["safe_heater_1", "safe_heater_2", "safe_heater_3"],
+        )
+        self.assertEqual([len(component.objects) for component in role_components], [1, 1, 1])
+
+    def test_role_component_detection_merges_same_instance_fragment_suffixes(self) -> None:
+        body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        heater_mesh = _mesh_object("safe_heater_1_mesh", "Copper", [10.0, 0.0, 0.0], [15.0, 5.0, 1.0])
+        heater_body = _mesh_object("safe_heater_1_body", "Copper", [15.001, 0.0, 0.0], [20.0, 5.0, 1.0])
+        other_heater = _mesh_object("safe_heater_2", "Copper", [20.0, 0.0, 0.0], [25.0, 5.0, 1.0])
+
+        body_objects, role_components = collapse_role_components(
+            [body, heater_mesh, heater_body, other_heater],
+            [r"safe_heater"],
+            [],
+            exclude_patterns=DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS,
+            group_gap_mm=0.01,
+        )
+
+        self.assertEqual([obj.name for obj in body_objects], ["body_panel"])
         self.assertEqual([component.name for component in role_components], ["safe_heater_1", "safe_heater_2"])
-        self.assertEqual([len(component.objects) for component in role_components], [1, 2])
+        self.assertEqual([len(component.objects) for component in role_components], [2, 1])
 
     def test_role_component_detection_rejects_ambiguous_heater_sensor_match(self) -> None:
         ambiguous = _mesh_object("sensor_heater_combo", "Copper", [0.0, 0.0, 0.0], [5.0, 5.0, 1.0])

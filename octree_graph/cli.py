@@ -317,7 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_ROLE_GROUP_GAP_MM,
         help=(
             "Maximum AABB gap for collapsing same-named heater/sensor mesh pieces into one role node. "
-            "Larger gaps keep more repeated instances grouped; smaller gaps split them apart."
+            "Trailing instance numbers are preserved, so heater_1 and heater_2 stay separate."
         ),
     )
     parser.add_argument(

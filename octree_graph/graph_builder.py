@@ -345,7 +345,10 @@ def _object_search_text(obj: MeshObject) -> str:
 
 def _role_group_name(name: str) -> str:
     normalized = _normalize_role_name(name)
-    normalized = re.sub(r"(_?\d+)?(_geometry|_mesh|_body|_solid)?$", "", normalized, flags=re.IGNORECASE)
+    previous = None
+    while previous != normalized:
+        previous = normalized
+        normalized = re.sub(r"(_geometry|_mesh|_body|_solid)$", "", normalized, flags=re.IGNORECASE)
     return normalized or str(name)
 
 
