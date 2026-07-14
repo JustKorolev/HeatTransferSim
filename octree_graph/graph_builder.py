@@ -87,6 +87,8 @@ def build_graph(
     component_bounds_mm: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
     role_components: list[RoleComponent] | None = None,
     role_contact_tolerance_mm: float = _ROLE_NODE_CONTACT_TOLERANCE_MM,
+    role_contact_tolerance_max_mm: float | None = None,
+    role_contact_tolerance_growth_factor: float = 2.0,
     max_heater_sensor_pair_distance_mm: float = 25.0,
 ) -> GraphBuildResult:
     contact_report = contact_report or ContactReport()
@@ -135,6 +137,7 @@ def build_graph(
             }
         )
     role_components = role_components or []
+    _warn_overlapping_role_components(role_components, warnings)
     role_groups = _tag_role_voxel_nodes(
         nodes,
         solid,
@@ -234,6 +237,19 @@ def build_graph(
             warnings,
             role_contact_tolerance_mm,
         )
+    _attach_role_interfaces_to_body_nodes(
+        nodes,
+        solid,
+        role_components,
+        warnings,
+        role_contact_tolerance_mm=role_contact_tolerance_mm,
+        role_contact_tolerance_max_mm=(
+            role_contact_tolerance_max_mm
+            if role_contact_tolerance_max_mm is not None
+            else role_contact_tolerance_mm
+        ),
+        role_contact_tolerance_growth_factor=role_contact_tolerance_growth_factor,
+    )
     _attach_sensor_connections_and_pair_roles(
         nodes,
         edges,
@@ -290,6 +306,30 @@ def collapse_role_components(
             component_name = name if len(clusters) == 1 else f"{name}_{cluster_index}"
             components.append(RoleComponent(name=component_name, kind=kind, objects=cluster))
     return body_objects, components
+
+
+def _warn_overlapping_role_components(components: list[RoleComponent], warnings: list[str]) -> None:
+    for left_index, left in enumerate(components):
+        left_min, left_max = left.bounds_mm
+        for right in components[left_index + 1 :]:
+            right_min, right_max = right.bounds_mm
+            if np.any(left_max < right_min) or np.any(right_max < left_min):
+                continue
+            if left.kind == right.kind == "heater":
+                warnings.append(
+                    f"Distinct heater role components {left.name!r} and {right.name!r} have overlapping CAD bounds; "
+                    "kept separate and requiring independent body deposition nodes."
+                )
+            elif left.kind == right.kind == "sensor":
+                warnings.append(
+                    f"Distinct sensor role components {left.name!r} and {right.name!r} have overlapping CAD bounds; "
+                    "kept separate unless grouping already merged them."
+                )
+            else:
+                warnings.append(
+                    f"Heater/sensor role components {left.name!r} and {right.name!r} have overlapping CAD bounds; "
+                    "using overlap only for diagnostics/pairing, not power deposition."
+                )
 
 
 def _normalize_role_name(name: str) -> str:
@@ -381,7 +421,32 @@ def _tag_role_voxel_nodes(
         if "sensor" in role_hits:
             node["is_sensor"] = True
         source_components = sorted({name for names in role_hits.values() for name in names})
+        hit_components = sorted(
+            {
+                role_by_object[name].name
+                for name in source_components
+                if name in role_by_object
+            }
+        )
         node["role_source_components"] = source_components
+        if hit_components:
+            component = next(
+                (
+                    candidate
+                    for candidate in components
+                    if candidate.name == hit_components[0]
+                ),
+                None,
+            )
+            if component is not None:
+                mins, maxs = component.bounds_mm
+                node["node_type"] = component.kind
+                node["component_name"] = component.name
+                node["source_components"] = sorted({obj.name for obj in component.objects})
+                node["source_bounds_mm"] = {
+                    "min": [float(value) for value in mins],
+                    "max": [float(value) for value in maxs],
+                }
         node.setdefault("tags", {}).setdefault("notes", "")
         note = f"Detected CAD role geometry in voxel cell: {', '.join(source_components)}."
         node["tags"]["notes"] = _append_note(str(node["tags"].get("notes", "")), note)
@@ -546,6 +611,120 @@ def _cell_to_node_lookup(nodes: list[dict]) -> dict[str, dict]:
     return lookup
 
 
+def _attach_role_interfaces_to_body_nodes(
+    nodes: list[dict],
+    cells: list[OctreeCell],
+    role_components: list[RoleComponent],
+    warnings: list[str],
+    *,
+    role_contact_tolerance_mm: float,
+    role_contact_tolerance_max_mm: float,
+    role_contact_tolerance_growth_factor: float,
+) -> None:
+    if not role_components:
+        return
+    component_by_name = {component.name: component for component in role_components}
+    component_by_object = {
+        obj.name: component
+        for component in role_components
+        for obj in component.objects
+    }
+    cell_to_node = _cell_to_node_lookup(nodes)
+    for role_node in nodes:
+        if not (bool(role_node.get("is_heater")) or bool(role_node.get("is_sensor"))):
+            continue
+        component = component_by_name.get(str(role_node.get("component_name", "")))
+        if component is None:
+            for source_name in role_node.get("source_components", []) or role_node.get("role_source_components", []) or []:
+                component = component_by_object.get(str(source_name))
+                if component is not None:
+                    break
+        ids, weights, used_tolerance = _role_body_contact_node_weights(
+            role_node,
+            component,
+            cells,
+            cell_to_node,
+            role_contact_tolerance_mm,
+            role_contact_tolerance_max_mm,
+            role_contact_tolerance_growth_factor,
+        )
+        if bool(role_node.get("is_heater")):
+            role_node["power_deposition_node_ids"] = ids
+            role_node["power_deposition_weights"] = weights
+            role_node["heater_attached"] = bool(ids)
+            role_node["heater_valid"] = bool(ids)
+            if ids:
+                role_node["heater_warning"] = ""
+            else:
+                role_node["heater_warning"] = "No contacted body cells found for heater power deposition."
+                warnings.append(
+                    f"Detected heater role {role_node.get('node_id')} ({role_node.get('component_name', '?')}) "
+                    "has no contacted body cells for power deposition."
+                )
+        if bool(role_node.get("is_sensor")):
+            role_node["readout_node_ids"] = ids
+            role_node["readout_weights"] = weights
+            role_node["sensor_connected_node_ids"] = ids
+            role_node["sensor_valid"] = bool(ids)
+            role_node["sensor_monitor_only"] = not bool(ids)
+            if not ids:
+                warnings.append(
+                    f"Detected sensor role {role_node.get('node_id')} ({role_node.get('component_name', '?')}) "
+                    "has no contacted body cells for readout."
+                )
+        if ids and used_tolerance > max(0.0, float(role_contact_tolerance_mm)) + 1.0e-12:
+            warnings.append(
+                f"Role node {role_node.get('node_id')} used expanded contact tolerance "
+                f"{used_tolerance:.6g} mm to attach {len(ids)} body node(s)."
+            )
+
+
+def _role_body_contact_node_weights(
+    role_node: dict,
+    role_component: RoleComponent | None,
+    cells: list[OctreeCell],
+    cell_to_node: dict[str, dict],
+    tolerance_mm: float,
+    max_tolerance_mm: float,
+    growth_factor: float,
+) -> tuple[list[int], list[float], float]:
+    tolerance = max(0.0, float(tolerance_mm))
+    max_tolerance = max(tolerance, float(max_tolerance_mm))
+    growth = max(1.01, float(growth_factor))
+    while True:
+        contacts: dict[int, float] = {}
+        for cell in cells:
+            body_node = cell_to_node.get(cell.cell_id)
+            if body_node is None:
+                continue
+            if bool(body_node.get("is_heater")) or bool(body_node.get("is_sensor")):
+                continue
+            if role_component is not None:
+                contact = _role_cell_contact(role_node, role_component, cell, tolerance)
+            else:
+                contact = _node_cell_contact(role_node, cell, tolerance)
+            if contact is None:
+                continue
+            area_mm2, _gap_mm, _distance_mm = contact
+            node_id = int(body_node["node_id"])
+            contacts[node_id] = contacts.get(node_id, 0.0) + max(float(area_mm2), 1.0)
+        if contacts or tolerance >= max_tolerance:
+            ids = sorted(contacts)
+            weights = _normalized_weights([contacts[node_id] for node_id in ids], len(ids))
+            return ids, weights, tolerance
+        tolerance = min(max_tolerance, tolerance * growth if tolerance > 0.0 else max_tolerance)
+
+
+def _normalized_weights(weights: list[float], count: int) -> list[float]:
+    if count <= 0:
+        return []
+    values = [float(value) for value in list(weights)[:count] if np.isfinite(float(value)) and float(value) >= 0.0]
+    if len(values) != count or sum(values) <= 0.0:
+        return [1.0 / float(count)] * count
+    total = float(sum(values))
+    return [float(value) / total for value in values]
+
+
 def _attach_sensor_connections_and_pair_roles(
     nodes: list[dict],
     edges: list[dict],
@@ -561,36 +740,71 @@ def _attach_sensor_connections_and_pair_roles(
     for heater in heaters:
         heater["assigned_sensor_id"] = None
         heater["sensor_pair_distance_mm"] = None
+        deposition = [
+            int(value)
+            for value in heater.get("power_deposition_node_ids", []) or []
+            if int(value) in node_by_id
+            and not bool(node_by_id[int(value)].get("is_heater"))
+            and not bool(node_by_id[int(value)].get("is_sensor"))
+        ]
+        heater["power_deposition_node_ids"] = deposition
+        heater["power_deposition_weights"] = _normalized_weights(
+            heater.get("power_deposition_weights", []) or [],
+            len(deposition),
+        )
+        heater["heater_attached"] = bool(deposition)
+        heater["heater_valid"] = bool(deposition)
+        heater["heater_warning"] = "" if deposition else "No body power deposition nodes found."
+        if not deposition:
+            warnings.append(
+                f"Heater node {int(heater['node_id'])} has no body power deposition nodes; excluded from MIMO control."
+            )
     for sensor in sensors:
-        connected: set[int] = set()
+        connected: set[int] = {
+            int(value)
+            for value in sensor.get("readout_node_ids", []) or sensor.get("sensor_connected_node_ids", []) or []
+            if int(value) in node_by_id
+            and not bool(node_by_id[int(value)].get("is_heater"))
+            and not bool(node_by_id[int(value)].get("is_sensor"))
+        }
         sensor_id = int(sensor["node_id"])
         connected_role_ids: set[int] = set()
-        for edge in edges:
-            node_i = int(edge["node_i"])
-            node_j = int(edge["node_j"])
-            other_id: int | None = None
-            if node_i == sensor_id:
-                other_id = node_j
-            elif node_j == sensor_id:
-                other_id = node_i
-            if other_id is None:
-                continue
-            other = node_by_id.get(other_id)
-            if other is None:
-                continue
-            if bool(other.get("is_heater")) or bool(other.get("is_sensor")):
-                connected_role_ids.add(other_id)
-                continue
-            connected.add(other_id)
+        if not connected:
+            for edge in edges:
+                node_i = int(edge["node_i"])
+                node_j = int(edge["node_j"])
+                other_id: int | None = None
+                if node_i == sensor_id:
+                    other_id = node_j
+                elif node_j == sensor_id:
+                    other_id = node_i
+                if other_id is None:
+                    continue
+                other = node_by_id.get(other_id)
+                if other is None:
+                    continue
+                if bool(other.get("is_heater")) or bool(other.get("is_sensor")):
+                    connected_role_ids.add(other_id)
+                    continue
+                connected.add(other_id)
         inherited_from_heaters = False
         if not connected and connected_role_ids:
             for role_id in sorted(connected_role_ids):
                 role_node = node_by_id.get(role_id)
                 if role_node is None or not bool(role_node.get("is_heater")):
                     continue
+                connected.update(
+                    int(value)
+                    for value in role_node.get("power_deposition_node_ids", []) or []
+                    if int(value) in node_by_id
+                    and not bool(node_by_id[int(value)].get("is_heater"))
+                    and not bool(node_by_id[int(value)].get("is_sensor"))
+                )
                 connected.update(_external_body_neighbors(int(role_id), edges, node_by_id))
             inherited_from_heaters = bool(connected)
         sensor["sensor_connected_node_ids"] = sorted(connected)
+        sensor["readout_node_ids"] = sorted(connected)
+        sensor["readout_weights"] = _normalized_weights(sensor.get("readout_weights", []) or [], len(connected))
         sensor["sensor_valid"] = bool(connected)
         sensor["assigned_heater_id"] = None
         sensor["assigned_heater_ids"] = []
@@ -608,35 +822,36 @@ def _attach_sensor_connections_and_pair_roles(
                 f"{sorted(connected_role_ids)}; using heater-adjacent body node(s) {sorted(connected)} for readout."
             )
     max_distance = max(0.0, float(max_heater_sensor_pair_distance_mm))
+    candidate_pairs: list[tuple[float, int, int, dict, dict]] = []
     for heater in sorted(heaters, key=lambda item: int(item["node_id"])):
-        candidates: list[tuple[float, int, dict]] = []
+        if not bool(heater.get("heater_valid", True)):
+            continue
         for sensor in sensors:
             sensor_id = int(sensor["node_id"])
             if not bool(sensor.get("sensor_valid", False)):
                 continue
             distance = _node_aabb_gap_mm(heater, sensor)
             if distance <= max_distance:
-                candidates.append((distance, sensor_id, sensor))
-        if not candidates:
-            warnings.append(
-                f"Heater node {int(heater['node_id'])} has no available valid sensor within {max_distance:g} mm."
-            )
+                candidate_pairs.append((distance, int(heater["node_id"]), sensor_id, heater, sensor))
+    assigned_heaters: set[int] = set()
+    assigned_sensors: set[int] = set()
+    for distance, heater_id, sensor_id, heater, sensor in sorted(candidate_pairs, key=lambda item: (item[0], item[1], item[2])):
+        if heater_id in assigned_heaters or sensor_id in assigned_sensors:
             continue
-        distance, sensor_id, sensor = min(candidates, key=lambda item: (item[0], item[1]))
         heater["assigned_sensor_id"] = sensor_id
         heater["sensor_pair_distance_mm"] = float(distance)
-        assigned_heater_ids = [int(value) for value in sensor.get("assigned_heater_ids", []) if value is not None]
-        assigned_heater_ids.append(int(heater["node_id"]))
-        sensor["assigned_heater_ids"] = sorted(set(assigned_heater_ids))
-        sensor["assigned_heater_id"] = int(sensor["assigned_heater_ids"][0])
-        previous_distance = sensor.get("sensor_pair_distance_mm")
-        sensor["sensor_pair_distance_mm"] = (
-            float(distance)
-            if previous_distance is None
-            else min(float(previous_distance), float(distance))
-        )
+        sensor["assigned_heater_ids"] = [heater_id]
+        sensor["assigned_heater_id"] = heater_id
+        sensor["sensor_pair_distance_mm"] = float(distance)
         sensor["sensor_monitor_only"] = False
         sensor["sensor_control_mode"] = "mimo"
+        assigned_heaters.add(heater_id)
+        assigned_sensors.add(sensor_id)
+    for heater in heaters:
+        if bool(heater.get("heater_valid", True)) and heater.get("assigned_sensor_id") is None:
+            warnings.append(
+                f"Heater node {int(heater['node_id'])} has no available valid unpaired sensor within {max_distance:g} mm."
+            )
     for sensor in sensors:
         if not sensor.get("assigned_heater_ids"):
             sensor["sensor_monitor_only"] = True
@@ -966,6 +1181,9 @@ def _node_cell_center_distance_mm(node: dict, cell: OctreeCell) -> float:
 
 
 def _node_bounds_mm(node: dict) -> tuple[np.ndarray, np.ndarray]:
+    bounds = node.get("source_bounds_mm") or {}
+    if isinstance(bounds, dict) and "min" in bounds and "max" in bounds:
+        return np.asarray(bounds["min"], dtype=float), np.asarray(bounds["max"], dtype=float)
     center = np.asarray(node["center_mm"], dtype=float)
     size = np.maximum(np.asarray(node["size_mm"], dtype=float), 1.0e-9)
     return center - size * 0.5, center + size * 0.5

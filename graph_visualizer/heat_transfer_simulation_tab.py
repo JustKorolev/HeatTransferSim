@@ -211,6 +211,9 @@ class HeatTransferSimulationTab:
             ("mimo_heater_slew_rate_W_per_s", "hard slew W/s", 0.0, 1.0e9, 1.0),
             ("mimo_v_cmd_abs_max_K_per_s", "max rate cmd K/s", 0.0, 1.0e9, 0.01),
             ("heater_sensor_pair_alpha", "pair alpha", 0.0, 1.0e9, 0.01),
+            ("role_contact_tolerance_mm", "role contact tol mm", 0.0, 1.0e9, 1.0e-6),
+            ("role_contact_tolerance_max_mm", "role contact max mm", 0.0, 1.0e9, 0.1),
+            ("role_contact_tolerance_growth_factor", "role contact growth", 1.01, 1.0e6, 0.1),
             ("drift_lpf_tau_s", "drift LPF tau s", 0.0, 1.0e9, 0.1),
             ("derivative_dt_floor_s", "derivative dt floor s", 0.0, 1.0e9, 1.0e-6),
             ("mimo_integral_abs_max", "integral abs max", 0.0, 1.0e12, 1.0),
@@ -1200,6 +1203,9 @@ class HeatTransferSimulationTab:
             mimo_heater_slew_rate_W_per_s=float(self.inputs["mimo_heater_slew_rate_W_per_s"].value()),
             mimo_v_cmd_abs_max_K_per_s=float(self.inputs["mimo_v_cmd_abs_max_K_per_s"].value()),
             heater_sensor_pair_alpha=float(self.inputs["heater_sensor_pair_alpha"].value()),
+            role_contact_tolerance_mm=float(self.inputs["role_contact_tolerance_mm"].value()),
+            role_contact_tolerance_max_mm=float(self.inputs["role_contact_tolerance_max_mm"].value()),
+            role_contact_tolerance_growth_factor=float(self.inputs["role_contact_tolerance_growth_factor"].value()),
             drift_lpf_tau_s=float(self.inputs["drift_lpf_tau_s"].value()),
             derivative_dt_floor_s=float(self.inputs["derivative_dt_floor_s"].value()),
             mimo_integral_abs_max=float(self.inputs["mimo_integral_abs_max"].value()),
@@ -1407,7 +1413,7 @@ class HeatTransferSimulationTab:
         heater_powers = (
             sys_id_heater_powers
             if sys_id_heater_powers is not None
-            else self.prepared.heater_power_by_node()
+            else self.prepared.heater_actuator_power_by_node()
             if self.prepared is not None
             else {}
         )

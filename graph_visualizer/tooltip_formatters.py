@@ -51,8 +51,14 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"efficiency: {_fmt(getattr(heater, 'heater_efficiency', None))}",
                 f"assigned sensor: {getattr(attrs, 'assigned_sensor_id', None) or '?'}",
                 f"pair gap: {_fmt(getattr(attrs, 'sensor_pair_distance_mm', None))} mm",
+                f"deposition nodes: {len(getattr(attrs, 'power_deposition_node_ids', []) or [])}",
+                f"attached: {'yes' if getattr(attrs, 'heater_attached', True) else 'no'}",
+                f"valid: {'yes' if getattr(attrs, 'heater_valid', True) else 'no'}",
             ]
         )
+        warning = str(getattr(attrs, "heater_warning", "") or "")
+        if warning:
+            lines.append(f"warning: {warning}")
     if getattr(attrs, "is_sensor", False):
         sensor = getattr(attrs, "sensor", None)
         assigned_heater_ids = list(getattr(attrs, "assigned_heater_ids", []) or [])
@@ -65,7 +71,7 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"tau: {_fmt(getattr(sensor, 'sensor_time_constant_s', None))} s",
                 f"assigned heaters: {', '.join(str(value) for value in assigned_heater_ids) if assigned_heater_ids else '?'}",
                 f"nearest pair gap: {_fmt(getattr(attrs, 'sensor_pair_distance_mm', None))} mm",
-                f"connected nodes: {len(getattr(attrs, 'sensor_connected_node_ids', []) or [])}",
+                f"readout nodes: {len(getattr(attrs, 'readout_node_ids', []) or getattr(attrs, 'sensor_connected_node_ids', []) or [])}",
                 f"monitor-only: {'yes' if getattr(attrs, 'sensor_monitor_only', False) else 'no'}",
                 f"valid: {'yes' if getattr(attrs, 'sensor_valid', True) else 'no'}",
                 f"control mode: {getattr(attrs, 'sensor_control_mode', '?')}",

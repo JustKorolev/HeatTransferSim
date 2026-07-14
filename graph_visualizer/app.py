@@ -376,7 +376,11 @@ class GraphVisualizerApp:
         self.heater_assigned_sensor_combo.currentIndexChanged.connect(self._handle_assigned_sensor_changed)
         heater_form.addRow("assigned sensor", self.heater_assigned_sensor_combo)
         self.heater_pair_label = self.QtWidgets.QLabel("")
+        self.heater_deposition_label = self.QtWidgets.QLabel("")
+        self.heater_valid_label = self.QtWidgets.QLabel("")
         heater_form.addRow("pair", self.heater_pair_label)
+        heater_form.addRow("deposition nodes", self.heater_deposition_label)
+        heater_form.addRow("attachment", self.heater_valid_label)
         self.inputs["controller_setpoint_K"] = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
         self.inputs["controller_weight"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
         self.inputs["sensor_manual_power_W"] = self._double_spin(0.0, 1.0e9, 0.0, 1.0)
@@ -644,6 +648,17 @@ class GraphVisualizerApp:
                 if assigned is None
                 else f"sensor {int(assigned)}, gap {float(distance or 0.0):.3g} mm"
             )
+        if hasattr(self, "heater_deposition_label"):
+            self.heater_deposition_label.setText(str(len(getattr(node, "power_deposition_node_ids", []) or [])))
+        if hasattr(self, "heater_valid_label"):
+            if not bool(getattr(node, "heater_valid", True)):
+                text = "invalid: no body deposition nodes"
+            elif getattr(node, "assigned_sensor_id", None) is None:
+                text = "unpaired"
+            else:
+                text = "attached"
+            warning = str(getattr(node, "heater_warning", "") or "")
+            self.heater_valid_label.setText(text if not warning else f"{text}; {warning}")
         if hasattr(self, "sensor_assigned_heater_label"):
             assigned_ids = list(getattr(node, "assigned_heater_ids", []) or [])
             distance = getattr(node, "sensor_pair_distance_mm", None)
@@ -699,15 +714,36 @@ class GraphVisualizerApp:
                 target.heater.heater_id = existing_heater_id
             target.assigned_sensor_id = template.assigned_sensor_id
             target.sensor_pair_distance_mm = template.sensor_pair_distance_mm
+            target.power_deposition_node_ids = [int(value) for value in template.power_deposition_node_ids]
+            target.power_deposition_weights = [float(value) for value in template.power_deposition_weights]
+            target.heater_attached = bool(template.heater_attached)
+            target.heater_valid = bool(template.heater_valid)
+            target.heater_warning = str(template.heater_warning or "")
         else:
             target.heater_control.reset_pid_state()
             target.assigned_sensor_id = None
+            target.power_deposition_node_ids = []
+            target.power_deposition_weights = []
+            target.heater_attached = True
+            target.heater_valid = True
+            target.heater_warning = ""
         if target.is_sensor:
             target.sensor = deepcopy(template.sensor)
             if target_id != self.selected_node_id:
                 target.sensor.sensor_id = existing_sensor_id
             target.sensor_control_mode = template.sensor_control_mode
             target.sensor_manual_power_W = template.sensor_manual_power_W
+            target.readout_node_ids = [int(value) for value in template.readout_node_ids]
+            target.readout_weights = [float(value) for value in template.readout_weights]
+            target.sensor_connected_node_ids = [int(value) for value in template.sensor_connected_node_ids]
+        else:
+            target.assigned_heater_id = None
+            target.assigned_heater_ids = []
+            target.readout_node_ids = []
+            target.readout_weights = []
+            target.sensor_connected_node_ids = []
+            target.sensor_monitor_only = False
+            target.sensor_valid = True
         target.has_cryocooler = bool(template.has_cryocooler)
         target.controller_setpoint_K = template.controller_setpoint_K
         target.controller_weight = template.controller_weight

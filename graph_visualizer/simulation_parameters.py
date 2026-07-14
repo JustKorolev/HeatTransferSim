@@ -28,6 +28,9 @@ class SimulationParameters:
     mimo_heater_slew_rate_W_per_s: float = 0.0
     mimo_v_cmd_abs_max_K_per_s: float = 0.25
     heater_sensor_pair_alpha: float = 1.0
+    role_contact_tolerance_mm: float = 1.0e-6
+    role_contact_tolerance_max_mm: float = 1.0
+    role_contact_tolerance_growth_factor: float = 2.0
     drift_lpf_tau_s: float = 2.0
     derivative_dt_floor_s: float = 1.0e-9
     mimo_integral_abs_max: float = 1.0e6

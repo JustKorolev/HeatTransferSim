@@ -238,6 +238,21 @@ def build_parser() -> argparse.ArgumentParser:
             "fallback role nodes because they produced no solid voxel cells."
         ),
     )
+    parser.add_argument(
+        "--role-contact-tolerance-max-mm",
+        type=float,
+        default=1.0,
+        help=(
+            "Maximum AABB contact tolerance expansion for attaching detected heater/sensor role "
+            "objects to body cells."
+        ),
+    )
+    parser.add_argument(
+        "--role-contact-tolerance-growth-factor",
+        type=float,
+        default=2.0,
+        help="Multiplicative growth factor used while expanding role contact tolerance.",
+    )
     parser.add_argument("--proximity-contact-distance-mm", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--radiation-reference-temperature-K", type=float, default=293.15)
     parser.add_argument(
@@ -411,6 +426,8 @@ def _build_graph_with_optional_fallback(
         component_bounds_mm=_component_bounds_mm(voxel_scene),
         role_components=getattr(args, "role_components", None),
         role_contact_tolerance_mm=args.role_contact_tolerance_mm,
+        role_contact_tolerance_max_mm=float(getattr(args, "role_contact_tolerance_max_mm", args.role_contact_tolerance_mm)),
+        role_contact_tolerance_growth_factor=float(getattr(args, "role_contact_tolerance_growth_factor", 2.0)),
         max_heater_sensor_pair_distance_mm=float(getattr(args, "max_heater_sensor_pair_distance_mm", 25.0)),
     )
     return (leaves, graph_result, diagnostics) if include_diagnostics else (leaves, graph_result)

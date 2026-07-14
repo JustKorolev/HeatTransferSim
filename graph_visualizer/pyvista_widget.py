@@ -53,6 +53,7 @@ class GraphPyVistaWidget:
         self._marker_actors: list[Any] = []
         self._marker_actors_by_kind: dict[str, list[Any]] = {"heater": [], "sensor": [], "cooler": []}
         self._edge_actors: list[Any] = []
+        self._role_overlay_actors: list[Any] = []
         self._preview_actors: list[Any] = []
         self._batched_actor: Any | None = None
         self._batched_mesh: Any | None = None
@@ -196,6 +197,7 @@ class GraphPyVistaWidget:
         self._marker_actors = []
         self._marker_actors_by_kind = {"heater": [], "sensor": [], "cooler": []}
         self._edge_actors = []
+        self._role_overlay_actors = []
         self._batched_actor = None
         self._batched_mesh = None
         self._batched_node_geometry = {}
@@ -211,6 +213,7 @@ class GraphPyVistaWidget:
                 scalar_clim=scalar_clim,
                 scalar_bar_title=scalar_bar_title,
             )
+            self._draw_role_interface_overlays(model, visible)
             self._finish_scene(committed_bounds, camera_position, reset_camera)
             return
         scalar_bar_added = False
@@ -286,6 +289,7 @@ class GraphPyVistaWidget:
                 actor = self.plotter.add_mesh(line, color=self._edge_color(), line_width=3)
                 self._edge_actors.append(actor)
 
+        self._draw_role_interface_overlays(model, visible)
         self._finish_scene(committed_bounds, camera_position, reset_camera)
         if preview_coords:
             self.show_preview(preview_coords, preview_side)
@@ -537,6 +541,72 @@ class GraphPyVistaWidget:
                 "cooler",
                 self.show_coolers,
             )
+
+    def _draw_role_interface_overlays(self, model: ThermalGraphModel, visible: set[int]) -> None:
+        if self.show_heaters:
+            for heater in model.nodes.values():
+                if not bool(getattr(heater, "is_heater", False)):
+                    continue
+                for body_id in getattr(heater, "power_deposition_node_ids", []) or []:
+                    self._add_node_outline(model, int(body_id), visible, "#f97316", 0.45)
+                sensor_id = getattr(heater, "assigned_sensor_id", None)
+                if sensor_id is not None and int(sensor_id) in model.nodes:
+                    self._add_pair_line(heater, model.nodes[int(sensor_id)])
+                if not bool(getattr(heater, "heater_valid", True)):
+                    self._add_node_outline(model, int(heater.node_id), visible, "#ef4444", 0.75)
+        if self.show_sensors:
+            for sensor in model.nodes.values():
+                if not bool(getattr(sensor, "is_sensor", False)):
+                    continue
+                for body_id in (getattr(sensor, "readout_node_ids", []) or getattr(sensor, "sensor_connected_node_ids", []) or []):
+                    self._add_node_outline(model, int(body_id), visible, "#14b8a6", 0.38)
+                if not bool(getattr(sensor, "sensor_valid", True)):
+                    self._add_node_outline(model, int(sensor.node_id), visible, "#ef4444", 0.75)
+
+    def _add_node_outline(
+        self,
+        model: ThermalGraphModel,
+        node_id: int,
+        visible: set[int],
+        color: str,
+        opacity: float,
+    ) -> None:
+        if int(node_id) not in visible or int(node_id) not in model.nodes:
+            return
+        geometry = _safe_node_cube_geometry(model.nodes[int(node_id)])
+        if geometry is None:
+            return
+        center, lengths = geometry
+        inflated = tuple(max(float(length) * 1.06, float(length) + 1.0e-6) for length in lengths)
+        mesh = self.pv.Cube(
+            center=center,
+            x_length=inflated[0],
+            y_length=inflated[1],
+            z_length=inflated[2],
+        )
+        actor = self.plotter.add_mesh(
+            mesh,
+            color=color,
+            style="wireframe",
+            line_width=2,
+            opacity=float(opacity),
+            pickable=False,
+        )
+        self._role_overlay_actors.append(actor)
+
+    def _add_pair_line(self, heater: Any, sensor: Any) -> None:
+        try:
+            p0 = np.asarray(heater.center, dtype=float)
+            p1 = np.asarray(sensor.center, dtype=float)
+        except Exception:
+            return
+        if not np.all(np.isfinite(p0)) or not np.all(np.isfinite(p1)):
+            return
+        line = self.pv.Line(p0, p1)
+        distance = getattr(heater, "sensor_pair_distance_mm", None)
+        color = "#eab308" if distance is not None and float(distance) > 0.0 else "#22c55e"
+        actor = self.plotter.add_mesh(line, color=color, line_width=4, opacity=0.8, pickable=False)
+        self._role_overlay_actors.append(actor)
 
     @staticmethod
     def _set_actor_visible(actor: Any, visible: bool) -> None:

@@ -181,7 +181,14 @@ class NodeProperties:
     assigned_heater_id: int | None = None
     assigned_heater_ids: list[int] = field(default_factory=list)
     sensor_pair_distance_mm: float | None = None
+    power_deposition_node_ids: list[int] = field(default_factory=list)
+    power_deposition_weights: list[float] = field(default_factory=list)
+    heater_attached: bool = True
+    heater_valid: bool = True
+    heater_warning: str = ""
     sensor_connected_node_ids: list[int] = field(default_factory=list)
+    readout_node_ids: list[int] = field(default_factory=list)
+    readout_weights: list[float] = field(default_factory=list)
     sensor_monitor_only: bool = False
     sensor_valid: bool = True
     sensor_control_mode: str = "manual"
@@ -418,10 +425,40 @@ class NodeProperties:
         if copied["assigned_heater_id"] is None and copied["assigned_heater_ids"]:
             copied["assigned_heater_id"] = int(copied["assigned_heater_ids"][0])
         copied["sensor_pair_distance_mm"] = _optional_float(copied.get("sensor_pair_distance_mm"))
+        copied["power_deposition_node_ids"] = [
+            int(value)
+            for value in (
+                copied.get("power_deposition_node_ids", copied.get("heater_power_deposition_node_ids", [])) or []
+            )
+            if _can_int(value)
+        ]
+        copied["power_deposition_weights"] = [
+            float(value)
+            for value in (
+                copied.get("power_deposition_weights", copied.get("heater_power_deposition_weights", [])) or []
+            )
+            if _can_float(value)
+        ]
+        copied["heater_attached"] = bool(copied.get("heater_attached", copied.get("heater_valid", True)))
+        copied["heater_valid"] = bool(copied.get("heater_valid", copied.get("heater_attached", True)))
+        copied["heater_warning"] = str(copied.get("heater_warning", "") or "")
         copied["sensor_connected_node_ids"] = [
             int(value)
             for value in (copied.get("sensor_connected_node_ids", []) or [])
             if _can_int(value)
+        ]
+        copied["readout_node_ids"] = [
+            int(value)
+            for value in (
+                copied.get("readout_node_ids", copied.get("sensor_readout_node_ids", copied["sensor_connected_node_ids"]))
+                or []
+            )
+            if _can_int(value)
+        ]
+        copied["readout_weights"] = [
+            float(value)
+            for value in (copied.get("readout_weights", copied.get("sensor_readout_weights", [])) or [])
+            if _can_float(value)
         ]
         node = cls(
             node_id=node_id,
@@ -549,8 +586,18 @@ class NodeProperties:
             data["assigned_heater_id"] = int(assigned_heater_ids[0])
         if self.sensor_pair_distance_mm is not None:
             data["sensor_pair_distance_mm"] = float(self.sensor_pair_distance_mm)
+        if self.power_deposition_node_ids:
+            data["power_deposition_node_ids"] = [int(value) for value in self.power_deposition_node_ids]
+            data["power_deposition_weights"] = [float(value) for value in self.power_deposition_weights]
+        data["heater_attached"] = bool(self.heater_attached)
+        data["heater_valid"] = bool(self.heater_valid)
+        if self.heater_warning:
+            data["heater_warning"] = str(self.heater_warning)
         if self.sensor_connected_node_ids:
             data["sensor_connected_node_ids"] = [int(value) for value in self.sensor_connected_node_ids]
+        if self.readout_node_ids:
+            data["readout_node_ids"] = [int(value) for value in self.readout_node_ids]
+            data["readout_weights"] = [float(value) for value in self.readout_weights]
         data["sensor_monitor_only"] = bool(self.sensor_monitor_only)
         data["sensor_valid"] = bool(self.sensor_valid)
         data["sensor_control_mode"] = _normalize_sensor_control_mode(self.sensor_control_mode)
@@ -964,6 +1011,14 @@ def _can_int(value: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _can_float(value: Any) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return number == number
 
 
 def _optional_int(value: Any) -> int | None:
