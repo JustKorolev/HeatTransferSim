@@ -344,7 +344,8 @@ def _role_path_candidates(obj: MeshObject) -> list[tuple[str, ...]]:
         candidates.append(hierarchy_path)
     scene_path = str(getattr(obj, "scene_path", "") or "")
     if scene_path:
-        scene_parts = tuple(part for part in scene_path.replace("\\", "/").split("/") if part)
+        scene_hierarchy = scene_path.split(" ", 1)[0]
+        scene_parts = tuple(part for part in scene_hierarchy.replace("\\", "/").split("/") if part)
         if scene_parts and scene_parts not in candidates:
             candidates.append(scene_parts)
     return candidates
@@ -363,7 +364,9 @@ def _classify_role_component(
             kind = classify_role_component_name(part, heater_patterns, sensor_patterns, exclude_patterns=None)
             if kind is not None:
                 return kind
-    return classify_role_component_name(_object_search_text(obj), heater_patterns, sensor_patterns, exclude_patterns)
+    if not _role_path_candidates(obj):
+        return classify_role_component_name(_object_search_text(obj), heater_patterns, sensor_patterns, exclude_patterns)
+    return None
 
 
 def _matches_any_role_pattern(name: str, patterns: list[str]) -> bool:
@@ -378,6 +381,7 @@ def _hierarchy_role_group_name(
     sensor_patterns: list[str],
     exclude_patterns: list[str] | None = None,
 ) -> str | None:
+    matches: list[tuple[int, int, str]] = []
     for path in _role_path_candidates(obj):
         if len(path) < 2:
             continue
@@ -392,9 +396,16 @@ def _hierarchy_role_group_name(
             if previous_kind == kind:
                 continue
             if "#" in path[index]:
-                return _normalize_role_name(path[index])
-            return _normalize_role_name("/".join(path[: index + 1]))
-    return None
+                group_name = _normalize_role_name(path[index])
+            else:
+                group_name = _normalize_role_name("/".join(path[: index + 1]))
+            has_child_segments = int(index < len(path) - 1)
+            matches.append((has_child_segments, -index, group_name))
+            break
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    return matches[0][2]
 
 
 def _safe_classify_role_component_name(

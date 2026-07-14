@@ -57,19 +57,11 @@ def load_gltf_scene(path: str | Path) -> GltfScene:
             temporary_path.unlink(missing_ok=True)
     warnings: list[str] = list(resource_warnings)
     objects: list[MeshObject] = []
-    raw_mesh_node_paths = _raw_gltf_mesh_node_paths(file_path)
     node_paths = _graph_node_paths(loaded.graph)
     nodes_geometry = list(loaded.graph.nodes_geometry)
-    if raw_mesh_node_paths and len(raw_mesh_node_paths) != len(nodes_geometry):
-        warnings.append(
-            f"Raw glTF hierarchy has {len(raw_mesh_node_paths)} mesh node path(s), while trimesh exposed "
-            f"{len(nodes_geometry)} geometry node(s); using raw hierarchy paths where ordinals overlap."
-        )
     for ordinal, node_name in enumerate(nodes_geometry):
         transform, geometry_name = loaded.graph.get(node_name)
         hierarchy_path = node_paths.get(str(node_name), (str(node_name),))
-        if ordinal < len(raw_mesh_node_paths):
-            hierarchy_path = raw_mesh_node_paths[ordinal][1]
         obj = _mesh_object_from_geometry(
             node_name=str(node_name),
             geometry_name=str(geometry_name),

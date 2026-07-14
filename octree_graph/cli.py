@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import csv
 from datetime import datetime, timezone
 import faulthandler
@@ -472,11 +473,16 @@ def _split_role_components(
         return scene, []
     role_names = ", ".join(f"{component.kind}:{component.name}" for component in role_components[:8])
     extra = "" if len(role_components) <= 8 else f", ... and {len(role_components) - 8} more"
+    role_summary = _role_detection_summary(role_components)
     warnings.append(
         f"Detected {len(role_components)} heater/sensor CAD component(s); "
+        f"{role_summary}; "
         f"their CAD bounds will be attached to body cells while voxelization uses {len(body_objects)} body object(s): "
         f"{role_names}{extra}."
     )
+    leaf_warning = _role_leaf_grouping_warning(role_components)
+    if leaf_warning:
+        warnings.append(leaf_warning)
     return _scene_with_objects(scene, body_objects), role_components
 
 
@@ -503,6 +509,42 @@ def _substring_patterns(values: list[str]) -> list[str]:
 
 def _normalize_role_pattern_text(value: str) -> str:
     return str(value).replace("\\", "/").replace("-", "_").replace(" ", "_")
+
+
+def _role_detection_summary(role_components: list) -> str:
+    by_kind = Counter(str(component.kind) for component in role_components)
+    object_counts = [len(getattr(component, "objects", []) or []) for component in role_components]
+    count_distribution = Counter(object_counts)
+    common_counts = ", ".join(
+        f"{count}obj:{frequency}" for count, frequency in sorted(count_distribution.items())[:4]
+    )
+    return f"roles_by_kind={dict(sorted(by_kind.items()))} objects_per_role={common_counts or 'none'}"
+
+
+def _role_leaf_grouping_warning(role_components: list) -> str | None:
+    by_kind = Counter(str(component.kind) for component in role_components)
+    one_object_by_kind = Counter(
+        str(component.kind)
+        for component in role_components
+        if len(getattr(component, "objects", []) or []) == 1
+    )
+    suspicious = [
+        f"{kind}={count}"
+        for kind, count in sorted(by_kind.items())
+        if count >= 100 and one_object_by_kind.get(kind, 0) >= int(0.75 * count)
+    ]
+    if not suspicious:
+        return None
+    examples = ", ".join(
+        f"{component.kind}:{component.name}"
+        for component in role_components
+        if len(getattr(component, "objects", []) or []) == 1
+    )[:300]
+    return (
+        "Role detection appears to be grouping mostly one mesh leaf per role "
+        f"({'; '.join(suspicious)}). This usually means the GLB hierarchy path was not recovered. "
+        f"Examples: {examples}"
+    )
 
 
 def _bounds_for_objects(objects: list) -> tuple[np.ndarray, np.ndarray] | None:
