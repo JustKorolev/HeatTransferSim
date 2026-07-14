@@ -24,6 +24,7 @@ from octree_graph.graph_builder import (
     RoleComponent,
     _candidate_cell_pairs,
     _exposed_areas_m2,
+    _warn_overlapping_role_components,
     build_graph,
     collapse_role_components,
 )
@@ -70,6 +71,88 @@ def _mesh_object(
         material_name=material_name,
         mesh=mesh,
         vertices_mm=np.empty((0, 3)),
+        bounds_mm=(bounds_min_array, bounds_max_array),
+        watertight=False,
+        scene_path=name,
+    )
+
+
+def _box_mesh_object(
+    name: str,
+    material_name: str | None,
+    bounds_min: list[float],
+    bounds_max: list[float],
+) -> MeshObject:
+    bounds_min_array = np.asarray(bounds_min, dtype=float)
+    bounds_max_array = np.asarray(bounds_max, dtype=float)
+    x0, y0, z0 = bounds_min_array
+    x1, y1, z1 = bounds_max_array
+    vertices = np.array(
+        [
+            [x0, y0, z0],
+            [x1, y0, z0],
+            [x1, y1, z0],
+            [x0, y1, z0],
+            [x0, y0, z1],
+            [x1, y0, z1],
+            [x1, y1, z1],
+            [x0, y1, z1],
+        ],
+        dtype=float,
+    )
+    faces = np.array(
+        [
+            [0, 1, 2], [0, 2, 3],
+            [4, 6, 5], [4, 7, 6],
+            [0, 4, 5], [0, 5, 1],
+            [1, 5, 6], [1, 6, 2],
+            [2, 6, 7], [2, 7, 3],
+            [3, 7, 4], [3, 4, 0],
+        ],
+        dtype=int,
+    )
+    triangles = vertices[faces]
+    size = np.maximum(bounds_max_array - bounds_min_array, 0.0)
+    mesh = SimpleNamespace(
+        vertices=vertices,
+        faces=faces,
+        triangles=triangles,
+        is_watertight=True,
+        volume=float(np.prod(np.maximum(size, 1.0))),
+    )
+    return MeshObject(
+        name=name,
+        material_name=material_name,
+        mesh=mesh,
+        vertices_mm=vertices,
+        bounds_mm=(bounds_min_array, bounds_max_array),
+        watertight=True,
+        scene_path=name,
+    )
+
+
+def _triangle_mesh_object(
+    name: str,
+    material_name: str | None,
+    points: list[list[float]],
+) -> MeshObject:
+    vertices = np.asarray(points, dtype=float)
+    faces = np.array([[0, 1, 2]], dtype=int)
+    triangles = vertices[faces]
+    bounds_min_array = np.min(vertices, axis=0)
+    bounds_max_array = np.max(vertices, axis=0)
+    mesh = SimpleNamespace(
+        vertices=vertices,
+        faces=faces,
+        triangles=triangles,
+        is_watertight=False,
+        volume=0.0,
+    )
+    return MeshObject(
+        name=name,
+        material_name=material_name,
+        mesh=mesh,
+        vertices_mm=vertices,
         bounds_mm=(bounds_min_array, bounds_max_array),
         watertight=False,
         scene_path=name,
@@ -343,6 +426,36 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
                 [r"sensor"],
             )
 
+    def test_role_overlap_warning_requires_mesh_proximity_not_aabb_only(self) -> None:
+        left = RoleComponent(
+            name="heater_left",
+            kind="heater",
+            objects=[
+                _triangle_mesh_object("heater_left", "Copper", [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]])
+            ],
+        )
+        right = RoleComponent(
+            name="heater_right",
+            kind="heater",
+            objects=[
+                _triangle_mesh_object("heater_right", "Copper", [[6.0, 10.0, 0.0], [10.0, 6.0, 0.0], [10.0, 10.0, 0.0]])
+            ],
+        )
+        touching = RoleComponent(
+            name="sensor_touching",
+            kind="sensor",
+            objects=[
+                _triangle_mesh_object("sensor_touching", "Copper", [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]])
+            ],
+        )
+
+        warnings: list[str] = []
+        _warn_overlapping_role_components([left, right], warnings)
+        self.assertEqual(warnings, [])
+
+        _warn_overlapping_role_components([left, touching], warnings)
+        self.assertIn("mesh separation is", " ".join(warnings))
+
     def test_cli_role_component_split_uses_only_configured_substrings(self) -> None:
         body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
         heater = _mesh_object("heater_strip_1", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
@@ -585,7 +698,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(edge["edge_type"], "consolidated_role_contact")
         self.assertGreater(edge["G_W_K"], 0.0)
 
-    def test_graph_build_adds_dedicated_role_node_when_detected_component_has_no_voxel_cells(self) -> None:
+    def test_graph_build_maps_detected_heater_contact_to_existing_body_cell(self) -> None:
         materials = self.make_materials()
         leaves = [
             OctreeCell(
@@ -602,7 +715,8 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
                 confidence="high",
             )
         ]
-        heater_obj = _mesh_object("heater_strip_1", "Copper", [5.01, -2.0, -2.0], [7.01, 2.0, 2.0])
+        body_obj = _box_mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        heater_obj = _box_mesh_object("heater_strip_1", "Copper", [5.0, -2.0, -2.0], [7.0, 2.0, 2.0])
         role_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj])
         warnings: list[str] = []
 
@@ -612,20 +726,22 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             materials,
             warnings=warnings,
             contact_detection_distance_mm=3.0,
+            body_objects=[body_obj],
             role_components=[role_component],
         )
 
-        self.assertEqual(len(result.nodes), 2)
+        self.assertEqual(len(result.nodes), 1)
         heater_nodes = [node for node in result.nodes if node["is_heater"]]
         self.assertEqual(len(heater_nodes), 1)
         self.assertEqual(heater_nodes[0]["component_name"], "heater_strip")
         self.assertEqual(heater_nodes[0]["source_components"], ["heater_strip_1"])
         self.assertEqual(heater_nodes[0]["role_source_components"], ["heater_strip_1"])
+        self.assertEqual(heater_nodes[0]["power_deposition_node_ids"], [0])
+        self.assertEqual(heater_nodes[0]["power_deposition_weights"], [1.0])
+        self.assertEqual(heater_nodes[0]["role_selected_body_component"], "body_panel")
         self.assertEqual(result.edges, [])
-        self.assertIn("produced 0 solid voxel cells", warnings[0])
-        self.assertIn("0 contact edges", " ".join(warnings))
 
-    def test_graph_build_dedicated_role_node_survives_mesh_volume_failure(self) -> None:
+    def test_graph_build_unresolved_role_survives_mesh_volume_failure(self) -> None:
         class DegenerateMesh:
             vertices = np.empty((0, 3))
             faces = np.empty((0, 3), dtype=int)
@@ -662,22 +778,22 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             scene_path="sensor_probe_1",
         )
         role_component = RoleComponent(name="sensor_probe", kind="sensor", objects=[sensor_obj])
+        warnings: list[str] = []
 
         result = build_graph(
             leaves,
             ContactReport(),
             materials,
-            warnings=[],
+            warnings=warnings,
+            body_objects=[_box_mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])],
             role_components=[role_component],
         )
 
         sensor_nodes = [node for node in result.nodes if node["is_sensor"]]
-        self.assertEqual(len(sensor_nodes), 1)
-        self.assertEqual(sensor_nodes[0]["component_name"], "sensor_probe")
-        self.assertGreater(sensor_nodes[0]["volume_m3"], 0.0)
-        self.assertGreater(sensor_nodes[0]["C_J_K"], 0.0)
+        self.assertEqual(sensor_nodes, [])
+        self.assertIn("Unresolved sensor CAD role", " ".join(warnings))
 
-    def test_graph_build_connects_dedicated_sensor_node_to_contacting_body_cell(self) -> None:
+    def test_graph_build_maps_sensor_contact_to_existing_body_cell(self) -> None:
         materials = self.make_materials()
         leaves = [
             OctreeCell(
@@ -694,7 +810,8 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
                 confidence="high",
             )
         ]
-        sensor_obj = _mesh_object("temperature_probe_A", "Copper", [4.0, -2.0, -2.0], [6.0, 2.0, 2.0])
+        body_obj = _box_mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        sensor_obj = _box_mesh_object("temperature_probe_A", "Copper", [4.0, -2.0, -2.0], [6.0, 2.0, 2.0])
         role_component = RoleComponent(name="temperature_probe", kind="sensor", objects=[sensor_obj])
         warnings: list[str] = []
 
@@ -703,6 +820,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             ContactReport(),
             materials,
             warnings=warnings,
+            body_objects=[body_obj],
             role_components=[role_component],
         )
 
@@ -711,58 +829,48 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         sensor = sensor_nodes[0]
         self.assertEqual(sensor["component_name"], "temperature_probe")
         self.assertEqual(sensor["source_components"], ["temperature_probe_A"])
-        self.assertEqual(len(result.edges), 1)
-        self.assertEqual({result.edges[0]["node_i"], result.edges[0]["node_j"]}, {0, sensor["node_id"]})
-        self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
-        self.assertGreater(result.edges[0]["G_W_K"], 0.0)
+        self.assertEqual(sensor["readout_node_ids"], [0])
+        self.assertEqual(sensor["readout_weights"], [1.0])
+        self.assertEqual(sensor["role_selected_body_component"], "body_panel")
+        self.assertEqual(result.edges, [])
 
-    def test_graph_build_embedded_sensor_uses_consolidated_heater_body_neighbors(self) -> None:
+    def test_graph_build_pairs_contact_mapped_heater_and_sensor_roles(self) -> None:
         materials = self.make_materials()
         leaves = [
             OctreeCell(
-                cell_id="cell_heater_left",
+                cell_id="cell_heater_body",
                 parent_id=None,
                 children_ids=[],
                 level=0,
                 center_mm=(0.0, 0.0, 0.0),
                 size_mm=(10.0, 10.0, 10.0),
-                occupancy={"heater_strip_1": 1.0},
+                occupancy={"heater_body": 1.0},
                 material_fractions={"Copper": 1.0},
-                dominant_component="heater_strip_1",
+                dominant_component="heater_body",
                 dominant_material="Copper",
                 confidence="high",
             ),
             OctreeCell(
-                cell_id="cell_heater_right",
-                parent_id=None,
-                children_ids=[],
-                level=0,
-                center_mm=(-10.0, 0.0, 0.0),
-                size_mm=(10.0, 10.0, 10.0),
-                occupancy={"heater_strip_2": 1.0},
-                material_fractions={"Copper": 1.0},
-                dominant_component="heater_strip_2",
-                dominant_material="Copper",
-                confidence="high",
-            ),
-            OctreeCell(
-                cell_id="cell_body",
+                cell_id="cell_sensor_body",
                 parent_id=None,
                 children_ids=[],
                 level=0,
                 center_mm=(10.0, 0.0, 0.0),
                 size_mm=(10.0, 10.0, 10.0),
-                occupancy={"body_panel": 1.0},
+                occupancy={"sensor_body": 1.0},
                 material_fractions={"Copper": 1.0},
-                dominant_component="body_panel",
+                dominant_component="sensor_body",
                 dominant_material="Copper",
                 confidence="high",
             ),
         ]
-        heater_obj = _mesh_object("heater_strip_1", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
-        heater_obj_2 = _mesh_object("heater_strip_2", "Copper", [-15.0, -5.0, -5.0], [-5.0, 5.0, 5.0])
-        sensor_obj = _mesh_object("temperature_probe_A", "Copper", [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
-        heater_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj, heater_obj_2])
+        body_objects = [
+            _box_mesh_object("heater_body", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0]),
+            _box_mesh_object("sensor_body", "Copper", [5.0, -5.0, -5.0], [15.0, 5.0, 5.0]),
+        ]
+        heater_obj = _box_mesh_object("heater_strip_1", "Copper", [-7.0, -1.0, -1.0], [-5.0, 1.0, 1.0])
+        sensor_obj = _box_mesh_object("temperature_probe_A", "Copper", [15.0, -1.0, -1.0], [17.0, 1.0, 1.0])
+        heater_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj])
         sensor_component = RoleComponent(name="temperature_probe", kind="sensor", objects=[sensor_obj])
         warnings: list[str] = []
 
@@ -771,20 +879,20 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             ContactReport(),
             materials,
             warnings=warnings,
+            body_objects=body_objects,
             role_components=[heater_component, sensor_component],
         )
 
         sensors = [node for node in result.nodes if node["is_sensor"]]
         heaters = [node for node in result.nodes if node["is_heater"]]
-        bodies = [node for node in result.nodes if not node["is_heater"] and not node["is_sensor"]]
         self.assertEqual(len(sensors), 1)
         self.assertEqual(len(heaters), 1)
-        self.assertEqual(len(bodies), 1)
-        self.assertEqual(sorted(heaters[0]["source_cell_ids"]), ["cell_heater_left", "cell_heater_right"])
-        self.assertEqual(sensors[0]["sensor_connected_node_ids"], [bodies[0]["node_id"]])
+        self.assertEqual(heaters[0]["role_selected_body_component"], "heater_body")
+        self.assertEqual(sensors[0]["role_selected_body_component"], "sensor_body")
+        self.assertEqual(heaters[0]["power_deposition_node_ids"], [heaters[0]["node_id"]])
+        self.assertEqual(sensors[0]["sensor_connected_node_ids"], [sensors[0]["node_id"]])
         self.assertTrue(sensors[0]["sensor_valid"])
         self.assertEqual(heaters[0]["assigned_sensor_id"], sensors[0]["node_id"])
-        self.assertIn("heater-adjacent body node", " ".join(warnings))
 
     def test_graph_build_adds_near_contact_edges_for_near_face_cells(self) -> None:
         materials = self.make_materials()

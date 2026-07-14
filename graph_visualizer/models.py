@@ -189,6 +189,15 @@ class NodeProperties:
     sensor_connected_node_ids: list[int] = field(default_factory=list)
     readout_node_ids: list[int] = field(default_factory=list)
     readout_weights: list[float] = field(default_factory=list)
+    role_contact_node_ids: list[int] = field(default_factory=list)
+    role_contact_areas_mm2: list[float] = field(default_factory=list)
+    role_contact_weights: list[float] = field(default_factory=list)
+    role_contact_total_area_mm2: float = 0.0
+    role_selected_body_component: str = ""
+    role_contact_status: str = ""
+    role_contact_tolerance_mm: float = 0.0
+    role_contact_diagnostics: dict[str, Any] = field(default_factory=dict)
+    heater_sensor_pairing_status: str = ""
     sensor_monitor_only: bool = False
     sensor_valid: bool = True
     sensor_control_mode: str = "manual"
@@ -476,6 +485,28 @@ class NodeProperties:
             for value in (copied.get("readout_weights", copied.get("sensor_readout_weights", [])) or [])
             if _can_float(value)
         ]
+        copied["role_contact_node_ids"] = [
+            int(value)
+            for value in (copied.get("role_contact_node_ids", []) or [])
+            if _can_int(value)
+        ]
+        copied["role_contact_areas_mm2"] = [
+            float(value)
+            for value in (copied.get("role_contact_areas_mm2", []) or [])
+            if _can_float(value)
+        ]
+        copied["role_contact_weights"] = [
+            float(value)
+            for value in (copied.get("role_contact_weights", []) or [])
+            if _can_float(value)
+        ]
+        copied["role_contact_total_area_mm2"] = float(copied.get("role_contact_total_area_mm2", 0.0) or 0.0)
+        copied["role_selected_body_component"] = str(copied.get("role_selected_body_component", "") or "")
+        copied["role_contact_status"] = str(copied.get("role_contact_status", "") or "")
+        copied["role_contact_tolerance_mm"] = float(copied.get("role_contact_tolerance_mm", 0.0) or 0.0)
+        diagnostics = copied.get("role_contact_diagnostics", {}) or {}
+        copied["role_contact_diagnostics"] = dict(diagnostics) if isinstance(diagnostics, dict) else {}
+        copied["heater_sensor_pairing_status"] = str(copied.get("heater_sensor_pairing_status", "") or "")
         node = cls(
             node_id=node_id,
             coord=coord,
@@ -614,6 +645,24 @@ class NodeProperties:
         if self.readout_node_ids:
             data["readout_node_ids"] = [int(value) for value in self.readout_node_ids]
             data["readout_weights"] = [float(value) for value in self.readout_weights]
+        if self.role_contact_node_ids:
+            data["role_contact_node_ids"] = [int(value) for value in self.role_contact_node_ids]
+        if self.role_contact_areas_mm2:
+            data["role_contact_areas_mm2"] = [float(value) for value in self.role_contact_areas_mm2]
+        if self.role_contact_weights:
+            data["role_contact_weights"] = [float(value) for value in self.role_contact_weights]
+        if self.role_contact_total_area_mm2 > 0.0:
+            data["role_contact_total_area_mm2"] = float(self.role_contact_total_area_mm2)
+        if self.role_selected_body_component:
+            data["role_selected_body_component"] = str(self.role_selected_body_component)
+        if self.role_contact_status:
+            data["role_contact_status"] = str(self.role_contact_status)
+        if self.role_contact_tolerance_mm > 0.0:
+            data["role_contact_tolerance_mm"] = float(self.role_contact_tolerance_mm)
+        if self.role_contact_diagnostics:
+            data["role_contact_diagnostics"] = dict(self.role_contact_diagnostics)
+        if self.heater_sensor_pairing_status:
+            data["heater_sensor_pairing_status"] = str(self.heater_sensor_pairing_status)
         data["sensor_monitor_only"] = bool(self.sensor_monitor_only)
         data["sensor_valid"] = bool(self.sensor_valid)
         data["sensor_control_mode"] = _normalize_sensor_control_mode(self.sensor_control_mode)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import permutations
 import re
 from typing import Any, Iterator
 
@@ -76,6 +77,27 @@ class GraphBuildResult:
     warnings: list[str]
 
 
+@dataclass
+class _ContactSample:
+    point: np.ndarray
+    area_mm2: float
+    normal: np.ndarray
+
+
+@dataclass
+class _RoleContactCandidate:
+    component_name: str
+    body_object: MeshObject
+    has_intersection: bool
+    min_distance_mm: float
+    contact_area_mm2: float
+    patch_centroid_mm: np.ndarray
+    role_to_patch_distance_mm: float
+    sample_points_mm: list[np.ndarray]
+    sample_areas_mm2: list[float]
+    closest_points_mm: list[np.ndarray]
+
+
 def build_graph(
     leaves: list[OctreeCell],
     contact_report: ContactReport | None,
@@ -85,6 +107,7 @@ def build_graph(
     radiation_reference_temperature_K: float = 293.15,
     contact_detection_distance_mm: float = 0.0,
     component_bounds_mm: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+    body_objects: list[MeshObject] | None = None,
     role_components: list[RoleComponent] | None = None,
     role_contact_tolerance_mm: float = _ROLE_NODE_CONTACT_TOLERANCE_MM,
     role_contact_tolerance_max_mm: float | None = None,
@@ -138,12 +161,15 @@ def build_graph(
         )
     role_components = role_components or []
     _warn_overlapping_role_components(role_components, warnings)
-    role_groups = _tag_role_voxel_nodes(
-        nodes,
-        solid,
-        role_components,
-        warnings,
-    )
+    if body_objects:
+        role_groups: dict[str, list[dict]] = {}
+    else:
+        role_groups = _tag_role_voxel_nodes(
+            nodes,
+            solid,
+            role_components,
+            warnings,
+        )
     cell_to_node = {node["cell_id"]: node for node in nodes}
     edges: list[dict] = []
     edge_index = 0
@@ -207,36 +233,14 @@ def build_graph(
         )
     if role_groups:
         nodes, edges = _consolidate_role_voxel_nodes(nodes, edges, role_groups, warnings)
-    missing_role_components = [
-        component
-        for component in role_components
-        if component.name not in role_groups
-    ]
-    if missing_role_components:
-        cell_to_node = _cell_to_node_lookup(nodes)
-        connected_node_pairs = {
-            tuple(sorted((int(edge["node_i"]), int(edge["node_j"]))))
-            for edge in edges
-            if "node_i" in edge and "node_j" in edge
-        }
-        role_contacts = _append_role_nodes(
-            nodes,
-            missing_role_components,
-            contact_report,
-            materials,
-            warnings,
-        )
-        _add_role_node_contact_edges(
-            solid,
-            cell_to_node,
-            role_contacts,
-            edges,
-            len(edges),
-            role_contact_tolerance_mm,
-            connected_node_pairs,
-            warnings,
-            role_contact_tolerance_mm,
-        )
+    _map_roles_to_body_cells(
+        nodes,
+        solid,
+        role_components,
+        body_objects or [],
+        warnings,
+        role_contact_tolerance_mm=role_contact_tolerance_mm,
+    )
     _attach_role_interfaces_to_body_nodes(
         nodes,
         solid,
@@ -255,6 +259,7 @@ def build_graph(
         edges,
         warnings,
         max_heater_sensor_pair_distance_mm=max_heater_sensor_pair_distance_mm,
+        role_components=role_components,
     )
     return GraphBuildResult(nodes=nodes, edges=edges, warnings=warnings)
 
@@ -309,26 +314,30 @@ def collapse_role_components(
 
 
 def _warn_overlapping_role_components(components: list[RoleComponent], warnings: list[str]) -> None:
+    overlap_tolerance_mm = 1.0e-6
     for left_index, left in enumerate(components):
         left_min, left_max = left.bounds_mm
         for right in components[left_index + 1 :]:
             right_min, right_max = right.bounds_mm
             if np.any(left_max < right_min) or np.any(right_max < left_min):
                 continue
+            distance_mm = _role_component_distance_mm(left, right)
+            if distance_mm > overlap_tolerance_mm:
+                continue
             if left.kind == right.kind == "heater":
                 warnings.append(
                     f"Distinct heater role components {left.name!r} and {right.name!r} have overlapping CAD bounds; "
-                    "kept separate and requiring independent body deposition nodes."
+                    f"mesh separation is {distance_mm:.6g} mm; kept separate and requiring independent body deposition nodes."
                 )
             elif left.kind == right.kind == "sensor":
                 warnings.append(
                     f"Distinct sensor role components {left.name!r} and {right.name!r} have overlapping CAD bounds; "
-                    "kept separate unless grouping already merged them."
+                    f"mesh separation is {distance_mm:.6g} mm; kept separate unless grouping already merged them."
                 )
             else:
                 warnings.append(
                     f"Heater/sensor role components {left.name!r} and {right.name!r} have overlapping CAD bounds; "
-                    "using overlap only for diagnostics/pairing, not power deposition."
+                    f"mesh separation is {distance_mm:.6g} mm; using overlap only for diagnostics/pairing, not power deposition."
                 )
 
 
@@ -456,7 +465,7 @@ def _tag_role_voxel_nodes(
             continue
         warning = (
             f"Detected {component.kind} CAD component {component.name!r}, but it produced 0 solid voxel cells; "
-            "it will be represented as a dedicated CAD role node instead of being dropped."
+            "it will be mapped to contacted body octree cells from CAD mesh contact."
         )
         warnings.append(warning)
     return {
@@ -611,6 +620,380 @@ def _cell_to_node_lookup(nodes: list[dict]) -> dict[str, dict]:
     return lookup
 
 
+def _map_roles_to_body_cells(
+    nodes: list[dict],
+    cells: list[OctreeCell],
+    role_components: list[RoleComponent],
+    body_objects: list[MeshObject],
+    warnings: list[str],
+    *,
+    role_contact_tolerance_mm: float,
+) -> dict[str, dict[str, Any]]:
+    if not role_components:
+        return {}
+    mappings: dict[str, dict[str, Any]] = {}
+    body_by_name = {obj.name: obj for obj in body_objects}
+    if not body_by_name:
+        for component in role_components:
+            _warn_unresolved_role(component, warnings, "no body CAD mesh objects were available for contact analysis")
+        return mappings
+    cell_to_node = _cell_to_node_lookup(nodes)
+    for component in role_components:
+        candidate = _select_role_body_contact(component, list(body_by_name.values()), role_contact_tolerance_mm)
+        if candidate is None:
+            nearest = _nearest_body_candidate_diagnostic(component, list(body_by_name.values()))
+            detail = (
+                f"nearest body component {nearest[0]!r} at {nearest[1]:.6g} mm"
+                if nearest is not None
+                else "no candidate body component was found"
+            )
+            _warn_unresolved_role(
+                component,
+                warnings,
+                f"no mesh contact within {float(role_contact_tolerance_mm):.6g} mm; {detail}",
+            )
+            mappings[component.name] = {"status": "unresolved", "diagnostics": detail}
+            continue
+        node_areas = _project_contact_candidate_to_cells(candidate, cells, cell_to_node)
+        if not node_areas:
+            _warn_unresolved_role(
+                component,
+                warnings,
+                f"selected body component {candidate.component_name!r} had a CAD contact patch, "
+                "but no contact samples mapped to matching body octree cells",
+            )
+            mappings[component.name] = {"status": "unresolved", "selected_body_component": candidate.component_name}
+            continue
+        node_ids = sorted(node_areas)
+        areas = [float(node_areas[node_id]) for node_id in node_ids]
+        weights = _normalized_weights(areas, len(areas))
+        representative_id = max(node_ids, key=lambda node_id: (node_areas[node_id], -node_id))
+        role_node = next((node for node in nodes if int(node["node_id"]) == int(representative_id)), None)
+        if role_node is None:
+            continue
+        if bool(role_node.get("is_heater")) or bool(role_node.get("is_sensor")):
+            role_node.setdefault("warnings", []).append(
+                f"Multiple CAD roles map to body node {representative_id}; latest role metadata is {component.name!r}."
+            )
+        _apply_role_mapping_to_node(role_node, component, candidate, node_ids, areas, weights)
+        mappings[component.name] = {
+            "status": "valid",
+            "node_id": int(representative_id),
+            "selected_body_component": candidate.component_name,
+            "contact_node_ids": node_ids,
+            "contact_areas_mm2": areas,
+            "contact_weights": weights,
+        }
+    return mappings
+
+
+def _apply_role_mapping_to_node(
+    node: dict,
+    component: RoleComponent,
+    candidate: _RoleContactCandidate,
+    node_ids: list[int],
+    areas_mm2: list[float],
+    weights: list[float],
+) -> None:
+    mins, maxs = component.bounds_mm
+    role_sources = sorted({obj.name for obj in component.objects})
+    node["node_type"] = component.kind
+    node["component_name"] = component.name
+    node["source_components"] = role_sources
+    node["role_source_components"] = role_sources
+    node["source_bounds_mm"] = {
+        "min": [float(value) for value in mins],
+        "max": [float(value) for value in maxs],
+    }
+    node["role_selected_body_component"] = candidate.component_name
+    node["role_contact_node_ids"] = [int(value) for value in node_ids]
+    node["role_contact_areas_mm2"] = [float(value) for value in areas_mm2]
+    node["role_contact_weights"] = [float(value) for value in weights]
+    node["role_contact_total_area_mm2"] = float(sum(areas_mm2))
+    node["role_contact_status"] = "valid"
+    node["role_contact_tolerance_mm"] = float(candidate.min_distance_mm)
+    node["role_contact_diagnostics"] = {
+        "selected_body_component": candidate.component_name,
+        "min_distance_mm": float(candidate.min_distance_mm),
+        "contact_area_mm2": float(candidate.contact_area_mm2),
+        "role_to_patch_distance_mm": float(candidate.role_to_patch_distance_mm),
+        "has_intersection": bool(candidate.has_intersection),
+    }
+    node.setdefault("tags", {}).setdefault("notes", "")
+    node["tags"]["notes"] = _append_note(
+        str(node["tags"].get("notes", "")),
+        f"CAD {component.kind} role {component.name!r} mapped to body component {candidate.component_name!r}.",
+    )
+    if component.kind == "heater":
+        node["is_heater"] = True
+        node["power_deposition_node_ids"] = [int(value) for value in node_ids]
+        node["power_deposition_weights"] = [float(value) for value in weights]
+        node["heater_attached"] = True
+        node["heater_valid"] = True
+        node["heater_warning"] = ""
+    elif component.kind == "sensor":
+        node["is_sensor"] = True
+        node["readout_node_ids"] = [int(value) for value in node_ids]
+        node["readout_weights"] = [float(value) for value in weights]
+        node["sensor_connected_node_ids"] = [int(value) for value in node_ids]
+        node["sensor_valid"] = True
+        node["sensor_monitor_only"] = False
+
+
+def _warn_unresolved_role(component: RoleComponent, warnings: list[str], detail: str) -> None:
+    center = np.asarray(component.center_mm, dtype=float)
+    warnings.append(
+        f"Unresolved {component.kind} CAD role {component.name!r} at "
+        f"({center[0]:.6g}, {center[1]:.6g}, {center[2]:.6g}) mm: {detail}."
+    )
+
+
+def _select_role_body_contact(
+    component: RoleComponent,
+    body_objects: list[MeshObject],
+    tolerance_mm: float,
+) -> _RoleContactCandidate | None:
+    tolerance = max(0.0, float(tolerance_mm))
+    role_min, role_max = component.bounds_mm
+    expanded_min = role_min - tolerance
+    expanded_max = role_max + tolerance
+    samples = _role_surface_samples(component)
+    if not samples:
+        return None
+    candidates: list[_RoleContactCandidate] = []
+    for body in body_objects:
+        body_min, body_max = body.bounds_mm
+        if np.any(expanded_max < body_min) or np.any(body_max < expanded_min):
+            continue
+        candidate = _evaluate_role_body_contact(component, samples, body, tolerance)
+        if candidate is not None:
+            candidates.append(candidate)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: (
+            0 if item.has_intersection else 1,
+            item.role_to_patch_distance_mm,
+            -item.contact_area_mm2,
+            item.min_distance_mm,
+            item.component_name,
+        )
+    )
+    return candidates[0]
+
+
+def _evaluate_role_body_contact(
+    component: RoleComponent,
+    samples: list[_ContactSample],
+    body: MeshObject,
+    tolerance_mm: float,
+) -> _RoleContactCandidate | None:
+    triangles = _mesh_triangles_array(body)
+    if triangles.size == 0:
+        return None
+    contact_points: list[np.ndarray] = []
+    contact_areas: list[float] = []
+    closest_points: list[np.ndarray] = []
+    min_distance = float("inf")
+    for sample in samples:
+        closest, distance = _closest_point_on_mesh(sample.point, triangles)
+        min_distance = min(min_distance, distance)
+        penetrates_body = _point_inside_mesh_object(sample.point, body)
+        if distance <= tolerance_mm + 1.0e-9 or penetrates_body:
+            contact_points.append(sample.point)
+            contact_areas.append(float(sample.area_mm2))
+            closest_points.append(closest)
+    if not contact_points:
+        return None
+    total_area = float(sum(contact_areas))
+    if total_area <= 0.0:
+        return None
+    patch_centroid = sum(point * area for point, area in zip(contact_points, contact_areas)) / total_area
+    role_center = np.asarray(component.center_mm, dtype=float)
+    return _RoleContactCandidate(
+        component_name=body.name,
+        body_object=body,
+        has_intersection=bool(min_distance <= 1.0e-7),
+        min_distance_mm=float(min_distance),
+        contact_area_mm2=total_area,
+        patch_centroid_mm=np.asarray(patch_centroid, dtype=float),
+        role_to_patch_distance_mm=float(np.linalg.norm(np.asarray(patch_centroid, dtype=float) - role_center)),
+        sample_points_mm=contact_points,
+        sample_areas_mm2=contact_areas,
+        closest_points_mm=closest_points,
+    )
+
+
+def _nearest_body_candidate_diagnostic(component: RoleComponent, body_objects: list[MeshObject]) -> tuple[str, float] | None:
+    samples = _role_surface_samples(component)
+    if not samples:
+        return None
+    best: tuple[str, float] | None = None
+    for body in body_objects:
+        triangles = _mesh_triangles_array(body)
+        if triangles.size == 0:
+            continue
+        distance = min(_closest_point_on_mesh(sample.point, triangles)[1] for sample in samples)
+        if best is None or distance < best[1]:
+            best = (body.name, float(distance))
+    return best
+
+
+def _point_inside_mesh_object(point_mm: np.ndarray, obj: MeshObject) -> bool:
+    point = np.asarray(point_mm, dtype=float)
+    try:
+        contains = getattr(obj.mesh, "contains", None)
+        if callable(contains):
+            result = np.asarray(contains([point]), dtype=bool)
+            if result.size:
+                return bool(result[0])
+    except Exception:
+        pass
+    mins, maxs = obj.bounds_mm
+    return bool(np.all(point >= np.asarray(mins, dtype=float) - 1.0e-9) and np.all(point <= np.asarray(maxs, dtype=float) + 1.0e-9))
+
+
+def _project_contact_candidate_to_cells(
+    candidate: _RoleContactCandidate,
+    cells: list[OctreeCell],
+    cell_to_node: dict[str, dict],
+) -> dict[int, float]:
+    selected_component = candidate.component_name
+    node_areas: dict[int, float] = {}
+    matching_cells = [cell for cell in cells if cell.dominant_component == selected_component]
+    if not matching_cells:
+        return node_areas
+    bucket_size = _cell_pair_bucket_size(matching_cells, 0.0)
+    buckets = _cell_bucket_index(matching_cells, bucket_size)
+    for point, area in zip(candidate.closest_points_mm, candidate.sample_areas_mm2):
+        cell = _cell_containing_point(point, matching_cells, buckets, bucket_size)
+        if cell is None:
+            continue
+        node = cell_to_node.get(cell.cell_id)
+        if node is None:
+            continue
+        node_id = int(node["node_id"])
+        node_areas[node_id] = node_areas.get(node_id, 0.0) + max(0.0, float(area))
+    return {node_id: area for node_id, area in node_areas.items() if area > 0.0}
+
+
+def _cell_containing_point(
+    point_mm: np.ndarray,
+    cells: list[OctreeCell],
+    buckets: dict[tuple[int, int, int], list[OctreeCell]],
+    bucket_size_mm: float,
+) -> OctreeCell | None:
+    point = np.asarray(point_mm, dtype=float)
+    candidates = _cells_intersecting_bounds(buckets, bucket_size_mm, point, point, padding_mm=1.0e-7)
+    if not candidates:
+        candidates = cells
+    containing: list[tuple[float, str, OctreeCell]] = []
+    for cell in candidates:
+        cell_min, cell_max = _cell_bounds_mm(cell)
+        if np.all(point >= cell_min - 1.0e-7) and np.all(point <= cell_max + 1.0e-7):
+            center_distance = float(np.linalg.norm(point - np.asarray(cell.center_mm, dtype=float)))
+            containing.append((center_distance, cell.cell_id, cell))
+    if not containing:
+        return None
+    containing.sort(key=lambda item: (item[0], item[1]))
+    return containing[0][2]
+
+
+def _role_surface_samples(component: RoleComponent) -> list[_ContactSample]:
+    samples: list[_ContactSample] = []
+    for obj in component.objects:
+        triangles = _mesh_triangles_array(obj)
+        for triangle in triangles:
+            area = _triangle_area_mm2(triangle)
+            if area <= 0.0:
+                continue
+            center = np.mean(triangle, axis=0)
+            normal = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
+            norm = float(np.linalg.norm(normal))
+            if norm > 0.0:
+                normal = normal / norm
+            else:
+                normal = np.zeros(3, dtype=float)
+            samples.append(_ContactSample(point=np.asarray(center, dtype=float), area_mm2=area, normal=normal))
+    if samples:
+        return samples
+    for obj in component.objects:
+        mins, maxs = obj.bounds_mm
+        center = (np.asarray(mins, dtype=float) + np.asarray(maxs, dtype=float)) * 0.5
+        size = np.maximum(np.asarray(maxs, dtype=float) - np.asarray(mins, dtype=float), 1.0)
+        samples.append(_ContactSample(point=center, area_mm2=float(np.prod(size[:2])), normal=np.zeros(3, dtype=float)))
+    return samples
+
+
+def _mesh_triangles_array(obj: MeshObject) -> np.ndarray:
+    try:
+        triangles = np.asarray(getattr(obj.mesh, "triangles", []), dtype=float)
+    except Exception:
+        return np.empty((0, 3, 3), dtype=float)
+    if triangles.ndim != 3 or triangles.shape[1:] != (3, 3) or not np.all(np.isfinite(triangles)):
+        return np.empty((0, 3, 3), dtype=float)
+    return triangles
+
+
+def _triangle_area_mm2(triangle: np.ndarray) -> float:
+    try:
+        area = 0.5 * float(np.linalg.norm(np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])))
+    except Exception:
+        return 0.0
+    return area if np.isfinite(area) and area > 0.0 else 0.0
+
+
+def _closest_point_on_mesh(point: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, float]:
+    best_point = np.zeros(3, dtype=float)
+    best_distance = float("inf")
+    for triangle in triangles:
+        closest = _closest_point_on_triangle(point, triangle)
+        distance = float(np.linalg.norm(point - closest))
+        if distance < best_distance:
+            best_distance = distance
+            best_point = closest
+    return best_point, best_distance
+
+
+def _closest_point_on_triangle(point: np.ndarray, triangle: np.ndarray) -> np.ndarray:
+    # Real-Time Collision Detection, Christer Ericson, closest point on triangle.
+    p = np.asarray(point, dtype=float)
+    a, b, c = np.asarray(triangle, dtype=float)
+    ab = b - a
+    ac = c - a
+    ap = p - a
+    d1 = float(np.dot(ab, ap))
+    d2 = float(np.dot(ac, ap))
+    if d1 <= 0.0 and d2 <= 0.0:
+        return a
+    bp = p - b
+    d3 = float(np.dot(ab, bp))
+    d4 = float(np.dot(ac, bp))
+    if d3 >= 0.0 and d4 <= d3:
+        return b
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        v = d1 / (d1 - d3)
+        return a + v * ab
+    cp = p - c
+    d5 = float(np.dot(ab, cp))
+    d6 = float(np.dot(ac, cp))
+    if d6 >= 0.0 and d5 <= d6:
+        return c
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        w = d2 / (d2 - d6)
+        return a + w * ac
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        return b + w * (c - b)
+    denom = 1.0 / (va + vb + vc)
+    v = vb * denom
+    w = vc * denom
+    return a + ab * v + ac * w
+
+
 def _attach_role_interfaces_to_body_nodes(
     nodes: list[dict],
     cells: list[OctreeCell],
@@ -635,6 +1018,28 @@ def _attach_role_interfaces_to_body_nodes(
     cell_buckets = _cell_bucket_index(cells, bucket_size)
     for role_node in nodes:
         if not (bool(role_node.get("is_heater")) or bool(role_node.get("is_sensor"))):
+            continue
+        if str(role_node.get("role_contact_status", "")) == "valid":
+            if bool(role_node.get("is_heater")):
+                ids = [int(value) for value in role_node.get("power_deposition_node_ids", []) or []]
+                role_node["power_deposition_node_ids"] = ids
+                role_node["power_deposition_weights"] = _normalized_weights(
+                    role_node.get("power_deposition_weights", []) or [],
+                    len(ids),
+                )
+                role_node["heater_attached"] = bool(ids)
+                role_node["heater_valid"] = bool(ids)
+                role_node["heater_warning"] = "" if ids else "No CAD contact-area body cells found for heater power deposition."
+            if bool(role_node.get("is_sensor")):
+                ids = [int(value) for value in role_node.get("readout_node_ids", []) or role_node.get("sensor_connected_node_ids", []) or []]
+                role_node["readout_node_ids"] = ids
+                role_node["readout_weights"] = _normalized_weights(
+                    role_node.get("readout_weights", []) or [],
+                    len(ids),
+                )
+                role_node["sensor_connected_node_ids"] = ids
+                role_node["sensor_valid"] = bool(ids)
+                role_node["sensor_monitor_only"] = not bool(ids)
             continue
         component = component_by_name.get(str(role_node.get("component_name", "")))
         if component is None:
@@ -747,8 +1152,10 @@ def _attach_sensor_connections_and_pair_roles(
     warnings: list[str],
     *,
     max_heater_sensor_pair_distance_mm: float,
+    role_components: list[RoleComponent] | None = None,
 ) -> None:
     node_by_id = {int(node["node_id"]): node for node in nodes}
+    component_by_name = {component.name: component for component in role_components or []}
     heaters = [node for node in nodes if bool(node.get("is_heater"))]
     sensors = [node for node in nodes if bool(node.get("is_sensor"))]
     if not heaters and not sensors:
@@ -760,8 +1167,13 @@ def _attach_sensor_connections_and_pair_roles(
             int(value)
             for value in heater.get("power_deposition_node_ids", []) or []
             if int(value) in node_by_id
-            and not bool(node_by_id[int(value)].get("is_heater"))
-            and not bool(node_by_id[int(value)].get("is_sensor"))
+            and (
+                int(value) == int(heater["node_id"])
+                or (
+                    not bool(node_by_id[int(value)].get("is_heater"))
+                    and not bool(node_by_id[int(value)].get("is_sensor"))
+                )
+            )
         ]
         heater["power_deposition_node_ids"] = deposition
         heater["power_deposition_weights"] = _normalized_weights(
@@ -780,8 +1192,13 @@ def _attach_sensor_connections_and_pair_roles(
             int(value)
             for value in sensor.get("readout_node_ids", []) or sensor.get("sensor_connected_node_ids", []) or []
             if int(value) in node_by_id
-            and not bool(node_by_id[int(value)].get("is_heater"))
-            and not bool(node_by_id[int(value)].get("is_sensor"))
+            and (
+                int(value) == int(sensor["node_id"])
+                or (
+                    not bool(node_by_id[int(value)].get("is_heater"))
+                    and not bool(node_by_id[int(value)].get("is_sensor"))
+                )
+            )
         }
         sensor_id = int(sensor["node_id"])
         connected_role_ids: set[int] = set()
@@ -846,32 +1263,154 @@ def _attach_sensor_connections_and_pair_roles(
             sensor_id = int(sensor["node_id"])
             if not bool(sensor.get("sensor_valid", False)):
                 continue
-            distance = _node_aabb_gap_mm(heater, sensor)
+            distance = _role_pair_distance_mm(heater, sensor, component_by_name)
             if distance <= max_distance:
                 candidate_pairs.append((distance, int(heater["node_id"]), sensor_id, heater, sensor))
     assigned_heaters: set[int] = set()
     assigned_sensors: set[int] = set()
-    for distance, heater_id, sensor_id, heater, sensor in sorted(candidate_pairs, key=lambda item: (item[0], item[1], item[2])):
-        if heater_id in assigned_heaters or sensor_id in assigned_sensors:
-            continue
-        heater["assigned_sensor_id"] = sensor_id
-        heater["sensor_pair_distance_mm"] = float(distance)
-        sensor["assigned_heater_ids"] = [heater_id]
-        sensor["assigned_heater_id"] = heater_id
-        sensor["sensor_pair_distance_mm"] = float(distance)
-        sensor["sensor_monitor_only"] = False
-        sensor["sensor_control_mode"] = "mimo"
+    for distance, heater_id, sensor_id, heater, sensor in _unique_pair_assignments(candidate_pairs):
+        _assign_automatic_pair(heater, sensor, heater_id, sensor_id, distance, status="automatic_unique")
         assigned_heaters.add(heater_id)
         assigned_sensors.add(sensor_id)
+    for heater in sorted(heaters, key=lambda item: int(item["node_id"])):
+        heater_id = int(heater["node_id"])
+        if heater_id in assigned_heaters or not bool(heater.get("heater_valid", True)):
+            continue
+        reuse_candidates = [
+            item
+            for item in candidate_pairs
+            if int(item[1]) == heater_id
+        ]
+        if not reuse_candidates:
+            continue
+        distance, _heater_id, sensor_id, _heater, sensor = min(
+            reuse_candidates,
+            key=lambda item: (item[0], item[2]),
+        )
+        _assign_automatic_pair(heater, sensor, heater_id, sensor_id, distance, status="automatic_reused_sensor")
+        assigned_heaters.add(heater_id)
     for heater in heaters:
         if bool(heater.get("heater_valid", True)) and heater.get("assigned_sensor_id") is None:
             warnings.append(
-                f"Heater node {int(heater['node_id'])} has no available valid unpaired sensor within {max_distance:g} mm."
+                f"Heater node {int(heater['node_id'])} has no valid sensor within {max_distance:g} mm."
             )
     for sensor in sensors:
         if not sensor.get("assigned_heater_ids"):
             sensor["sensor_monitor_only"] = True
             warnings.append(f"Sensor node {int(sensor['node_id'])} has no assigned heater; marked monitor-only.")
+
+
+def _assign_automatic_pair(
+    heater: dict,
+    sensor: dict,
+    heater_id: int,
+    sensor_id: int,
+    distance_mm: float,
+    *,
+    status: str,
+) -> None:
+    heater["assigned_sensor_id"] = int(sensor_id)
+    heater["sensor_pair_distance_mm"] = float(distance_mm)
+    heater["heater_sensor_pairing_status"] = status
+    assigned = sorted({int(value) for value in sensor.get("assigned_heater_ids", []) or []} | {int(heater_id)})
+    sensor["assigned_heater_ids"] = assigned
+    sensor["assigned_heater_id"] = int(assigned[0])
+    previous_distance = sensor.get("sensor_pair_distance_mm")
+    sensor["sensor_pair_distance_mm"] = (
+        float(distance_mm)
+        if previous_distance is None
+        else min(float(previous_distance), float(distance_mm))
+    )
+    sensor["sensor_monitor_only"] = False
+    sensor["sensor_control_mode"] = "mimo"
+    sensor["heater_sensor_pairing_status"] = status
+
+
+def _unique_pair_assignments(
+    candidate_pairs: list[tuple[float, int, int, dict, dict]]
+) -> list[tuple[float, int, int, dict, dict]]:
+    if not candidate_pairs:
+        return []
+    heaters = sorted({heater_id for _distance, heater_id, _sensor_id, _heater, _sensor in candidate_pairs})
+    sensors = sorted({sensor_id for _distance, _heater_id, sensor_id, _heater, _sensor in candidate_pairs})
+    pair_by_ids = {(heater_id, sensor_id): item for item in candidate_pairs for _distance, heater_id, sensor_id, _heater, _sensor in [item]}
+    try:
+        from scipy.optimize import linear_sum_assignment
+
+        cost = np.full((len(heaters), len(sensors)), 1.0e18, dtype=float)
+        for row, heater_id in enumerate(heaters):
+            for col, sensor_id in enumerate(sensors):
+                item = pair_by_ids.get((heater_id, sensor_id))
+                if item is not None:
+                    cost[row, col] = float(item[0])
+        rows, cols = linear_sum_assignment(cost)
+        return [
+            pair_by_ids[(heaters[int(row)], sensors[int(col)])]
+            for row, col in zip(rows, cols)
+            if cost[int(row), int(col)] < 1.0e17
+        ]
+    except Exception:
+        limit = min(len(heaters), len(sensors))
+        if limit <= 8:
+            best: tuple[float, list[tuple[float, int, int, dict, dict]]] | None = None
+            for sensor_order in permutations(sensors, limit):
+                chosen: list[tuple[float, int, int, dict, dict]] = []
+                total = 0.0
+                for heater_id, sensor_id in zip(heaters[:limit], sensor_order):
+                    item = pair_by_ids.get((heater_id, sensor_id))
+                    if item is None:
+                        break
+                    chosen.append(item)
+                    total += float(item[0])
+                if len(chosen) == limit and (best is None or total < best[0]):
+                    best = (total, chosen)
+            if best is not None:
+                return best[1]
+        assigned_heaters: set[int] = set()
+        assigned_sensors: set[int] = set()
+        chosen = []
+        for item in sorted(candidate_pairs, key=lambda value: (value[0], value[1], value[2])):
+            _distance, heater_id, sensor_id, _heater, _sensor = item
+            if heater_id in assigned_heaters or sensor_id in assigned_sensors:
+                continue
+            assigned_heaters.add(heater_id)
+            assigned_sensors.add(sensor_id)
+            chosen.append(item)
+        return chosen
+
+
+def _role_pair_distance_mm(
+    heater: dict,
+    sensor: dict,
+    component_by_name: dict[str, RoleComponent],
+) -> float:
+    heater_component = component_by_name.get(str(heater.get("component_name", "")))
+    sensor_component = component_by_name.get(str(sensor.get("component_name", "")))
+    if heater_component is not None and sensor_component is not None:
+        distance = _role_component_distance_mm(heater_component, sensor_component)
+        if np.isfinite(distance):
+            return float(distance)
+    return _node_aabb_gap_mm(heater, sensor)
+
+
+def _role_component_distance_mm(left: RoleComponent, right: RoleComponent) -> float:
+    left_samples = _role_surface_samples(left)
+    right_triangles = np.concatenate(
+        [triangles for triangles in (_mesh_triangles_array(obj) for obj in right.objects) if triangles.size],
+        axis=0,
+    ) if any(_mesh_triangles_array(obj).size for obj in right.objects) else np.empty((0, 3, 3), dtype=float)
+    if not left_samples or right_triangles.size == 0:
+        return float("inf")
+    left_to_right = min(_closest_point_on_mesh(sample.point, right_triangles)[1] for sample in left_samples)
+    right_samples = _role_surface_samples(right)
+    left_triangles = np.concatenate(
+        [triangles for triangles in (_mesh_triangles_array(obj) for obj in left.objects) if triangles.size],
+        axis=0,
+    ) if any(_mesh_triangles_array(obj).size for obj in left.objects) else np.empty((0, 3, 3), dtype=float)
+    if not right_samples or left_triangles.size == 0:
+        return float(left_to_right)
+    right_to_left = min(_closest_point_on_mesh(sample.point, left_triangles)[1] for sample in right_samples)
+    return float(min(left_to_right, right_to_left))
 
 
 def _external_body_neighbors(

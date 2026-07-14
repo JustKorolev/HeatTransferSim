@@ -424,6 +424,7 @@ def _build_graph_with_optional_fallback(
         radiation_reference_temperature_K=args.radiation_reference_temperature_K,
         contact_detection_distance_mm=contact_distance_mm,
         component_bounds_mm=_component_bounds_mm(voxel_scene),
+        body_objects=list(getattr(voxel_scene, "objects", []) or []),
         role_components=getattr(args, "role_components", None),
         role_contact_tolerance_mm=args.role_contact_tolerance_mm,
         role_contact_tolerance_max_mm=float(getattr(args, "role_contact_tolerance_max_mm", args.role_contact_tolerance_mm)),

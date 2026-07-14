@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import permutations
 from typing import Any
 
 import numpy as np
@@ -26,7 +27,7 @@ def refresh_heater_power_deposition_nodes(model: ThermalGraphModel) -> list[str]
         explicit = [
             int(node_id)
             for node_id in getattr(node, "power_deposition_node_ids", []) or []
-            if _is_body_node(model, int(node_id))
+            if int(node_id) == int(node.node_id) or _is_body_node(model, int(node_id))
         ]
         ids = explicit or sorted(_external_body_neighbors(model, int(node.node_id)))
         if not ids and not bool(getattr(node, "is_cad_role_node", False)):
@@ -62,7 +63,7 @@ def refresh_sensor_connected_nodes(model: ThermalGraphModel) -> list[str]:
         explicit = [
             int(node_id)
             for node_id in getattr(node, "readout_node_ids", []) or []
-            if _is_body_node(model, int(node_id))
+            if int(node_id) == int(node.node_id) or _is_body_node(model, int(node_id))
         ]
         connected: set[int] = set(explicit)
         connected_role_ids: set[int] = set()
@@ -124,7 +125,7 @@ def recompute_heater_sensor_pairing(
     model: ThermalGraphModel,
     max_distance_mm: float = DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM,
 ) -> list[str]:
-    """Pair valid heaters to valid sensors using global one-to-one nearest AABB gaps."""
+    """Pair valid heaters to valid sensors, assigning unique sensors first and then reusing the closest sensor."""
     warnings = refresh_heater_power_deposition_nodes(model)
     warnings.extend(refresh_sensor_connected_nodes(model))
     max_distance = max(0.0, float(max_distance_mm))
@@ -152,13 +153,20 @@ def recompute_heater_sensor_pairing(
             if distance <= max_distance:
                 candidate_pairs.append((distance, int(heater.node_id), int(sensor.node_id), heater, sensor))
     assigned_heaters: set[int] = set()
-    assigned_sensors: set[int] = set()
-    for distance, heater_id, sensor_id, heater, sensor in sorted(candidate_pairs, key=lambda item: (item[0], item[1], item[2])):
-        if heater_id in assigned_heaters or sensor_id in assigned_sensors:
-            continue
+    for distance, heater_id, _sensor_id, heater, sensor in _unique_pair_assignments(candidate_pairs):
         _assign_pair(heater, sensor, distance)
         assigned_heaters.add(heater_id)
-        assigned_sensors.add(sensor_id)
+        sensor.sensor_monitor_only = False
+    for heater in heaters:
+        heater_id = int(heater.node_id)
+        if heater_id in assigned_heaters:
+            continue
+        reuse_candidates = [item for item in candidate_pairs if int(item[1]) == heater_id]
+        if not reuse_candidates:
+            continue
+        distance, _heater_id, _sensor_id, _heater, sensor = min(reuse_candidates, key=lambda item: (item[0], item[2]))
+        _assign_pair(heater, sensor, distance)
+        assigned_heaters.add(heater_id)
         sensor.sensor_monitor_only = False
 
     _refresh_sensor_assignment_summaries(model)
@@ -179,7 +187,7 @@ def assign_heater_to_sensor(
     heater_id: int,
     sensor_id: int | None,
 ) -> list[str]:
-    """Manually assign one selected heater to one sensor, preserving one-to-one ownership."""
+    """Manually assign one selected heater to one sensor, allowing sensors to control multiple heaters."""
     warnings = refresh_heater_power_deposition_nodes(model)
     warnings.extend(refresh_sensor_connected_nodes(model))
     heater = model.nodes.get(int(heater_id))
@@ -201,12 +209,6 @@ def assign_heater_to_sensor(
     sensor = model.nodes.get(int(sensor_id))
     if sensor is None or not sensor.is_sensor:
         raise ValueError(f"Node {sensor_id} is not a sensor.")
-    for other_heater in model.nodes.values():
-        if not other_heater.is_heater or int(other_heater.node_id) == int(heater.node_id):
-            continue
-        if getattr(other_heater, "assigned_sensor_id", None) == int(sensor.node_id):
-            other_heater.assigned_sensor_id = None
-            other_heater.sensor_pair_distance_mm = None
     distance = aabb_surface_gap_mm(heater, sensor)
     _assign_pair(heater, sensor, distance)
     _refresh_sensor_assignment_summaries(model)
@@ -332,6 +334,65 @@ def _assign_pair(heater: Any, sensor: Any, distance_mm: float) -> None:
         if previous_distance is None
         else min(float(previous_distance), float(distance_mm))
     )
+
+
+def _unique_pair_assignments(
+    candidate_pairs: list[tuple[float, int, int, Any, Any]],
+) -> list[tuple[float, int, int, Any, Any]]:
+    if not candidate_pairs:
+        return []
+    heaters = sorted({heater_id for _distance, heater_id, _sensor_id, _heater, _sensor in candidate_pairs})
+    sensors = sorted({sensor_id for _distance, _heater_id, sensor_id, _heater, _sensor in candidate_pairs})
+    pair_by_ids = {
+        (heater_id, sensor_id): item
+        for item in candidate_pairs
+        for _distance, heater_id, sensor_id, _heater, _sensor in [item]
+    }
+    try:
+        from scipy.optimize import linear_sum_assignment
+
+        cost = np.full((len(heaters), len(sensors)), 1.0e18, dtype=float)
+        for row, heater_id in enumerate(heaters):
+            for col, sensor_id in enumerate(sensors):
+                item = pair_by_ids.get((heater_id, sensor_id))
+                if item is not None:
+                    cost[row, col] = float(item[0])
+        rows, cols = linear_sum_assignment(cost)
+        return [
+            pair_by_ids[(heaters[int(row)], sensors[int(col)])]
+            for row, col in zip(rows, cols)
+            if cost[int(row), int(col)] < 1.0e17
+        ]
+    except Exception:
+        limit = min(len(heaters), len(sensors))
+        if limit <= 8:
+            best: tuple[float, list[tuple[float, int, int, Any, Any]]] | None = None
+            for sensor_order in permutations(sensors, limit):
+                chosen: list[tuple[float, int, int, Any, Any]] = []
+                total = 0.0
+                for heater_id, sensor_id in zip(heaters[:limit], sensor_order):
+                    item = pair_by_ids.get((heater_id, sensor_id))
+                    if item is None:
+                        break
+                    chosen.append(item)
+                    total += float(item[0])
+                if len(chosen) != limit:
+                    continue
+                if best is None or total < best[0]:
+                    best = (total, chosen)
+            if best is not None:
+                return best[1]
+        assigned_heaters: set[int] = set()
+        assigned_sensors: set[int] = set()
+        chosen: list[tuple[float, int, int, Any, Any]] = []
+        for item in sorted(candidate_pairs, key=lambda value: (value[0], value[1], value[2])):
+            _distance, heater_id, sensor_id, _heater, _sensor = item
+            if heater_id in assigned_heaters or sensor_id in assigned_sensors:
+                continue
+            chosen.append(item)
+            assigned_heaters.add(heater_id)
+            assigned_sensors.add(sensor_id)
+        return chosen
 
 
 def _refresh_sensor_assignment_summaries(model: ThermalGraphModel) -> None:
