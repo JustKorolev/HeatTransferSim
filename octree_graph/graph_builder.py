@@ -630,6 +630,9 @@ def _attach_role_interfaces_to_body_nodes(
         for obj in component.objects
     }
     cell_to_node = _cell_to_node_lookup(nodes)
+    max_search_tolerance = max(float(role_contact_tolerance_mm), float(role_contact_tolerance_max_mm))
+    bucket_size = _cell_pair_bucket_size(cells, max_search_tolerance)
+    cell_buckets = _cell_bucket_index(cells, bucket_size)
     for role_node in nodes:
         if not (bool(role_node.get("is_heater")) or bool(role_node.get("is_sensor"))):
             continue
@@ -647,6 +650,8 @@ def _attach_role_interfaces_to_body_nodes(
             role_contact_tolerance_mm,
             role_contact_tolerance_max_mm,
             role_contact_tolerance_growth_factor,
+            cell_buckets=cell_buckets,
+            bucket_size_mm=bucket_size,
         )
         if bool(role_node.get("is_heater")):
             role_node["power_deposition_node_ids"] = ids
@@ -687,13 +692,24 @@ def _role_body_contact_node_weights(
     tolerance_mm: float,
     max_tolerance_mm: float,
     growth_factor: float,
+    *,
+    cell_buckets: dict[tuple[int, int, int], list[OctreeCell]] | None = None,
+    bucket_size_mm: float | None = None,
 ) -> tuple[list[int], list[float], float]:
     tolerance = max(0.0, float(tolerance_mm))
     max_tolerance = max(tolerance, float(max_tolerance_mm))
     growth = max(1.01, float(growth_factor))
     while True:
         contacts: dict[int, float] = {}
-        for cell in cells:
+        candidate_cells = _role_candidate_cells(
+            role_node,
+            role_component,
+            cells,
+            tolerance,
+            cell_buckets=cell_buckets,
+            bucket_size_mm=bucket_size_mm,
+        )
+        for cell in candidate_cells:
             body_node = cell_to_node.get(cell.cell_id)
             if body_node is None:
                 continue
@@ -1031,9 +1047,18 @@ def _add_role_node_contact_edges(
     if not cells or not role_contacts:
         return edge_index
     search_gap_mm = max(0.0, float(role_contact_tolerance_mm))
+    bucket_size = _cell_pair_bucket_size(cells, search_gap_mm)
+    cell_buckets = _cell_bucket_index(cells, bucket_size)
     for role_node, role_component in role_contacts:
         contacts: list[tuple[OctreeCell, float, float, float]] = []
-        for cell in cells:
+        for cell in _role_candidate_cells(
+            role_node,
+            role_component,
+            cells,
+            search_gap_mm,
+            cell_buckets=cell_buckets,
+            bucket_size_mm=bucket_size,
+        ):
             contact = _role_cell_contact(role_node, role_component, cell, search_gap_mm)
             if contact is None:
                 continue
@@ -1085,6 +1110,33 @@ def _add_role_node_contact_edges(
             role_node.setdefault("warnings", []).append(warning)
             warnings.append(warning)
     return edge_index
+
+
+def _role_candidate_cells(
+    role_node: dict,
+    role_component: RoleComponent | None,
+    cells: list[OctreeCell],
+    tolerance_mm: float,
+    *,
+    cell_buckets: dict[tuple[int, int, int], list[OctreeCell]] | None,
+    bucket_size_mm: float | None,
+) -> list[OctreeCell]:
+    if cell_buckets is None or bucket_size_mm is None:
+        return cells
+    try:
+        if role_component is not None:
+            mins, maxs = role_component.bounds_mm
+        else:
+            mins, maxs = _node_bounds_mm(role_node)
+    except Exception:
+        return cells
+    return _cells_intersecting_bounds(
+        cell_buckets,
+        float(bucket_size_mm),
+        np.asarray(mins, dtype=float),
+        np.asarray(maxs, dtype=float),
+        padding_mm=max(0.0, float(tolerance_mm)),
+    )
 
 
 def _role_cell_contact(
@@ -1307,10 +1359,7 @@ def _node_pair_key(node_a: dict, node_b: dict) -> tuple[int, int]:
 
 def _candidate_cell_pairs(cells: list[OctreeCell], max_gap_mm: float) -> Iterator[tuple[OctreeCell, OctreeCell]]:
     bucket_size = _cell_pair_bucket_size(cells, max_gap_mm)
-    buckets: dict[tuple[int, int, int], list[OctreeCell]] = {}
-    for cell in cells:
-        for key in _cell_bucket_keys(cell, bucket_size, max_gap_mm):
-            buckets.setdefault(key, []).append(cell)
+    buckets = _cell_bucket_index(cells, bucket_size, max_gap_mm)
     seen: set[tuple[str, str]] = set()
     for cell in cells:
         for key in _cell_bucket_keys(cell, bucket_size, max_gap_mm):
@@ -1333,11 +1382,62 @@ def _cell_pair_bucket_size(cells: list[OctreeCell], max_gap_mm: float) -> float:
     return max(float(np.median(sizes)) + float(max_gap_mm), 1.0e-9)
 
 
+def _cell_bucket_index(
+    cells: list[OctreeCell],
+    bucket_size_mm: float,
+    padding_mm: float = 0.0,
+) -> dict[tuple[int, int, int], list[OctreeCell]]:
+    buckets: dict[tuple[int, int, int], list[OctreeCell]] = {}
+    for cell in cells:
+        for key in _cell_bucket_keys(cell, bucket_size_mm, padding_mm):
+            buckets.setdefault(key, []).append(cell)
+    return buckets
+
+
+def _cells_intersecting_bounds(
+    buckets: dict[tuple[int, int, int], list[OctreeCell]],
+    bucket_size_mm: float,
+    bounds_min: np.ndarray,
+    bounds_max: np.ndarray,
+    padding_mm: float = 0.0,
+) -> list[OctreeCell]:
+    if not buckets:
+        return []
+    mins = np.asarray(bounds_min, dtype=float)
+    maxs = np.asarray(bounds_max, dtype=float)
+    if mins.shape != (3,) or maxs.shape != (3,) or not np.all(np.isfinite(mins)) or not np.all(np.isfinite(maxs)):
+        return []
+    padding = max(0.0, float(padding_mm))
+    query_min = np.minimum(mins, maxs) - padding
+    query_max = np.maximum(mins, maxs) + padding
+    seen: set[str] = set()
+    matches: list[OctreeCell] = []
+    for key in _bounds_bucket_keys(query_min, query_max, bucket_size_mm):
+        for cell in buckets.get(key, []):
+            if cell.cell_id in seen:
+                continue
+            cell_min, cell_max = _cell_bounds_mm(cell)
+            if np.any(query_max < cell_min) or np.any(cell_max < query_min):
+                continue
+            seen.add(cell.cell_id)
+            matches.append(cell)
+    return matches
+
+
 def _cell_bucket_keys(cell: OctreeCell, bucket_size_mm: float, padding_mm: float) -> Iterator[tuple[int, int, int]]:
     mins, maxs = _cell_bounds_mm(cell)
     padding = max(0.0, float(padding_mm))
-    lo = np.floor((mins - padding) / bucket_size_mm).astype(int)
-    hi = np.floor((maxs + padding) / bucket_size_mm).astype(int)
+    yield from _bounds_bucket_keys(mins - padding, maxs + padding, bucket_size_mm)
+
+
+def _bounds_bucket_keys(
+    bounds_min: np.ndarray,
+    bounds_max: np.ndarray,
+    bucket_size_mm: float,
+) -> Iterator[tuple[int, int, int]]:
+    bucket_size = max(float(bucket_size_mm), 1.0e-9)
+    lo = np.floor(np.asarray(bounds_min, dtype=float) / bucket_size).astype(int)
+    hi = np.floor(np.asarray(bounds_max, dtype=float) / bucket_size).astype(int)
     for ix in range(int(lo[0]), int(hi[0]) + 1):
         for iy in range(int(lo[1]), int(hi[1]) + 1):
             for iz in range(int(lo[2]), int(hi[2]) + 1):
