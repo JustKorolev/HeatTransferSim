@@ -40,6 +40,7 @@ from octree_graph.octree import (
     OctreeDiagnostics,
     OctreeParams,
     _mesh_contains_point,
+    _mesh_triangles,
     _objects_intersecting_bounds,
     _physical_material_name,
     _sample_points,
@@ -418,6 +419,11 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
                 "ray",
             ]
         )
+
+        self.assertEqual(args.contains_backend, "ray")
+
+    def test_cli_defaults_to_ray_contains_backend(self) -> None:
+        args = build_parser().parse_args(["--mesh-dir", "meshes", "--graph-name", "graph"])
 
         self.assertEqual(args.contains_backend, "ray")
 
@@ -1252,6 +1258,52 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         )
 
         self.assertEqual([obj.name for obj in hits], ["valid"])
+
+    def test_objects_intersecting_bounds_skips_invalid_query_bounds(self) -> None:
+        valid = _mesh_object("valid", "Copper", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+
+        hits = _objects_intersecting_bounds(
+            [valid],
+            np.array([float("nan"), -0.5, -0.5]),
+            np.array([0.5, 0.5, 0.5]),
+        )
+
+        self.assertEqual(hits, [])
+
+    def test_objects_intersecting_bounds_normalizes_reversed_bounds(self) -> None:
+        valid = _mesh_object("valid", "Copper", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+
+        hits = _objects_intersecting_bounds(
+            [valid],
+            np.array([0.5, 0.5, 0.5]),
+            np.array([-0.5, -0.5, -0.5]),
+        )
+
+        self.assertEqual([obj.name for obj in hits], ["valid"])
+
+    def test_mesh_triangles_sanitizes_native_mesh_triangle_data(self) -> None:
+        class BadTriangleMesh:
+            triangles = np.array(
+                [
+                    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    [[float("nan"), 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                ],
+                dtype=float,
+            )
+
+        obj = MeshObject(
+            name="part",
+            material_name="Copper",
+            mesh=BadTriangleMesh(),
+            vertices_mm=np.empty((0, 3), dtype=float),
+            bounds_mm=(np.zeros(3), np.ones(3)),
+            watertight=False,
+        )
+
+        triangles = _mesh_triangles(obj)
+
+        self.assertEqual(triangles.shape, (1, 3, 3))
+        self.assertTrue(triangles.flags.c_contiguous)
 
     def test_triangle_box_intersection_rejects_aabb_only_overlap(self) -> None:
         triangle = np.array(

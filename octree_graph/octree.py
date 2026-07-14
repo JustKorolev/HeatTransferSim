@@ -54,7 +54,7 @@ class OctreeParams:
     role_refine_component_names: tuple[str, ...] = field(default_factory=tuple)
     role_refine_distance_mm: float = 0.0
     role_refine_max_depth: int | None = None
-    contains_backend: str = "trimesh"
+    contains_backend: str = "ray"
 
 
 @dataclass
@@ -498,8 +498,11 @@ def _resolve_voxel_worker_count(params: OctreeParams) -> int:
 def _prepare_worker_objects(objects: list[MeshObject]) -> list[MeshObject]:
     worker_objects: list[MeshObject] = []
     for obj in objects:
-        triangles = np.asarray(_mesh_triangles(obj), dtype=float)
-        bounds_min, bounds_max = obj.bounds_mm
+        triangles = np.array(_mesh_triangles(obj), dtype=float, copy=True)
+        bounds = _object_bounds_tuple(obj)
+        if bounds is None:
+            continue
+        bounds_min, bounds_max = bounds
         worker_objects.append(
             MeshObject(
                 name=obj.name,
@@ -850,7 +853,7 @@ def _physical_material_name(
 
 def _mesh_contains_point(obj: MeshObject, point: np.ndarray, params: OctreeParams) -> bool:
     global _TRIMESH_CONTAINS_AVAILABLE
-    if str(getattr(params, "contains_backend", "trimesh")).lower() == "ray":
+    if str(getattr(params, "contains_backend", "ray")).lower() == "ray":
         return _ray_contains_point(obj, point)
     if _TRIMESH_CONTAINS_AVAILABLE is not False:
         try:
@@ -869,11 +872,18 @@ def _mesh_triangles(obj: MeshObject) -> np.ndarray:
     cached = _TRIANGLE_CACHE.get(cache_key)
     if cached is not None and cached[0] is obj.mesh:
         return cached[1]
-    else:
-        triangles = np.asarray(getattr(obj.mesh, "triangles", []), dtype=float)
-        if triangles.ndim != 3 or triangles.shape[1:] != (3, 3):
-            triangles = np.empty((0, 3, 3), dtype=float)
-        _TRIANGLE_CACHE[cache_key] = (obj.mesh, triangles)
+    try:
+        triangles = np.array(getattr(obj.mesh, "triangles", []), dtype=float, copy=True)
+    except Exception:
+        triangles = np.empty((0, 3, 3), dtype=float)
+    if triangles.ndim != 3 or triangles.shape[1:] != (3, 3):
+        triangles = np.empty((0, 3, 3), dtype=float)
+    elif triangles.size:
+        finite = np.all(np.isfinite(triangles), axis=(1, 2))
+        if not np.all(finite):
+            triangles = triangles[finite]
+        triangles = np.ascontiguousarray(triangles, dtype=float)
+    _TRIANGLE_CACHE[cache_key] = (obj.mesh, triangles)
     return triangles
 
 
@@ -916,8 +926,19 @@ def _ray_contains_point(obj: MeshObject, point: np.ndarray) -> bool:
 def _objects_intersecting_bounds(
     objects: list[MeshObject], bounds_min: np.ndarray, bounds_max: np.ndarray
 ) -> list[MeshObject]:
-    query_min = tuple(float(value) for value in bounds_min)
-    query_max = tuple(float(value) for value in bounds_max)
+    try:
+        query_min = tuple(float(value) for value in bounds_min)
+        query_max = tuple(float(value) for value in bounds_max)
+    except (TypeError, ValueError):
+        return []
+    if len(query_min) != 3 or len(query_max) != 3:
+        return []
+    if not all(math.isfinite(value) for value in (*query_min, *query_max)):
+        return []
+    raw_query_min = query_min
+    raw_query_max = query_max
+    query_min = tuple(min(left, right) for left, right in zip(raw_query_min, raw_query_max))
+    query_max = tuple(max(left, right) for left, right in zip(raw_query_min, raw_query_max))
     hits: list[MeshObject] = []
     for obj in objects:
         bounds = _object_bounds_tuple(obj)
@@ -950,13 +971,16 @@ def _object_bounds_tuple(obj: MeshObject) -> tuple[tuple[float, float, float], t
         raw_min, raw_max = obj.bounds_mm
         obj_min = tuple(float(value) for value in raw_min)
         obj_max = tuple(float(value) for value in raw_max)
-    except (TypeError, ValueError):
+    except Exception:
         return None
     if len(obj_min) != 3 or len(obj_max) != 3:
         return None
     if not all(math.isfinite(value) for value in (*obj_min, *obj_max)):
         return None
-    cached = (obj_min, obj_max)
+    cached = (
+        tuple(min(left, right) for left, right in zip(obj_min, obj_max)),
+        tuple(max(left, right) for left, right in zip(obj_min, obj_max)),
+    )
     try:
         setattr(obj, "_bounds_tuple_mm", cached)
     except Exception:

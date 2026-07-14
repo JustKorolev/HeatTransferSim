@@ -211,10 +211,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--contains-backend",
         choices=("trimesh", "ray"),
-        default="trimesh",
+        default="ray",
         help=(
-            "Inside/outside backend for watertight meshes. Use 'ray' to bypass trimesh.contains "
-            "when native geometry code exits without a Python traceback."
+            "Inside/outside backend for watertight meshes. Defaults to 'ray' to avoid native "
+            "trimesh.contains crashes on Windows; use 'trimesh' only when you need that backend."
         ),
     )
     parser.add_argument(
