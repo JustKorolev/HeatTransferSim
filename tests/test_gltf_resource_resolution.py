@@ -7,10 +7,14 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+
+import numpy as np
 
 from octree_graph.cli import build_parser, _resolve_gltf_path
-from octree_graph.load_gltf import _PLACEHOLDER_IMAGE_URI, _prepare_gltf_for_load
+from octree_graph.load_gltf import _PLACEHOLDER_IMAGE_URI, _prepare_gltf_for_load, load_gltf_scene
 
 
 class GltfResourceResolutionTests(unittest.TestCase):
@@ -152,6 +156,49 @@ class GltfResourceResolutionTests(unittest.TestCase):
 
             with self.assertRaises(FileNotFoundError):
                 _prepare_gltf_for_load(gltf)
+
+    def test_load_gltf_scene_survives_degenerate_trimesh_mass_properties(self) -> None:
+        class DegenerateGeometry:
+            vertices = np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                ],
+                dtype=float,
+            )
+            faces = np.array([[0, 1, 2]], dtype=int)
+            visual = SimpleNamespace(material=SimpleNamespace(name="Copper"))
+
+            @property
+            def is_watertight(self) -> bool:
+                raise ZeroDivisionError("center_mass = integrated[1:4] / volume")
+
+            def copy(self):
+                raise AssertionError("loader should not copy live trimesh geometry")
+
+        loaded = SimpleNamespace(
+            graph=SimpleNamespace(
+                nodes_geometry=["node_without_sensor_name"],
+                get=lambda node_name: (np.eye(4), "sensor_probe_geometry"),
+            ),
+            geometry={"sensor_probe_geometry": DegenerateGeometry()},
+        )
+        fake_trimesh = SimpleNamespace(load=lambda load_path, force=None: loaded)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"trimesh": fake_trimesh}):
+            glb = Path(tmp) / "assembly.glb"
+            glb.write_bytes(b"glb")
+
+            scene = load_gltf_scene(glb)
+
+        self.assertEqual(len(scene.objects), 1)
+        obj = scene.objects[0]
+        self.assertEqual(obj.name, "node_without_sensor_name")
+        self.assertIn("sensor_probe_geometry", obj.scene_path)
+        self.assertFalse(obj.watertight)
+        self.assertEqual(obj.mesh.triangles.shape, (1, 3, 3))
+        self.assertIn("not reported watertight", " ".join(scene.warnings))
 
 
 if __name__ == "__main__":
