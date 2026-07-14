@@ -9,6 +9,7 @@ import unittest
 
 import numpy as np
 
+import graph_visualizer.graph_io as graph_io
 from graph_visualizer.draw_tools import (
     clone_node_for_extrusion,
     compute_face_normal,
@@ -310,6 +311,41 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(loaded_model.edges[(1, 20)].edge_type, "role_node_contact")
         self.assertAlmostEqual(loaded_model.edges[(1, 20)].Gij_W_K, 0.123)
         self.assertAlmostEqual(loaded_matrices["G"][0, 1], 0.0)
+
+    def test_large_octree_load_uses_sparse_laplacian_without_dense_g(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="large_sparse_octree"))
+        left = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        right = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        left.material = right.material = "Copper"
+        left.center_mm = (0.0, 0.0, 0.0)
+        right.center_mm = (1.0, 0.0, 0.0)
+        left.size_mm = right.size_mm = (1.0, 1.0, 1.0)
+        left.C_J_K = right.C_J_K = 10.0
+        model.add_node(left)
+        model.add_node(right)
+        model.set_edge(1, 2, 0.5, EdgeMode.AUTO.value)
+        model.octree_graph_data = {"graph_edges": []}
+
+        old_limit = graph_io._DENSE_OCTREE_MATRIX_NODE_LIMIT
+        graph_io._DENSE_OCTREE_MATRIX_NODE_LIMIT = 1
+        try:
+            with TemporaryDirectory() as directory:
+                folder = Path(directory)
+                (folder / "graph.json").write_text(
+                    json.dumps(model.to_octree_graph_dict()),
+                    encoding="utf-8",
+                )
+
+                loaded_model, loaded_matrices = load_graph_folder(folder)
+        finally:
+            graph_io._DENSE_OCTREE_MATRIX_NODE_LIMIT = old_limit
+
+        self.assertEqual(set(loaded_model.edges), {(1, 2)})
+        self.assertNotIn("G", loaded_matrices)
+        self.assertEqual(loaded_matrices["L"].shape, (2, 2))
+        self.assertTrue(hasattr(loaded_matrices["L"], "tocsr"))
+        self.assertGreater(float(loaded_matrices["L"][0, 0]), 0.0)
+        self.assertLess(float(loaded_matrices["L"][0, 1]), 0.0)
 
     def test_stale_octree_conductance_rebuilds_after_material_load(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="stale_conductance"))

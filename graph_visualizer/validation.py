@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Mapping
 
 import numpy as np
+from scipy.sparse import issparse
 
 from .models import ThermalGraphModel
 
@@ -58,10 +59,12 @@ def validate_matrices(
     matrices: Mapping[str, np.ndarray], expected_node_ids: list[int] | np.ndarray
 ) -> list[str]:
     errors: list[str] = []
-    required = ("node_ids", "coords", "C", "Grad", "G")
+    required = ("node_ids", "coords", "C", "Grad")
     for key in required:
         if key not in matrices:
             errors.append(f"matrices.npz is missing required array {key}.")
+    if "G" not in matrices and "L" not in matrices:
+        errors.append("matrices.npz is missing required array G or sparse/dense L.")
     if errors:
         return errors
 
@@ -76,19 +79,33 @@ def validate_matrices(
     coords = np.asarray(matrices["coords"])
     C = np.asarray(matrices["C"])
     Grad = np.asarray(matrices["Grad"])
-    G = np.asarray(matrices["G"])
+    G = None if "G" not in matrices else np.asarray(matrices["G"])
+    L = matrices.get("L")
     if coords.shape != (size, 3):
         errors.append(f"coords must have shape ({size}, 3), got {coords.shape}.")
     if C.shape != (size,):
         errors.append(f"C must have shape ({size},), got {C.shape}.")
     if Grad.shape != (size,):
         errors.append(f"Grad must have shape ({size},), got {Grad.shape}.")
-    if G.shape != (size, size):
-        errors.append(f"G must have shape ({size}, {size}), got {G.shape}.")
-    if G.ndim == 2 and not np.allclose(G, G.T, rtol=1.0e-7, atol=1.0e-12):
-        errors.append("G must be symmetric within tolerance.")
-    if np.any(G < -1.0e-12):
-        errors.append("G contains negative conductances.")
+    if G is not None:
+        if G.shape != (size, size):
+            errors.append(f"G must have shape ({size}, {size}), got {G.shape}.")
+        if G.ndim == 2 and not np.allclose(G, G.T, rtol=1.0e-7, atol=1.0e-12):
+            errors.append("G must be symmetric within tolerance.")
+        if np.any(G < -1.0e-12):
+            errors.append("G contains negative conductances.")
+    if L is not None:
+        if issparse(L):
+            if L.shape != (size, size):
+                errors.append(f"L must have shape ({size}, {size}), got {L.shape}.")
+            if L.nnz and not np.all(np.isfinite(L.data)):
+                errors.append("L contains non-finite values.")
+        else:
+            dense_l = np.asarray(L)
+            if dense_l.shape != (size, size):
+                errors.append(f"L must have shape ({size}, {size}), got {dense_l.shape}.")
+            if np.any(~np.isfinite(dense_l)):
+                errors.append("L contains non-finite values.")
     if np.any(C < -1.0e-12):
         errors.append("C contains negative thermal capacitances.")
     if np.any(Grad < -1.0e-12):

@@ -10,6 +10,7 @@ import os
 import tempfile
 
 import numpy as np
+from scipy.sparse import coo_matrix, csr_matrix, issparse
 
 from .material_library import default_material_library, material_defaults, normalize_material_library
 from .matrix_builder import (
@@ -33,6 +34,8 @@ OCTREE_GRAPH_FILE = "graph.json"
 MATRIX_FILE = "matrices.npz"
 METADATA_FILE = "metadata.json"
 MATERIAL_FILE = "material_library.json"
+_DENSE_OCTREE_MATRIX_NODE_LIMIT = 6000
+_DENSE_OCTREE_MATRIX_FILE_LIMIT_BYTES = 384 * 1024 * 1024
 
 
 def save_graph_folder(model: ThermalGraphModel, folder_path: str | Path) -> dict[str, np.ndarray]:
@@ -97,7 +100,7 @@ def load_graph_folder(folder_path: str | Path) -> tuple[ThermalGraphModel, dict[
         )
         model.metadata.graph_name = model.metadata.graph_name or folder.name
 
-    if not matrix_path.exists() and not (folder / "G.npy").exists():
+    if not octree_path.exists() and not matrix_path.exists() and not (folder / "G.npy").exists():
         raise FileNotFoundError(
             "Graph folder is incomplete/corrupted. Missing matrices.npz or individual .npy matrices."
         )
@@ -110,43 +113,7 @@ def load_graph_folder(folder_path: str | Path) -> tuple[ThermalGraphModel, dict[
         matrices = _normalize_loaded_matrices(model, matrices)
         matrices = _repair_empty_auto_conduction(model, matrices)
     elif octree_path.exists():
-        node_ids = np.array(model.ordered_node_ids(), dtype=int)
-        matrices = {
-            "node_ids": node_ids,
-            "coords": np.array([model.nodes[int(node_id)].coord for node_id in node_ids], dtype=int),
-            "C": np.array([model.nodes[int(node_id)].C_J_K for node_id in node_ids], dtype=float),
-            "Grad": np.array([model.nodes[int(node_id)].Grad_W_K for node_id in node_ids], dtype=float),
-        }
-        for key in ("C", "G", "L", "G_rad", "initial_temperature_K"):
-            path = folder / f"{key}.npy"
-            if path.exists():
-                matrices[key] = np.load(path, allow_pickle=False)
-        if "G" not in matrices:
-            size = len(node_ids)
-            matrices["G"] = np.zeros((size, size), dtype=float)
-            index = {int(node_id): row for row, node_id in enumerate(node_ids)}
-            for edge in model.edges.values():
-                if edge.source in index and edge.target in index:
-                    i = index[edge.source]
-                    j = index[edge.target]
-                    matrices["G"][i, j] = matrices["G"][j, i] = max(0.0, float(edge.Gij_W_K))
-        if "L" not in matrices:
-            matrices["L"] = np.diag(matrices["G"].sum(axis=1)) - matrices["G"]
-        if "G_rad" not in matrices:
-            matrices["G_rad"] = np.array(
-                [
-                    model.nodes[int(node_id)].G_rad_W_K
-                    if model.nodes[int(node_id)].G_rad_W_K > 0.0
-                    else model.nodes[int(node_id)].Grad_W_K
-                    for node_id in node_ids
-                ],
-                dtype=float,
-            )
-        if "initial_temperature_K" not in matrices:
-            matrices["initial_temperature_K"] = np.array(
-                [model.nodes[int(node_id)].initial_temperature_K for node_id in node_ids],
-                dtype=float,
-            )
+        matrices = _load_octree_matrix_payload(folder, model)
         matrices = _repair_empty_auto_conduction(model, matrices)
     else:
         matrices = {
@@ -186,6 +153,8 @@ def _repair_empty_auto_conduction(
     model.octree_graph_data["warnings"].append(
         "Loaded graph had no conductive edges/matrix; regenerated geometry-based auto edges."
     )
+    if _uses_sparse_laplacian(matrices):
+        return _build_sparse_octree_matrices_from_model(model, matrices.get("node_ids"))
     return build_matrices(model)
 
 
@@ -210,6 +179,8 @@ def _refresh_octree_auto_geometry(
         model.octree_graph_data["warnings"].append(
             "Preserved loaded heater/sensor role contact visual edges and rebuilt marker-only matrices."
         )
+        if _uses_sparse_laplacian(matrices):
+            return _build_sparse_octree_matrices_from_model(model, matrices.get("node_ids"))
         return build_matrices(model)
     if not model.nodes:
         return matrices
@@ -224,6 +195,8 @@ def _refresh_octree_auto_geometry(
         model.octree_graph_data["warnings"].append(
             "Regenerated auto geometry conductances from loaded material properties."
         )
+    if _uses_sparse_laplacian(matrices):
+        return _build_sparse_octree_matrices_from_model(model, matrices.get("node_ids"))
     return build_matrices(model)
 
 
@@ -243,10 +216,160 @@ def _matrix_has_conduction(matrices: dict[str, np.ndarray]) -> bool:
     for key in ("G", "L"):
         if key not in matrices:
             continue
-        values = np.asarray(matrices[key], dtype=float)
-        if values.size and np.any(np.abs(values) > 1.0e-15):
+        values = matrices[key]
+        if issparse(values):
+            if values.nnz and np.any(np.abs(values.data) > 1.0e-15):
+                return True
+            continue
+        dense = np.asarray(values, dtype=float)
+        if dense.size and np.any(np.abs(dense) > 1.0e-15):
             return True
     return False
+
+
+def _load_octree_matrix_payload(folder: Path, model: ThermalGraphModel) -> dict[str, Any]:
+    node_ids = np.array(model.ordered_node_ids(), dtype=int)
+    matrices = _base_octree_matrix_payload(model, node_ids)
+    for key in ("C", "G_rad", "initial_temperature_K"):
+        path = folder / f"{key}.npy"
+        if path.exists():
+            matrices[key] = np.load(path, allow_pickle=False)
+
+    if _should_load_dense_octree_matrices(folder, len(node_ids)):
+        for key in ("G", "L"):
+            path = folder / f"{key}.npy"
+            if path.exists():
+                matrices[key] = np.load(path, allow_pickle=False)
+        if "G" not in matrices:
+            matrices["G"] = _dense_conductance_from_model(model, node_ids)
+        if "L" not in matrices:
+            G = np.asarray(matrices["G"], dtype=float)
+            matrices["L"] = np.diag(G.sum(axis=1)) - G
+        return matrices
+
+    sparse_l = _load_sparse_laplacian(folder / "L_sparse.json")
+    matrices["L"] = sparse_l if sparse_l is not None else _sparse_laplacian_from_model(model, node_ids)
+    model.octree_graph_data.setdefault("warnings", [])
+    model.octree_graph_data["warnings"].append(
+        "Loaded large octree graph with sparse matrices; skipped dense G.npy/L.npy for visualizer stability."
+    )
+    return matrices
+
+
+def _base_octree_matrix_payload(
+    model: ThermalGraphModel,
+    node_ids: np.ndarray,
+) -> dict[str, Any]:
+    return {
+        "node_ids": node_ids,
+        "coords": np.array([model.nodes[int(node_id)].coord for node_id in node_ids], dtype=int),
+        "C": np.array([model.nodes[int(node_id)].C_J_K for node_id in node_ids], dtype=float),
+        "Grad": np.array([model.nodes[int(node_id)].Grad_W_K for node_id in node_ids], dtype=float),
+        "G_rad": np.array(
+            [
+                model.nodes[int(node_id)].G_rad_W_K
+                if model.nodes[int(node_id)].G_rad_W_K > 0.0
+                else model.nodes[int(node_id)].Grad_W_K
+                for node_id in node_ids
+            ],
+            dtype=float,
+        ),
+        "initial_temperature_K": np.array(
+            [model.nodes[int(node_id)].initial_temperature_K for node_id in node_ids],
+            dtype=float,
+        ),
+    }
+
+
+def _should_load_dense_octree_matrices(folder: Path, node_count: int) -> bool:
+    if int(node_count) > _DENSE_OCTREE_MATRIX_NODE_LIMIT:
+        return False
+    for name in ("G.npy", "L.npy"):
+        path = folder / name
+        if path.exists() and path.stat().st_size > _DENSE_OCTREE_MATRIX_FILE_LIMIT_BYTES:
+            return False
+    return True
+
+
+def _dense_conductance_from_model(model: ThermalGraphModel, node_ids: np.ndarray) -> np.ndarray:
+    size = len(node_ids)
+    G = np.zeros((size, size), dtype=float)
+    index = {int(node_id): row for row, node_id in enumerate(node_ids)}
+    for edge in model.edges.values():
+        if _is_visual_role_contact_edge(edge):
+            continue
+        if edge.source in index and edge.target in index:
+            i = index[edge.source]
+            j = index[edge.target]
+            G[i, j] = G[j, i] = max(0.0, float(edge.Gij_W_K))
+    return G
+
+
+def _load_sparse_laplacian(path: Path) -> csr_matrix | None:
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict) or str(payload.get("format", "")).lower() != "coo":
+        return None
+    shape = tuple(int(value) for value in payload.get("shape", ()))
+    if len(shape) != 2:
+        return None
+    row = np.asarray(payload.get("row", []), dtype=int)
+    col = np.asarray(payload.get("col", []), dtype=int)
+    data = np.asarray(payload.get("data", []), dtype=float)
+    if row.shape != col.shape or row.shape != data.shape:
+        return None
+    return coo_matrix((data, (row, col)), shape=shape).tocsr()
+
+
+def _sparse_laplacian_from_model(model: ThermalGraphModel, node_ids: np.ndarray) -> csr_matrix:
+    index = {int(node_id): row for row, node_id in enumerate(node_ids)}
+    diagonal = np.zeros(len(node_ids), dtype=float)
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    for edge in model.edges.values():
+        if _is_visual_role_contact_edge(edge):
+            continue
+        if edge.source not in index or edge.target not in index:
+            continue
+        i = index[edge.source]
+        j = index[edge.target]
+        conductance = max(0.0, float(edge.Gij_W_K))
+        if conductance <= 0.0:
+            continue
+        diagonal[i] += conductance
+        diagonal[j] += conductance
+        rows.extend([i, j])
+        cols.extend([j, i])
+        data.extend([-conductance, -conductance])
+    nonzero = np.nonzero(diagonal > 0.0)[0]
+    rows.extend(nonzero.astype(int).tolist())
+    cols.extend(nonzero.astype(int).tolist())
+    data.extend(diagonal[nonzero].astype(float).tolist())
+    return coo_matrix((data, (rows, cols)), shape=(len(node_ids), len(node_ids))).tocsr()
+
+
+def _build_sparse_octree_matrices_from_model(
+    model: ThermalGraphModel,
+    node_ids_value: Any = None,
+) -> dict[str, Any]:
+    node_ids = np.asarray(node_ids_value if node_ids_value is not None else model.ordered_node_ids(), dtype=int)
+    matrices = _base_octree_matrix_payload(model, node_ids)
+    matrices["L"] = _sparse_laplacian_from_model(model, node_ids)
+    return matrices
+
+
+def _uses_sparse_laplacian(matrices: dict[str, Any]) -> bool:
+    return issparse(matrices.get("L"))
+
+
+def _is_visual_role_contact_edge(edge: Any) -> bool:
+    return (
+        str(getattr(edge, "edge_type", "")) == "role_node_contact"
+        or str(getattr(edge, "source_metadata", "")) == "cad_role_node_contact"
+    )
 
 
 def _refresh_octree_radiation(model: ThermalGraphModel) -> None:
@@ -324,7 +447,10 @@ def _save_octree_graph_folder_lightweight(
     _atomic_write_json(folder / METADATA_FILE, model.metadata.to_dict(), indent=2)
     material_library = model.material_library or default_material_library()
     _atomic_write_json(folder / MATERIAL_FILE, material_library, indent=2)
-    matrices = build_matrices(model)
+    if len(model.nodes) > _DENSE_OCTREE_MATRIX_NODE_LIMIT:
+        matrices = _build_sparse_octree_matrices_from_model(model)
+    else:
+        matrices = build_matrices(model)
     _save_octree_outputs(model, matrices, folder)
     return matrices
 
@@ -365,6 +491,8 @@ def _save_octree_outputs(model: ThermalGraphModel, matrices: dict[str, np.ndarra
     _atomic_write_json(folder / "materials_used.json", model.material_library or default_material_library(), indent=2)
     for key in ("C", "G", "L"):
         if key in matrices:
+            if issparse(matrices[key]):
+                continue
             np.save(folder / f"{key}.npy", matrices[key])
     if "G_rad" in matrices:
         np.save(folder / "G_rad.npy", matrices["G_rad"])
@@ -394,15 +522,27 @@ def _write_browser_matrix_exports(matrices: dict[str, np.ndarray], folder: Path)
     if "G_rad" in matrices:
         _atomic_write_json(folder / "G_rad_diag.json", {"data": np.asarray(matrices["G_rad"], dtype=float).tolist()})
     if "L" in matrices:
-        L = np.asarray(matrices["L"], dtype=float)
-        if L.ndim == 2:
-            row, col = np.nonzero(L)
+        L = matrices["L"]
+        if issparse(L):
+            coo = L.tocoo()
             payload = {
-                "shape": list(L.shape),
+                "shape": list(coo.shape),
+                "format": "coo",
+                "row": coo.row.astype(int).tolist(),
+                "col": coo.col.astype(int).tolist(),
+                "data": coo.data.astype(float).tolist(),
+            }
+            _atomic_write_json(folder / "L_sparse.json", payload)
+            return
+        dense = np.asarray(L, dtype=float)
+        if dense.ndim == 2:
+            row, col = np.nonzero(dense)
+            payload = {
+                "shape": list(dense.shape),
                 "format": "coo",
                 "row": row.astype(int).tolist(),
                 "col": col.astype(int).tolist(),
-                "data": L[row, col].astype(float).tolist(),
+                "data": dense[row, col].astype(float).tolist(),
             }
             _atomic_write_json(folder / "L_sparse.json", payload)
 

@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 from scipy.linalg import expm
-from scipy.sparse import bmat, csr_matrix, diags
+from scipy.sparse import bmat, csr_matrix, diags, issparse
 from scipy.sparse.linalg import expm_multiply
 
 from .mimo_controller import (
@@ -923,7 +923,10 @@ def prepare_simulation(
     node_ids = np.asarray(matrices.get("node_ids", model.ordered_node_ids()), dtype=int)
     n = len(node_ids)
     C = np.asarray(matrices.get("C", [model.nodes[int(node_id)].C_J_K for node_id in node_ids]), dtype=float).reshape(-1)
-    L = np.asarray(matrices.get("L"), dtype=float)
+    raw_L = matrices.get("L")
+    if raw_L is None:
+        raise ValueError("Cannot initialize simulation without L matrix.")
+    L = raw_L if issparse(raw_L) else np.asarray(raw_L, dtype=float)
     G_rad = _radiation_vector(matrices, model, node_ids)
     initial = np.asarray(
         [model.nodes[int(node_id)].initial_temperature_K for node_id in node_ids],
@@ -973,7 +976,7 @@ def prepare_simulation(
     ) and not has_mimo_controller:
         warnings.append("MIMO sensor control is selected, but no valid paired MIMO sensor/heater set is available.")
 
-    sparse_stepper = n > 512
+    sparse_stepper = n > 512 or issparse(L)
     if sparse_stepper:
         L_sparse = csr_matrix(L)
         A = -(diags(inv_C, format="csr") @ L_sparse)
@@ -989,6 +992,8 @@ def prepare_simulation(
             )
         Phi_aug = None
     else:
+        if issparse(L):
+            L = L.toarray()
         A = -(inv_C[:, None] * L)
         if dynamic_heater_inputs:
             A_aug = A
@@ -1038,7 +1043,12 @@ def validate_simulation_inputs(
         warnings.append(f"Initial temperature length {initial.shape} does not match node count {n}.")
     if np.any(C <= 0.0):
         warnings.append("At least one node has nonpositive thermal capacitance.")
-    if np.any(L - np.diag(np.diag(L)) > 1.0e-12):
+    if issparse(L):
+        offdiag = L.tocoo()
+        mask = offdiag.row != offdiag.col
+        if np.any(offdiag.data[mask] > 1.0e-12):
+            warnings.append("L has positive off-diagonal entries; expected graph Laplacian off-diagonals <= 0.")
+    elif np.any(L - np.diag(np.diag(L)) > 1.0e-12):
         warnings.append("L has positive off-diagonal entries; expected graph Laplacian off-diagonals <= 0.")
     if np.any(G_rad < -1.0e-12):
         warnings.append("Radiation diagonal contains negative values.")
@@ -1062,7 +1072,7 @@ def validate_simulation_inputs(
 
 
 def estimate_min_time_constant(C: np.ndarray, L: np.ndarray, G_rad: np.ndarray | None = None) -> float | None:
-    conductance_sum = np.asarray(np.diag(L), dtype=float).copy()
+    conductance_sum = np.asarray(L.diagonal() if issparse(L) else np.diag(L), dtype=float).copy()
     if G_rad is not None:
         conductance_sum += np.asarray(G_rad, dtype=float).reshape(-1)
     mask = conductance_sum > 0.0
