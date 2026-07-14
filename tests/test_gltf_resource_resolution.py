@@ -252,6 +252,64 @@ class GltfResourceResolutionTests(unittest.TestCase):
         )
         self.assertIn("Default/HISPEC-0030-A0005", scene.objects[0].scene_path)
 
+    def test_load_gltf_scene_uses_raw_hierarchy_paths_when_counts_differ(self) -> None:
+        class Geometry:
+            vertices = np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                ],
+                dtype=float,
+            )
+            faces = np.array([[0, 1, 2]], dtype=int)
+            visual = SimpleNamespace(material=SimpleNamespace(name="Copper"))
+            is_watertight = True
+
+        loaded = SimpleNamespace(
+            graph=SimpleNamespace(
+                nodes_geometry=["leaf_mesh_node"],
+                get=lambda node_name: (np.eye(4), "leaf_geometry"),
+                transforms=SimpleNamespace(parents={}),
+            ),
+            geometry={"leaf_geometry": Geometry()},
+        )
+        fake_trimesh = SimpleNamespace(load=lambda load_path, force=None: loaded)
+        raw_paths = [
+            (
+                "leaf_mesh_node",
+                (
+                    "Default#1",
+                    "V_GUUTZ_SAFE-HEATER_HISPEC#1522",
+                    "V_GUUTZ_SAFE-HEATER_HISPEC#1422",
+                ),
+            ),
+            (
+                "other_mesh_node",
+                (
+                    "Default#1",
+                    "V_GUUTZ_SAFE-HEATER_HISPEC#1622",
+                    "V_GUUTZ_SAFE-HEATER_HISPEC#1499",
+                ),
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"trimesh": fake_trimesh}):
+            glb = Path(tmp) / "assembly.glb"
+            glb.write_bytes(b"glb")
+            with patch("octree_graph.load_gltf._raw_gltf_mesh_node_paths", return_value=raw_paths):
+                scene = load_gltf_scene(glb)
+
+        self.assertEqual(
+            scene.objects[0].hierarchy_path,
+            (
+                "Default#1",
+                "V_GUUTZ_SAFE-HEATER_HISPEC#1522",
+                "V_GUUTZ_SAFE-HEATER_HISPEC#1422",
+            ),
+        )
+        self.assertIn("using raw hierarchy paths where ordinals overlap", " ".join(scene.warnings))
+
     def test_raw_glb_mesh_node_paths_include_node_indices_for_repeated_names(self) -> None:
         tree = {
             "asset": {"version": "2.0"},

@@ -337,21 +337,32 @@ def _object_search_text(obj: MeshObject) -> str:
     return obj.name
 
 
+def _role_path_candidates(obj: MeshObject) -> list[tuple[str, ...]]:
+    candidates: list[tuple[str, ...]] = []
+    hierarchy_path = tuple(str(part) for part in (getattr(obj, "hierarchy_path", ()) or ()) if str(part))
+    if hierarchy_path:
+        candidates.append(hierarchy_path)
+    scene_path = str(getattr(obj, "scene_path", "") or "")
+    if scene_path:
+        scene_parts = tuple(part for part in scene_path.replace("\\", "/").split("/") if part)
+        if scene_parts and scene_parts not in candidates:
+            candidates.append(scene_parts)
+    return candidates
+
+
 def _classify_role_component(
     obj: MeshObject,
     heater_patterns: list[str],
     sensor_patterns: list[str],
     exclude_patterns: list[str] | None = None,
 ) -> str | None:
-    path = tuple(str(part) for part in (getattr(obj, "hierarchy_path", ()) or ()) if str(part))
-    if path:
-        if _matches_any_role_pattern(" ".join(path + (obj.name,)), exclude_patterns or []):
+    for path in _role_path_candidates(obj):
+        if _matches_any_role_pattern(" ".join(path), exclude_patterns or []):
             return None
         for part in path:
             kind = classify_role_component_name(part, heater_patterns, sensor_patterns, exclude_patterns=None)
             if kind is not None:
                 return kind
-        return classify_role_component_name(obj.name, heater_patterns, sensor_patterns, exclude_patterns=None)
     return classify_role_component_name(_object_search_text(obj), heater_patterns, sensor_patterns, exclude_patterns)
 
 
@@ -367,22 +378,22 @@ def _hierarchy_role_group_name(
     sensor_patterns: list[str],
     exclude_patterns: list[str] | None = None,
 ) -> str | None:
-    path = tuple(str(part) for part in (getattr(obj, "hierarchy_path", ()) or ()) if str(part))
-    if len(path) < 2:
-        return None
-    ancestor_kinds = [
-        _safe_classify_role_component_name(part, heater_patterns, sensor_patterns, exclude_patterns)
-        for part in path
-    ]
-    for index, ancestor_kind in enumerate(ancestor_kinds):
-        if ancestor_kind != kind:
+    for path in _role_path_candidates(obj):
+        if len(path) < 2:
             continue
-        previous_kind = ancestor_kinds[index - 1] if index > 0 else None
-        if previous_kind == kind:
-            continue
-        if "#" in path[index]:
-            return _normalize_role_name(path[index])
-        return _normalize_role_name("/".join(path[: index + 1]))
+        ancestor_kinds = [
+            _safe_classify_role_component_name(part, heater_patterns, sensor_patterns, exclude_patterns)
+            for part in path
+        ]
+        for index, ancestor_kind in enumerate(ancestor_kinds):
+            if ancestor_kind != kind:
+                continue
+            previous_kind = ancestor_kinds[index - 1] if index > 0 else None
+            if previous_kind == kind:
+                continue
+            if "#" in path[index]:
+                return _normalize_role_name(path[index])
+            return _normalize_role_name("/".join(path[: index + 1]))
     return None
 
 

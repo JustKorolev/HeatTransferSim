@@ -442,6 +442,32 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(role_components[0].name, "V_GUUTZ_SAFE_HEATER_HISPEC#1522")
         self.assertEqual(len(role_components[0].objects), 2)
 
+    def test_role_component_detection_uses_scene_path_when_hierarchy_path_is_leaf_only(self) -> None:
+        heater_leaf_a = _mesh_object("V_GUUTZ_SAFE-HEATER_HISPEC#1422", "Copper", [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+        heater_leaf_b = _mesh_object("V_GUUTZ_SAFE-HEATER_HISPEC#1424", "Copper", [1000.0, 0.0, 0.0], [1001.0, 1.0, 1.0])
+        heater_leaf_a.hierarchy_path = ("V_GUUTZ_SAFE-HEATER_HISPEC#1422",)
+        heater_leaf_b.hierarchy_path = ("V_GUUTZ_SAFE-HEATER_HISPEC#1424",)
+        heater_leaf_a.scene_path = (
+            "Default/HISPEC-0030-A0005/V_GUUTZ_SAFE-HEATER_HISPEC#1522/"
+            "V_GUUTZ_SAFE-HEATER_HISPEC#1422"
+        )
+        heater_leaf_b.scene_path = (
+            "Default/HISPEC-0030-A0005/V_GUUTZ_SAFE-HEATER_HISPEC#1522/"
+            "V_GUUTZ_SAFE-HEATER_HISPEC#1424"
+        )
+
+        body_objects, role_components = collapse_role_components(
+            [heater_leaf_a, heater_leaf_b],
+            [r"safe_heater"],
+            [],
+            group_gap_mm=0.01,
+        )
+
+        self.assertEqual(body_objects, [])
+        self.assertEqual(len(role_components), 1)
+        self.assertEqual(role_components[0].name, "V_GUUTZ_SAFE_HEATER_HISPEC#1522")
+        self.assertEqual(len(role_components[0].objects), 2)
+
     def test_role_component_detection_prefers_highest_hierarchy_role_match(self) -> None:
         heater_leaf = _mesh_object("solid_body", "Copper", [10.0, 0.0, 0.0], [11.0, 1.0, 1.0])
         heater_leaf.hierarchy_path = (
