@@ -14,7 +14,12 @@ from unittest.mock import patch
 import numpy as np
 
 from octree_graph.cli import build_parser, _resolve_gltf_path
-from octree_graph.load_gltf import _PLACEHOLDER_IMAGE_URI, _prepare_gltf_for_load, load_gltf_scene
+from octree_graph.load_gltf import (
+    _PLACEHOLDER_IMAGE_URI,
+    _prepare_gltf_for_load,
+    _raw_gltf_mesh_node_paths,
+    load_gltf_scene,
+)
 
 
 class GltfResourceResolutionTests(unittest.TestCase):
@@ -199,6 +204,81 @@ class GltfResourceResolutionTests(unittest.TestCase):
         self.assertFalse(obj.watertight)
         self.assertEqual(obj.mesh.triangles.shape, (1, 3, 3))
         self.assertIn("not reported watertight", " ".join(scene.warnings))
+
+    def test_load_gltf_scene_preserves_hierarchy_path(self) -> None:
+        class Geometry:
+            vertices = np.array(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                ],
+                dtype=float,
+            )
+            faces = np.array([[0, 1, 2]], dtype=int)
+            visual = SimpleNamespace(material=SimpleNamespace(name="Copper"))
+            is_watertight = True
+
+        loaded = SimpleNamespace(
+            graph=SimpleNamespace(
+                nodes_geometry=["leaf_mesh_node"],
+                get=lambda node_name: (np.eye(4), "leaf_geometry"),
+                transforms=SimpleNamespace(
+                    parents={
+                        "leaf_mesh_node": "V_GUUTZ_SAFE-HEATER_HISPEC_1522",
+                        "V_GUUTZ_SAFE-HEATER_HISPEC_1522": "HISPEC-0030-A0005",
+                        "HISPEC-0030-A0005": "Default",
+                    }
+                ),
+            ),
+            geometry={"leaf_geometry": Geometry()},
+        )
+        fake_trimesh = SimpleNamespace(load=lambda load_path, force=None: loaded)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"trimesh": fake_trimesh}):
+            glb = Path(tmp) / "assembly.glb"
+            glb.write_bytes(b"glb")
+
+            scene = load_gltf_scene(glb)
+
+        self.assertEqual(
+            scene.objects[0].hierarchy_path,
+            (
+                "Default",
+                "HISPEC-0030-A0005",
+                "V_GUUTZ_SAFE-HEATER_HISPEC_1522",
+                "leaf_mesh_node",
+            ),
+        )
+        self.assertIn("Default/HISPEC-0030-A0005", scene.objects[0].scene_path)
+
+    def test_raw_glb_mesh_node_paths_include_node_indices_for_repeated_names(self) -> None:
+        tree = {
+            "asset": {"version": "2.0"},
+            "nodes": [
+                {"name": "root", "children": [1, 3]},
+                {"name": "V_GUUTZ_SAFE-HEATER_HISPEC", "children": [2]},
+                {"name": "V_GUUTZ_SAFE-HEATER_HISPEC", "mesh": 0},
+                {"name": "V_GUUTZ_SAFE-HEATER_HISPEC", "children": [4]},
+                {"name": "V_GUUTZ_SAFE-HEATER_HISPEC", "mesh": 1},
+            ],
+            "meshes": [{}, {}],
+        }
+        payload = json.dumps(tree).encode("utf-8")
+        payload += b" " * ((4 - len(payload) % 4) % 4)
+        header = b"glTF" + (2).to_bytes(4, "little") + (12 + 8 + len(payload)).to_bytes(4, "little")
+        chunk = len(payload).to_bytes(4, "little") + (0x4E4F534A).to_bytes(4, "little") + payload
+
+        with tempfile.TemporaryDirectory() as tmp:
+            glb = Path(tmp) / "assembly.glb"
+            glb.write_bytes(header + chunk)
+
+            paths = _raw_gltf_mesh_node_paths(glb)
+
+        self.assertEqual(len(paths), 2)
+        self.assertNotEqual(paths[0][1], paths[1][1])
+        self.assertIn("#1", "/".join(paths[0][1]))
+        self.assertIn("#3", "/".join(paths[1][1]))
 
 
 if __name__ == "__main__":

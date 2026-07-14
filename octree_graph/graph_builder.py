@@ -298,7 +298,14 @@ def collapse_role_components(
         if kind is None:
             body_objects.append(obj)
             continue
-        groups.setdefault((kind, _role_group_name(obj.name)), []).append(obj)
+        group_name = _hierarchy_role_group_name(
+            obj,
+            kind,
+            heater_patterns,
+            sensor_patterns,
+            exclude_patterns,
+        ) or _role_group_name(obj.name)
+        groups.setdefault((kind, group_name), []).append(obj)
     components: list[RoleComponent] = []
     for (kind, name), members in sorted(groups.items(), key=lambda item: (item[0][0], item[0][1])):
         clusters = _spatial_role_clusters(members, group_gap_mm)
@@ -341,6 +348,44 @@ def _object_search_text(obj: MeshObject) -> str:
     if scene_path and scene_path != obj.name:
         return f"{scene_path} {obj.name}"
     return obj.name
+
+
+def _hierarchy_role_group_name(
+    obj: MeshObject,
+    kind: str,
+    heater_patterns: list[str],
+    sensor_patterns: list[str],
+    exclude_patterns: list[str] | None = None,
+) -> str | None:
+    path = tuple(str(part) for part in (getattr(obj, "hierarchy_path", ()) or ()) if str(part))
+    if len(path) < 2:
+        return None
+    ancestor_kinds = [
+        _safe_classify_role_component_name(part, heater_patterns, sensor_patterns, exclude_patterns)
+        for part in path
+    ]
+    for index, ancestor_kind in enumerate(ancestor_kinds):
+        if ancestor_kind != kind:
+            continue
+        previous_kind = ancestor_kinds[index - 1] if index > 0 else None
+        if previous_kind == kind:
+            continue
+        if "#" in path[index]:
+            return _normalize_role_name(path[index])
+        return _normalize_role_name("/".join(path[: index + 1]))
+    return None
+
+
+def _safe_classify_role_component_name(
+    name: str,
+    heater_patterns: list[str],
+    sensor_patterns: list[str],
+    exclude_patterns: list[str] | None = None,
+) -> str | None:
+    try:
+        return classify_role_component_name(name, heater_patterns, sensor_patterns, exclude_patterns)
+    except ValueError:
+        return None
 
 
 def _role_group_name(name: str) -> str:

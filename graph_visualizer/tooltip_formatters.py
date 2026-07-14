@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .role_warnings import role_warning_reasons
+
 
 def format_node_tooltip(node_id: int, attrs: Any) -> str:
     """Return a compact, readable node tooltip."""
@@ -40,6 +42,9 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
         f"sensor: {'yes' if getattr(attrs, 'is_sensor', False) else 'no'}",
         f"cryocooler: {'yes' if getattr(attrs, 'has_cryocooler', False) else 'no'}",
     ]
+    warning_reasons = role_warning_reasons(attrs)
+    if warning_reasons:
+        lines.extend(["-- role warnings --", *warning_reasons])
     if getattr(attrs, "is_heater", False):
         heater = getattr(attrs, "heater", None)
         lines.extend(

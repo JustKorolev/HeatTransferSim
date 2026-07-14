@@ -8,6 +8,7 @@ from typing import Any, Callable
 import numpy as np
 
 from .models import ThermalGraphModel
+from .role_warnings import has_role_warning
 from .tooltip_formatters import format_edge_tooltip, format_node_tooltip
 
 
@@ -151,23 +152,16 @@ class TwoDGraphWidget:
                 continue
             x, y = self.positions[node_id]
             node = model.nodes[node_id]
-            color = (
-                "#ffb703"
-                if node.is_heater
-                else "#06b6d4"
-                if getattr(node, "has_cryocooler", False)
-                else "#2a9d8f"
-                if node.is_sensor
-                else "#58a6ff"
-            )
+            warning = has_role_warning(node)
+            color = _node_role_color(node)
             selected = node_id in self.selected_node_ids
             self.ax.scatter(
                 [x],
                 [y],
                 s=360 if selected else 320,
-                c=["#ffd166" if selected else color],
-                edgecolors="#f87171" if selected else self._node_edge_color(),
-                linewidths=2.4 if selected else 1.0,
+                c=["#ffd166" if selected else "#ef4444" if warning else color],
+                edgecolors="#ef4444" if warning else "#f87171" if selected else self._node_edge_color(),
+                linewidths=2.8 if warning else 2.4 if selected else 1.0,
                 zorder=3,
             )
             self.ax.text(
@@ -200,15 +194,7 @@ class TwoDGraphWidget:
             node = model.nodes[node_id]
             xs.append(x)
             ys.append(y)
-            colors.append(
-                "#ffb703"
-                if node.is_heater
-                else "#06b6d4"
-                if getattr(node, "has_cryocooler", False)
-                else "#2a9d8f"
-                if node.is_sensor
-                else "#58a6ff"
-            )
+            colors.append("#ef4444" if has_role_warning(node) else _node_role_color(node))
             self.node_points[node_id] = (x, y)
         self.ax.scatter(xs, ys, s=12, c=colors, alpha=0.72, linewidths=0, zorder=3)
         selected_xs: list[float] = []
@@ -432,6 +418,16 @@ def node_connection_counts(
         if node_id in visible and neighbor in visible:
             visible_neighbors.add(int(neighbor))
     return len(neighbors), len(visible_neighbors)
+
+
+def _node_role_color(node: Any) -> str:
+    if getattr(node, "is_heater", False):
+        return "#ffb703"
+    if getattr(node, "has_cryocooler", False):
+        return "#06b6d4"
+    if getattr(node, "is_sensor", False):
+        return "#2a9d8f"
+    return "#58a6ff"
 
 
 def point_to_segment_distance(point: np.ndarray, start: np.ndarray, end: np.ndarray) -> float:

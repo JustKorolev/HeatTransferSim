@@ -44,6 +44,7 @@ from graph_visualizer.role_assignment import (
     normalize_role_match_text,
 )
 from graph_visualizer.role_pairing import assign_heater_to_sensor, recompute_heater_sensor_pairing
+from graph_visualizer.role_warnings import has_role_warning, role_warning_reasons
 from graph_visualizer.simulation_model import prepare_simulation
 from graph_visualizer.simulation_parameters import (
     SimulationParameters,
@@ -2169,6 +2170,41 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertIn("Edge 3 -- 7", edge_text)
         self.assertIn("Gij:", edge_text)
         self.assertIn("mode: auto", edge_text)
+
+    def test_role_warning_reasons_flag_unconnected_and_unpaired_roles(self) -> None:
+        heater = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        heater.is_heater = True
+        heater.heater_valid = False
+        heater.heater_warning = "No body power deposition nodes found."
+
+        sensor = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        sensor.is_sensor = True
+        sensor.sensor_valid = False
+        sensor.sensor_connected_node_ids = []
+
+        paired_heater = NodeProperties.with_material(3, (2, 0, 0), material="copper")
+        paired_heater.is_heater = True
+        paired_heater.assigned_sensor_id = 2
+        paired_heater.power_deposition_node_ids = [4]
+
+        self.assertTrue(has_role_warning(heater))
+        self.assertIn("No body power deposition nodes found.", role_warning_reasons(heater))
+        self.assertIn("heater has no assigned sensor", role_warning_reasons(heater))
+        self.assertTrue(has_role_warning(sensor))
+        self.assertIn("sensor has no connected body readout nodes", role_warning_reasons(sensor))
+        self.assertFalse(has_role_warning(paired_heater))
+
+    def test_tooltip_includes_role_warning_reasons(self) -> None:
+        heater = NodeProperties.with_material(9, (0, 0, 0), material="copper")
+        heater.is_heater = True
+        heater.heater_valid = False
+        heater.heater_warning = "No body power deposition nodes found."
+
+        text = format_node_tooltip(9, heater)
+
+        self.assertIn("-- role warnings --", text)
+        self.assertIn("No body power deposition nodes found.", text)
+        self.assertIn("heater has no assigned sensor", text)
 
     def test_2d_position_expansion_separates_close_nodes(self) -> None:
         positions = {1: (0.0, 0.0), 2: (0.01, 0.0), 3: (2.0, 0.0)}

@@ -8,6 +8,7 @@ import numpy as np
 from matplotlib import colormaps
 
 from .models import ThermalGraphModel
+from .role_warnings import has_role_warning
 
 
 class GraphPyVistaWidget:
@@ -494,11 +495,20 @@ class GraphPyVistaWidget:
         direction = vector / length
         return (float(direction[0]), float(direction[1])), length
 
-    def _add_marker(self, center: np.ndarray, color: str, label: str, kind: str, visible: bool) -> None:
+    def _add_marker(
+        self,
+        center: np.ndarray,
+        color: str,
+        label: str,
+        kind: str,
+        visible: bool,
+        *,
+        point_size: int = 15,
+    ) -> None:
         actor = self.plotter.add_points(
             np.array([center], dtype=float),
             color=color,
-            point_size=15,
+            point_size=point_size,
             render_points_as_spheres=True,
         )
         self._set_actor_visible(actor, visible)
@@ -518,20 +528,24 @@ class GraphPyVistaWidget:
 
     def _add_io_markers_for_node(self, node: Any, center: np.ndarray, marker_side: float) -> None:
         if bool(getattr(node, "is_heater", False)):
+            warning = has_role_warning(node)
             self._add_marker(
                 center + np.array([0.0, 0.0, 0.36 * marker_side]),
-                "#ff6b35",
-                "H",
+                "#ef4444" if warning else "#ff6b35",
+                "H!" if warning else "H",
                 "heater",
                 self.show_heaters,
+                point_size=20 if warning else 15,
             )
         if bool(getattr(node, "is_sensor", False)):
+            warning = has_role_warning(node)
             self._add_marker(
                 center + np.array([0.0, 0.0, -0.36 * marker_side]),
-                "#2a9d8f",
-                "S",
+                "#ef4444" if warning else "#2a9d8f",
+                "S!" if warning else "S",
                 "sensor",
                 self.show_sensors,
+                point_size=20 if warning else 15,
             )
         if bool(getattr(node, "has_cryocooler", False)):
             self._add_marker(
@@ -552,7 +566,7 @@ class GraphPyVistaWidget:
                 sensor_id = getattr(heater, "assigned_sensor_id", None)
                 if sensor_id is not None and int(sensor_id) in model.nodes:
                     self._add_pair_line(heater, model.nodes[int(sensor_id)])
-                if not bool(getattr(heater, "heater_valid", True)):
+                if has_role_warning(heater):
                     self._add_node_outline(model, int(heater.node_id), visible, "#ef4444", 0.75)
         if self.show_sensors:
             for sensor in model.nodes.values():
@@ -560,7 +574,7 @@ class GraphPyVistaWidget:
                     continue
                 for body_id in (getattr(sensor, "readout_node_ids", []) or getattr(sensor, "sensor_connected_node_ids", []) or []):
                     self._add_node_outline(model, int(body_id), visible, "#14b8a6", 0.38)
-                if not bool(getattr(sensor, "sensor_valid", True)):
+                if has_role_warning(sensor):
                     self._add_node_outline(model, int(sensor.node_id), visible, "#ef4444", 0.75)
 
     def _add_node_outline(

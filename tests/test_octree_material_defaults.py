@@ -355,6 +355,43 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual([component.name for component in role_components], ["safe_heater_1", "safe_heater_2"])
         self.assertEqual([len(component.objects) for component in role_components], [2, 1])
 
+    def test_role_component_detection_uses_hierarchy_role_roots(self) -> None:
+        body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        heater_a_1 = _mesh_object("V_GUUTZ_SAFE-HEATER_HISPEC", "Copper", [10.0, 0.0, 0.0], [11.0, 1.0, 1.0])
+        heater_a_2 = _mesh_object("V_GUUTZ_SAFE-HEATER_HISPEC", "Copper", [11.0, 0.0, 0.0], [12.0, 1.0, 1.0])
+        heater_b = _mesh_object("V_GUUTZ_SAFE-HEATER_HISPEC", "Copper", [12.0, 0.0, 0.0], [13.0, 1.0, 1.0])
+        heater_a_1.hierarchy_path = (
+            "Default",
+            "HISPEC-0030-A0005",
+            "V_GUUTZ_SAFE-HEATER_HISPEC_1522",
+            "leaf_1",
+        )
+        heater_a_2.hierarchy_path = (
+            "Default",
+            "HISPEC-0030-A0005",
+            "V_GUUTZ_SAFE-HEATER_HISPEC_1522",
+            "leaf_2",
+        )
+        heater_b.hierarchy_path = (
+            "Default",
+            "HISPEC-0030-A0005",
+            "V_GUUTZ_SAFE-HEATER_HISPEC_1622",
+            "leaf_1",
+        )
+
+        body_objects, role_components = collapse_role_components(
+            [body, heater_a_1, heater_a_2, heater_b],
+            [r"safe_heater"],
+            [],
+            exclude_patterns=DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS,
+            group_gap_mm=10.0,
+        )
+
+        self.assertEqual([obj.name for obj in body_objects], ["body_panel"])
+        self.assertEqual(len(role_components), 2)
+        self.assertEqual([len(component.objects) for component in role_components], [2, 1])
+        self.assertTrue(all("V_GUUTZ_SAFE_HEATER_HISPEC" in component.name for component in role_components))
+
     def test_role_component_detection_rejects_ambiguous_heater_sensor_match(self) -> None:
         ambiguous = _mesh_object("sensor_heater_combo", "Copper", [0.0, 0.0, 0.0], [5.0, 5.0, 1.0])
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -22,6 +22,7 @@ class MeshObject:
     bounds_mm: tuple[np.ndarray, np.ndarray]
     watertight: bool
     scene_path: str | None = None
+    hierarchy_path: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -56,14 +57,21 @@ def load_gltf_scene(path: str | Path) -> GltfScene:
             temporary_path.unlink(missing_ok=True)
     warnings: list[str] = list(resource_warnings)
     objects: list[MeshObject] = []
-    for node_name in loaded.graph.nodes_geometry:
+    raw_mesh_node_paths = _raw_gltf_mesh_node_paths(file_path)
+    node_paths = _graph_node_paths(loaded.graph)
+    nodes_geometry = list(loaded.graph.nodes_geometry)
+    for ordinal, node_name in enumerate(nodes_geometry):
         transform, geometry_name = loaded.graph.get(node_name)
+        hierarchy_path = node_paths.get(str(node_name), (str(node_name),))
+        if len(raw_mesh_node_paths) == len(nodes_geometry):
+            hierarchy_path = raw_mesh_node_paths[ordinal][1]
         obj = _mesh_object_from_geometry(
             node_name=str(node_name),
             geometry_name=str(geometry_name),
             geometry=loaded.geometry[geometry_name],
             transform=np.asarray(transform, dtype=float),
             warnings=warnings,
+            hierarchy_path=hierarchy_path,
         )
         if obj is None:
             continue
@@ -91,6 +99,7 @@ def _mesh_object_from_geometry(
     geometry: Any,
     transform: np.ndarray,
     warnings: list[str],
+    hierarchy_path: tuple[str, ...] | None = None,
 ) -> MeshObject | None:
     try:
         vertices = np.asarray(getattr(geometry, "vertices", []), dtype=float)
@@ -123,7 +132,9 @@ def _mesh_object_from_geometry(
     if not watertight:
         warnings.append(f"Object {node_name} is not reported watertight; occupancy may be unreliable.")
     material_name = _safe_material_name(geometry)
-    scene_path = node_name if geometry_name == node_name else f"{node_name} {geometry_name}"
+    clean_path = tuple(str(part) for part in (hierarchy_path or (node_name,)) if str(part))
+    base_scene_path = "/".join(clean_path) if clean_path else node_name
+    scene_path = base_scene_path if geometry_name == node_name else f"{base_scene_path} {geometry_name}"
     mesh = _ArrayTriangleMesh(
         vertices=vertices,
         faces=valid_faces,
@@ -139,7 +150,130 @@ def _mesh_object_from_geometry(
         bounds_mm=(bounds[0].astype(float, copy=True), bounds[1].astype(float, copy=True)),
         watertight=watertight,
         scene_path=scene_path,
+        hierarchy_path=clean_path,
     )
+
+
+def _graph_node_paths(graph: Any) -> dict[str, tuple[str, ...]]:
+    """Best-effort extraction of full scene graph paths from trimesh."""
+    try:
+        geometry_nodes = [str(node) for node in graph.nodes_geometry]
+    except Exception:
+        return {}
+    parent_by_child = _graph_parent_lookup(graph)
+    paths: dict[str, tuple[str, ...]] = {}
+    for node in geometry_nodes:
+        parts: list[str] = []
+        seen: set[str] = set()
+        current: str | None = str(node)
+        while current is not None and current not in seen:
+            seen.add(current)
+            parts.append(str(current))
+            parent = parent_by_child.get(str(current))
+            current = str(parent) if parent is not None else None
+        parts.reverse()
+        paths[str(node)] = tuple(parts) if parts else (str(node),)
+    return paths
+
+
+def _raw_gltf_mesh_node_paths(file_path: Path) -> list[tuple[str, tuple[str, ...]]]:
+    tree = _raw_gltf_json(file_path)
+    if not tree:
+        return []
+    nodes = tree.get("nodes", []) or []
+    if not isinstance(nodes, list):
+        return []
+    child_ids = {
+        int(child)
+        for node in nodes
+        if isinstance(node, dict)
+        for child in (node.get("children", []) or [])
+        if _can_int(child)
+    }
+    roots = [index for index in range(len(nodes)) if index not in child_ids]
+    mesh_paths: list[tuple[str, tuple[str, ...]]] = []
+
+    def label(index: int) -> str:
+        node = nodes[index] if 0 <= index < len(nodes) and isinstance(nodes[index], dict) else {}
+        name = str(node.get("name") or f"node_{index}")
+        return f"{name}#{index}"
+
+    def walk(index: int, parts: list[str]) -> None:
+        if index < 0 or index >= len(nodes) or not isinstance(nodes[index], dict):
+            return
+        node = nodes[index]
+        current = [*parts, label(index)]
+        if "mesh" in node:
+            mesh_paths.append((str(node.get("name") or f"node_{index}"), tuple(current)))
+        for child in node.get("children", []) or []:
+            if _can_int(child):
+                walk(int(child), current)
+
+    for root in roots:
+        walk(root, [])
+    return mesh_paths
+
+
+def _raw_gltf_json(file_path: Path) -> dict[str, Any] | None:
+    try:
+        suffix = file_path.suffix.lower()
+        if suffix == ".glb":
+            data = file_path.read_bytes()
+            if len(data) < 20 or data[:4] != b"glTF":
+                return None
+            offset = 12
+            while offset + 8 <= len(data):
+                chunk_len = int.from_bytes(data[offset : offset + 4], "little")
+                chunk_type = int.from_bytes(data[offset + 4 : offset + 8], "little")
+                offset += 8
+                chunk = data[offset : offset + chunk_len]
+                offset += chunk_len
+                if chunk_type == 0x4E4F534A:
+                    return json.loads(chunk.decode("utf-8").rstrip("\x00 \t\r\n"))
+            return None
+        if suffix == ".gltf":
+            with file_path.open("r", encoding="utf-8") as handle:
+                return json.load(handle)
+    except Exception:
+        return None
+    return None
+
+
+def _can_int(value: Any) -> bool:
+    try:
+        int(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _graph_parent_lookup(graph: Any) -> dict[str, str]:
+    transforms = getattr(graph, "transforms", None)
+    candidates = [
+        getattr(graph, "parents", None),
+        getattr(transforms, "parents", None),
+        getattr(graph, "_parents", None),
+        getattr(transforms, "_parents", None),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate:
+            return {str(child): str(parent) for child, parent in candidate.items() if parent is not None}
+    children_candidates = [
+        getattr(graph, "children", None),
+        getattr(transforms, "children", None),
+        getattr(graph, "_children", None),
+        getattr(transforms, "_children", None),
+    ]
+    for candidate in children_candidates:
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        parents: dict[str, str] = {}
+        for parent, children in candidate.items():
+            for child in children or []:
+                parents[str(child)] = str(parent)
+        if parents:
+            return parents
+    return {}
 
 
 def _transform_vertices(vertices: np.ndarray, transform: np.ndarray) -> np.ndarray:
