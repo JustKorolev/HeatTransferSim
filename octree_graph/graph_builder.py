@@ -1003,12 +1003,11 @@ def _role_component_material_name(
 def _role_component_volume_m3(component: RoleComponent) -> float:
     volume = 0.0
     for obj in component.objects:
-        mesh_volume = getattr(obj.mesh, "volume", 0.0)
         try:
-            mesh_volume = abs(float(mesh_volume))
-        except (TypeError, ValueError):
+            mesh_volume = abs(float(getattr(obj.mesh, "volume", 0.0)))
+        except Exception:
             mesh_volume = 0.0
-        if mesh_volume > 0.0:
+        if mesh_volume > 0.0 and np.isfinite(mesh_volume):
             # Mesh coordinates are millimeters in this pipeline.
             volume += mesh_volume * 1.0e-9
     if volume > 0.0:

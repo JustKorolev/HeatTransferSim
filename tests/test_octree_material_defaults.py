@@ -625,6 +625,58 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertIn("produced 0 solid voxel cells", warnings[0])
         self.assertIn("0 contact edges", " ".join(warnings))
 
+    def test_graph_build_dedicated_role_node_survives_mesh_volume_failure(self) -> None:
+        class DegenerateMesh:
+            vertices = np.empty((0, 3))
+            faces = np.empty((0, 3), dtype=int)
+            triangles = np.empty((0, 3, 3))
+            is_watertight = False
+
+            @property
+            def volume(self) -> float:
+                raise ZeroDivisionError("center_mass = integrated[1:4] / volume")
+
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"body_panel": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="body_panel",
+                dominant_material="Copper",
+                confidence="high",
+            )
+        ]
+        sensor_obj = MeshObject(
+            name="sensor_probe_1",
+            material_name="Copper",
+            mesh=DegenerateMesh(),
+            vertices_mm=np.empty((0, 3)),
+            bounds_mm=(np.array([5.01, -1.0, -1.0]), np.array([7.01, 1.0, 1.0])),
+            watertight=False,
+            scene_path="sensor_probe_1",
+        )
+        role_component = RoleComponent(name="sensor_probe", kind="sensor", objects=[sensor_obj])
+
+        result = build_graph(
+            leaves,
+            ContactReport(),
+            materials,
+            warnings=[],
+            role_components=[role_component],
+        )
+
+        sensor_nodes = [node for node in result.nodes if node["is_sensor"]]
+        self.assertEqual(len(sensor_nodes), 1)
+        self.assertEqual(sensor_nodes[0]["component_name"], "sensor_probe")
+        self.assertGreater(sensor_nodes[0]["volume_m3"], 0.0)
+        self.assertGreater(sensor_nodes[0]["C_J_K"], 0.0)
+
     def test_graph_build_connects_dedicated_sensor_node_to_contacting_body_cell(self) -> None:
         materials = self.make_materials()
         leaves = [
