@@ -43,6 +43,7 @@ DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS = [
     r"(?:^|_)board(?:_|$)",
 ]
 DEFAULT_ROLE_GROUP_GAP_MM = 10.0
+DEFAULT_MAX_HEATERS_PER_SENSOR = 1
 
 
 @dataclass
@@ -90,6 +91,7 @@ def build_graph(
     role_contact_tolerance_max_mm: float | None = None,
     role_contact_tolerance_growth_factor: float = 2.0,
     max_heater_sensor_pair_distance_mm: float = 25.0,
+    max_heaters_per_sensor: int = DEFAULT_MAX_HEATERS_PER_SENSOR,
 ) -> GraphBuildResult:
     contact_report = contact_report or ContactReport()
     solid = [cell for cell in leaves if not cell.is_empty]
@@ -242,6 +244,7 @@ def build_graph(
         edges,
         warnings,
         max_heater_sensor_pair_distance_mm=max_heater_sensor_pair_distance_mm,
+        max_heaters_per_sensor=max_heaters_per_sensor,
     )
     return GraphBuildResult(nodes=nodes, edges=edges, warnings=warnings)
 
@@ -612,6 +615,7 @@ def _attach_sensor_connections_and_pair_roles(
     warnings: list[str],
     *,
     max_heater_sensor_pair_distance_mm: float,
+    max_heaters_per_sensor: int,
 ) -> None:
     node_by_id = {int(node["node_id"]): node for node in nodes}
     heaters = [node for node in nodes if bool(node.get("is_heater"))]
@@ -703,6 +707,7 @@ def _attach_sensor_connections_and_pair_roles(
                 f"{sorted(connected_role_ids)}; using heater-adjacent body node(s) {sorted(connected)} for readout."
             )
     max_distance = max(0.0, float(max_heater_sensor_pair_distance_mm))
+    sensor_capacity = max(1, int(max_heaters_per_sensor))
     candidate_pairs: list[tuple[float, int, int, dict, dict]] = []
     for heater in sorted(heaters, key=lambda item: int(item["node_id"])):
         if not bool(heater.get("heater_valid", True)):
@@ -715,19 +720,21 @@ def _attach_sensor_connections_and_pair_roles(
             if distance <= max_distance:
                 candidate_pairs.append((distance, int(heater["node_id"]), sensor_id, heater, sensor))
     assigned_heaters: set[int] = set()
-    assigned_sensors: set[int] = set()
+    assigned_sensor_counts: dict[int, int] = {}
     for distance, heater_id, sensor_id, heater, sensor in sorted(candidate_pairs, key=lambda item: (item[0], item[1], item[2])):
-        if heater_id in assigned_heaters or sensor_id in assigned_sensors:
+        if heater_id in assigned_heaters or assigned_sensor_counts.get(sensor_id, 0) >= sensor_capacity:
             continue
         heater["assigned_sensor_id"] = sensor_id
         heater["sensor_pair_distance_mm"] = float(distance)
-        sensor["assigned_heater_ids"] = [heater_id]
-        sensor["assigned_heater_id"] = heater_id
+        sensor_heater_ids = [int(value) for value in sensor.get("assigned_heater_ids", []) or []]
+        sensor_heater_ids.append(heater_id)
+        sensor["assigned_heater_ids"] = sorted(set(sensor_heater_ids))
+        sensor["assigned_heater_id"] = int(sensor["assigned_heater_ids"][0])
         sensor["sensor_pair_distance_mm"] = float(distance)
         sensor["sensor_monitor_only"] = False
         sensor["sensor_control_mode"] = "mimo"
         assigned_heaters.add(heater_id)
-        assigned_sensors.add(sensor_id)
+        assigned_sensor_counts[sensor_id] = assigned_sensor_counts.get(sensor_id, 0) + 1
     for heater in heaters:
         if bool(heater.get("heater_valid", True)) and heater.get("assigned_sensor_id") is None:
             warnings.append(

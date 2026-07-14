@@ -12,6 +12,7 @@ import tempfile
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix, issparse
 
+from .diagnostics import log_event
 from .material_library import default_material_library, material_defaults, normalize_material_library
 from .matrix_builder import (
     apply_conductance_matrix,
@@ -67,13 +68,16 @@ def save_graph_folder(model: ThermalGraphModel, folder_path: str | Path) -> dict
 def load_graph_folder(folder_path: str | Path) -> tuple[ThermalGraphModel, dict[str, np.ndarray]]:
     """Load and validate a legacy graph3d.json or octree graph.json folder."""
     folder = Path(folder_path)
+    log_event("load_graph_folder start", folder=str(folder))
     octree_path = folder / OCTREE_GRAPH_FILE
     graph_path = folder / GRAPH_FILE
     matrix_path = folder / MATRIX_FILE
     if octree_path.exists():
+        log_event("load_graph_folder read octree graph.json")
         with octree_path.open("r", encoding="utf-8") as handle:
             graph_data = json.load(handle)
         model = ThermalGraphModel.from_octree_graph_dict(graph_data)
+        log_event("load_graph_folder parsed octree graph", nodes=len(model.nodes), edges=len(model.edges))
         model.metadata.graph_name = model.metadata.graph_name or folder.name
         if isinstance(graph_data.get("materials_used"), (dict, list)):
             model.material_library = normalize_material_library(graph_data["materials_used"])
@@ -91,6 +95,7 @@ def load_graph_folder(folder_path: str | Path) -> tuple[ThermalGraphModel, dict[
                 "Graph folder is incomplete/corrupted. Missing: " + ", ".join(missing)
             )
 
+        log_event("load_graph_folder read graph3d.json")
         with graph_path.open("r", encoding="utf-8") as handle:
             graph_data = json.load(handle)
         metadata = _load_metadata(folder / METADATA_FILE)
@@ -106,13 +111,16 @@ def load_graph_folder(folder_path: str | Path) -> tuple[ThermalGraphModel, dict[
         )
     model_errors = validate_model(model)
     raise_if_errors(model_errors, "Loaded graph is invalid")
+    log_event("load_graph_folder model validated", nodes=len(model.nodes), edges=len(model.edges))
 
     if matrix_path.exists():
+        log_event("load_graph_folder load matrices.npz", path=str(matrix_path))
         with np.load(matrix_path, allow_pickle=False) as loaded:
             matrices = {key: loaded[key] for key in loaded.files}
         matrices = _normalize_loaded_matrices(model, matrices)
         matrices = _repair_empty_auto_conduction(model, matrices)
     elif octree_path.exists():
+        log_event("load_graph_folder load octree matrix payload")
         matrices = _load_octree_matrix_payload(folder, model)
         matrices = _repair_empty_auto_conduction(model, matrices)
     else:
@@ -126,13 +134,22 @@ def load_graph_folder(folder_path: str | Path) -> tuple[ThermalGraphModel, dict[
         matrices = _normalize_loaded_matrices(model, matrices)
         matrices = _repair_empty_auto_conduction(model, matrices)
     if octree_path.exists():
+        log_event("load_graph_folder refresh octree auto geometry")
         matrices = _refresh_octree_auto_geometry(model, matrices)
+        log_event("load_graph_folder refresh octree radiation")
         _refresh_octree_radiation(model)
         matrices = _sync_radiation_matrix_from_model(model, matrices)
     matrix_errors = validate_matrices(matrices, model.ordered_node_ids())
     raise_if_errors(matrix_errors, "Loaded matrices are invalid")
+    log_event(
+        "load_graph_folder matrices validated",
+        keys=sorted(matrices),
+        has_dense_G="G" in matrices,
+        L_type=type(matrices.get("L")).__name__ if "L" in matrices else None,
+    )
     if EdgeMode.normalize(model.metadata.edge_mode) == EdgeMode.LOADED_G.value:
         apply_conductance_matrix(model, matrices["node_ids"], matrices["G"])
+    log_event("load_graph_folder complete", folder=str(folder))
     return model, matrices
 
 
@@ -236,6 +253,7 @@ def _load_octree_matrix_payload(folder: Path, model: ThermalGraphModel) -> dict[
             matrices[key] = np.load(path, allow_pickle=False)
 
     if _should_load_dense_octree_matrices(folder, len(node_ids)):
+        log_event("load_octree_matrix_payload dense path", nodes=len(node_ids))
         for key in ("G", "L"):
             path = folder / f"{key}.npy"
             if path.exists():
@@ -247,6 +265,7 @@ def _load_octree_matrix_payload(folder: Path, model: ThermalGraphModel) -> dict[
             matrices["L"] = np.diag(G.sum(axis=1)) - G
         return matrices
 
+    log_event("load_octree_matrix_payload sparse path", nodes=len(node_ids))
     sparse_l = _load_sparse_laplacian(folder / "L_sparse.json")
     matrices["L"] = sparse_l if sparse_l is not None else _sparse_laplacian_from_model(model, node_ids)
     model.octree_graph_data.setdefault("warnings", [])

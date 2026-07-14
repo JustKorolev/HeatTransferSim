@@ -952,6 +952,51 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertTrue(sensors[0]["sensor_valid"])
         self.assertEqual(heaters[0]["assigned_sensor_id"], sensors[0]["node_id"])
 
+    def test_graph_build_allows_configured_multiple_heaters_per_sensor(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_body",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(10.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"body_panel": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="body_panel",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+        ]
+        heater_a = _mesh_object("heater_strip_A", "Copper", [4.0, -4.0, -4.0], [6.0, 4.0, 4.0])
+        heater_b = _mesh_object("heater_strip_B", "Copper", [4.0, 5.0, -4.0], [6.0, 7.0, 4.0])
+        sensor_obj = _mesh_object("temperature_probe_A", "Copper", [4.0, -1.0, -1.0], [6.0, 1.0, 1.0])
+        warnings: list[str] = []
+
+        result = build_graph(
+            leaves,
+            ContactReport(),
+            materials,
+            warnings=warnings,
+            role_components=[
+                RoleComponent(name="heater_A", kind="heater", objects=[heater_a]),
+                RoleComponent(name="heater_B", kind="heater", objects=[heater_b]),
+                RoleComponent(name="temperature_probe", kind="sensor", objects=[sensor_obj]),
+            ],
+            max_heaters_per_sensor=2,
+        )
+
+        sensors = [node for node in result.nodes if node["is_sensor"]]
+        heaters = [node for node in result.nodes if node["is_heater"]]
+        self.assertEqual(len(sensors), 1)
+        self.assertEqual(len(heaters), 2)
+        self.assertEqual(
+            sorted(heater["assigned_sensor_id"] for heater in heaters),
+            [sensors[0]["node_id"], sensors[0]["node_id"]],
+        )
+        self.assertEqual(sorted(sensors[0]["assigned_heater_ids"]), sorted(heater["node_id"] for heater in heaters))
+
     def test_graph_build_adds_near_contact_edges_for_near_face_cells(self) -> None:
         materials = self.make_materials()
         leaves = [

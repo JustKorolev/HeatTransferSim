@@ -13,6 +13,7 @@ try:  # pragma: no cover - import path depends on the installed Qt binding.
 except Exception:  # pragma: no cover
     from qtpy import QtGui
 
+from .diagnostics import log_event, log_exception
 from .graph_io import has_generated_role_contact_edges, load_graph_folder, save_graph_folder
 from .matrix_builder import build_matrices, refresh_geometry_edges, refresh_radiation_from_exposed_faces
 from .models import EdgeMode, ThermalGraphModel
@@ -583,16 +584,26 @@ class HeatTransferSimulationTab:
             return
         try:
             self.folder = Path.cwd() / "graphs" / name
+            log_event("simulation load_selected_graph start", folder=str(self.folder))
             self.model, self.matrices = load_graph_folder(self.folder)
+            log_event(
+                "simulation load_selected_graph loaded folder",
+                nodes=len(self.model.nodes),
+                edges=len(self.model.edges),
+                matrix_keys=sorted(self.matrices),
+            )
             self._load_params_from_folder()
             self._reset_enabled_io_from_params()
             self._refresh_sys_id_matrix_list()
             self._sync_component_options()
             self._reset_to_model_initial_temperatures()
+            log_event("simulation load_selected_graph before draw")
             self._draw_current(reset_camera=True)
+            log_event("simulation load_selected_graph after draw")
             self._refresh_sensor_readouts()
             self._status(f"Loaded simulation graph {name}.")
         except Exception as exc:
+            log_exception("simulation load_selected_graph failed", exc)
             self._status(str(exc), True)
 
     def initialize_simulation(self) -> None:
@@ -1284,6 +1295,12 @@ class HeatTransferSimulationTab:
     def _draw_current(self, reset_camera: bool) -> None:
         if self.model is None:
             return
+        log_event(
+            "simulation draw_current start",
+            nodes=len(self.model.nodes),
+            edges=len(self.model.edges),
+            reset_camera=reset_camera,
+        )
         self.viewer.set_toggles(
             False,
             False,
@@ -1300,8 +1317,10 @@ class HeatTransferSimulationTab:
             scalar_clim=self._temperature_clim(),
             scalar_bar_title="Temperature [K]",
         )
+        log_event("simulation draw_current viewer.draw complete")
         self._refresh_stats()
         self._refresh_sensor_readouts()
+        log_event("simulation draw_current complete")
 
     def _update_colors(self) -> None:
         updated = self.viewer.update_node_scalars(

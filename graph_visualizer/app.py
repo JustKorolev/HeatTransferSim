@@ -18,6 +18,7 @@ from .draw_tools import (
     next_node_id,
     preview_coords,
 )
+from .diagnostics import install_crash_diagnostics, log_event, log_exception
 from .graph_io import (
     load_conductance_matrix_from_folder,
     load_graph_folder,
@@ -47,6 +48,7 @@ from .role_assignment import (
     normalize_role_match_text,
 )
 from .role_pairing import (
+    DEFAULT_MAX_HEATERS_PER_SENSOR,
     DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM,
     assign_heater_to_sensor,
     recompute_heater_sensor_pairing,
@@ -61,6 +63,7 @@ class GraphVisualizerApp:
     """Interactive Qt/PyVista editor for lumped thermal graph folders."""
 
     def __init__(self) -> None:
+        self.crash_log_path = install_crash_diagnostics()
         self._load_qt()
         self.model = ThermalGraphModel(
             metadata=GraphMetadata(), material_library=default_material_library()
@@ -105,6 +108,7 @@ class GraphVisualizerApp:
         self._build_layout()
         self._apply_theme()
         self._refresh_all(reset_camera=True)
+        log_event("GraphVisualizerApp initialized", crash_log=str(self.crash_log_path))
 
     def _load_qt(self) -> None:
         try:
@@ -494,7 +498,9 @@ class GraphVisualizerApp:
         layout.addWidget(button)
         pair_form = self.QtWidgets.QFormLayout()
         self.pair_distance_input = self._double_spin(0.0, 1.0e9, DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM, 1.0)
+        self.max_heaters_per_sensor_input = self._int_spin(1, 1000000, DEFAULT_MAX_HEATERS_PER_SENSOR)
         pair_form.addRow("max pair gap mm", self.pair_distance_input)
+        pair_form.addRow("max heaters/sensor", self.max_heaters_per_sensor_input)
         layout.addLayout(pair_form)
         pair_button = self.QtWidgets.QPushButton("Recompute Heater-Sensor Pairs")
         pair_button.clicked.connect(self.recompute_heater_sensor_pairs)
@@ -788,9 +794,15 @@ class GraphVisualizerApp:
             if hasattr(self, "pair_distance_input")
             else DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM
         )
-        warnings = recompute_heater_sensor_pairing(self.model, distance)
+        max_heaters_per_sensor = (
+            int(self.max_heaters_per_sensor_input.value())
+            if hasattr(self, "max_heaters_per_sensor_input")
+            else DEFAULT_MAX_HEATERS_PER_SENSOR
+        )
+        warnings = recompute_heater_sensor_pairing(self.model, distance, max_heaters_per_sensor)
         self.model.octree_graph_data.setdefault("parameters", {})
         self.model.octree_graph_data["parameters"]["max_heater_sensor_pair_distance_mm"] = float(distance)
+        self.model.octree_graph_data["parameters"]["max_heaters_per_sensor"] = int(max_heaters_per_sensor)
         self._mark_dirty()
         if self.selected_node_id in self.model.nodes:
             self._load_node_into_form(self.model.nodes[int(self.selected_node_id)])
@@ -813,6 +825,12 @@ class GraphVisualizerApp:
             self.pair_distance_input.setValue(float(value))
         except (TypeError, ValueError):
             self.pair_distance_input.setValue(DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM)
+        if hasattr(self, "max_heaters_per_sensor_input"):
+            max_value = params.get("max_heaters_per_sensor", DEFAULT_MAX_HEATERS_PER_SENSOR)
+            try:
+                self.max_heaters_per_sensor_input.setValue(max(1, int(max_value)))
+            except (TypeError, ValueError):
+                self.max_heaters_per_sensor_input.setValue(DEFAULT_MAX_HEATERS_PER_SENSOR)
 
     def _visual_tag_snapshot(self, node_ids: list[int]) -> tuple[tuple[int, bool, bool, bool], ...]:
         return tuple(
@@ -1008,8 +1026,15 @@ class GraphVisualizerApp:
         if folder is None:
             return
         try:
+            log_event("editor load_graph start", folder=str(folder))
             self.model, _matrices = load_graph_folder(folder)
+            log_event(
+                "editor load_graph loaded folder",
+                nodes=len(self.model.nodes),
+                edges=len(self.model.edges),
+            )
             refresh_sensor_connected_nodes(self.model)
+            log_event("editor load_graph refreshed sensor connections")
             self.current_folder = folder
             self.autosave_enabled = True
             self.selected_node_id = None
@@ -1020,9 +1045,12 @@ class GraphVisualizerApp:
             self._sync_pair_distance_from_model()
             self.prepare_new_node()
             self._load_ui_state(folder)
+            log_event("editor load_graph before refresh_all")
             self._refresh_all(reset_camera=True)
+            log_event("editor load_graph refresh_all complete")
             self._set_status(f"Loaded graph folder {folder}.")
         except Exception as exc:
+            log_exception("editor load_graph failed", exc)
             self._set_status(str(exc), error=True)
 
     def save_graph(self) -> None:
@@ -1052,9 +1080,10 @@ class GraphVisualizerApp:
             raise_if_errors(errors, "Cannot save graph")
             matrices = save_graph_folder(self.model, folder)
             self._save_ui_state(folder)
+            matrix_shape = matrices["G"].shape if "G" in matrices else matrices["L"].shape
             self._set_status(
                 f"Saved {len(self.model.nodes)} nodes, {len(self.model.edges)} edges, "
-                f"matrix shape {matrices['G'].shape}."
+                f"matrix shape {matrix_shape}."
             )
             self.dirty = False
             self._update_window_title()
@@ -1271,6 +1300,11 @@ class GraphVisualizerApp:
                 if hasattr(self, "pair_distance_input")
                 else DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM
             ),
+            "max_heaters_per_sensor": (
+                int(self.max_heaters_per_sensor_input.value())
+                if hasattr(self, "max_heaters_per_sensor_input")
+                else DEFAULT_MAX_HEATERS_PER_SENSOR
+            ),
         }
         self._atomic_write_json(folder / "ui_state.json", state, indent=2)
 
@@ -1293,6 +1327,11 @@ class GraphVisualizerApp:
         if "max_heater_sensor_pair_distance_mm" in state and hasattr(self, "pair_distance_input"):
             try:
                 self.pair_distance_input.setValue(float(state["max_heater_sensor_pair_distance_mm"]))
+            except (TypeError, ValueError):
+                pass
+        if "max_heaters_per_sensor" in state and hasattr(self, "max_heaters_per_sensor_input"):
+            try:
+                self.max_heaters_per_sensor_input.setValue(max(1, int(state["max_heaters_per_sensor"])))
             except (TypeError, ValueError):
                 pass
         filters = state.get("filters", {})
@@ -1549,8 +1588,15 @@ class GraphVisualizerApp:
             )
 
     def _refresh_all(self, reset_camera: bool = False) -> None:
+        log_event(
+            "editor refresh_all start",
+            nodes=len(self.model.nodes),
+            edges=len(self.model.edges),
+            reset_camera=reset_camera,
+        )
         self._sync_filter_options()
         visible_node_ids = self._filtered_node_ids()
+        log_event("editor refresh_all visible nodes", visible=len(visible_node_ids))
         self._sync_selection_to_visible_nodes(visible_node_ids)
         self.viewer.set_hover_tooltips_enabled(not self._role_filters_active())
         self.viewer.set_toggles(
@@ -1563,7 +1609,9 @@ class GraphVisualizerApp:
         self.viewer.set_draw_mode(self.draw_mode_enabled)
         self.viewer.selected_node_id = self.selected_node_id
         self.viewer.selected_node_ids = set(self.selected_node_ids)
+        log_event("editor refresh_all before viewer.draw")
         self.viewer.draw(self.model, reset_camera=reset_camera, visible_node_ids=visible_node_ids)
+        log_event("editor refresh_all after viewer.draw")
         self.two_d_view.selected_node_ids = set(self.selected_node_ids)
         self.two_d_view.set_model(
             self.model,
@@ -1572,6 +1620,7 @@ class GraphVisualizerApp:
         )
         self._sync_simulation_from_editor()
         self._refresh_details()
+        log_event("editor refresh_all complete")
 
     def _sync_selection_to_visible_nodes(self, visible_node_ids: set[int]) -> None:
         if not self._role_filters_active():

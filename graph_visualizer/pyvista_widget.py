@@ -7,6 +7,7 @@ from typing import Any, Callable
 import numpy as np
 from matplotlib import colormaps
 
+from .diagnostics import log_event
 from .models import ThermalGraphModel
 from .role_warnings import has_role_warning
 
@@ -186,6 +187,12 @@ class GraphPyVistaWidget:
         scalar_clim: tuple[float, float] | None = None,
         scalar_bar_title: str = "Temperature [K]",
     ) -> None:
+        log_event(
+            "pyvista draw start",
+            nodes=len(model.nodes),
+            edges=len(model.edges),
+            reset_camera=reset_camera,
+        )
         camera_position = self.plotter.camera_position if not reset_camera else None
         preview_coords = list(getattr(self, "_last_preview_coords", []))
         preview_side = float(getattr(self, "_last_preview_side", 1.0))
@@ -204,7 +211,9 @@ class GraphPyVistaWidget:
         self._batched_node_geometry = {}
         self._batched_selected_actor = None
         visible = visible_node_ids if visible_node_ids is not None else set(model.ordered_node_ids())
+        log_event("pyvista draw visible prepared", visible=len(visible))
         if len(visible) > 1200:
+            log_event("pyvista draw using batched renderer", visible=len(visible))
             self._draw_batched(
                 model,
                 visible,
@@ -214,8 +223,11 @@ class GraphPyVistaWidget:
                 scalar_clim=scalar_clim,
                 scalar_bar_title=scalar_bar_title,
             )
+            log_event("pyvista draw batched mesh complete")
             self._draw_role_interface_overlays(model, visible)
+            log_event("pyvista draw overlays complete")
             self._finish_scene(committed_bounds, camera_position, reset_camera)
+            log_event("pyvista draw finish_scene complete")
             return
         scalar_bar_added = False
         for node_id in model.ordered_node_ids():
@@ -292,6 +304,7 @@ class GraphPyVistaWidget:
 
         self._draw_role_interface_overlays(model, visible)
         self._finish_scene(committed_bounds, camera_position, reset_camera)
+        log_event("pyvista draw complete")
         if preview_coords:
             self.show_preview(preview_coords, preview_side)
 
@@ -1022,6 +1035,7 @@ class GraphPyVistaWidget:
         scalar_clim: tuple[float, float] | None = None,
         scalar_bar_title: str = "Temperature [K]",
     ) -> None:
+        log_event("pyvista draw_batched build mesh start", visible=len(visible))
         points: list[list[float]] = []
         faces: list[int] = []
         cell_node_ids: list[int] = []
@@ -1072,7 +1086,13 @@ class GraphPyVistaWidget:
                     cell_scalars.append(scalar_value)
             self._batched_node_geometry[node_id] = (center, lengths)
         if not points:
+            log_event("pyvista draw_batched no valid points")
             return
+        log_event(
+            "pyvista draw_batched create PolyData",
+            points=len(points),
+            faces=len(cell_node_ids),
+        )
         mesh = self.pv.PolyData(
             np.asarray(points, dtype=float),
             np.asarray(faces, dtype=np.int64),
@@ -1092,6 +1112,7 @@ class GraphPyVistaWidget:
             **self._lit_mesh_kwargs(),
         }
         if node_scalar_values is not None:
+            log_event("pyvista draw_batched add_mesh scalar")
             self._batched_actor = self.plotter.add_mesh(
                 mesh,
                 scalars="temperature_K",
@@ -1102,6 +1123,7 @@ class GraphPyVistaWidget:
                 **mesh_kwargs,
             )
         else:
+            log_event("pyvista draw_batched add_mesh rgb")
             self._batched_actor = self.plotter.add_mesh(
                 mesh,
                 scalars="cell_rgb",
@@ -1112,9 +1134,12 @@ class GraphPyVistaWidget:
         self._enable_actor_pick(self._batched_actor)
         self._show_batched_selection(self.selected_node_ids)
         if self.show_edges:
+            log_event("pyvista draw_batched draw edges")
             self._draw_batched_edges(model, visible)
+        log_event("pyvista draw_batched complete")
 
     def _draw_batched_edges(self, model: ThermalGraphModel, visible: set[int]) -> None:
+        log_event("pyvista draw_batched_edges start", edges=len(model.edges), visible=len(visible))
         points: list[list[float]] = []
         lines: list[int] = []
         for edge in model.edges.values():
@@ -1125,7 +1150,9 @@ class GraphPyVistaWidget:
             points.append(list(model.nodes[edge.target].center))
             lines.extend([2, base, base + 1])
         if not points:
+            log_event("pyvista draw_batched_edges no points")
             return
+        log_event("pyvista draw_batched_edges create PolyData", line_points=len(points))
         mesh = self.pv.PolyData(
             np.asarray(points, dtype=float),
             lines=np.asarray(lines, dtype=np.int64),
@@ -1133,6 +1160,7 @@ class GraphPyVistaWidget:
         self._edge_actors.append(
             self.plotter.add_mesh(mesh, color=self._edge_color(), line_width=1, opacity=0.55)
         )
+        log_event("pyvista draw_batched_edges complete")
 
     def _show_batched_selection(self, node_ids: set[int] | int | None) -> None:
         if self._batched_selected_actor is not None:

@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 from .graph_builder import (
+    DEFAULT_MAX_HEATERS_PER_SENSOR,
     DEFAULT_ROLE_GROUP_GAP_MM,
     build_graph,
     collapse_role_components,
@@ -328,6 +329,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum AABB surface gap for automatically pairing each heater to one valid sensor.",
     )
     parser.add_argument(
+        "--max-heaters-per-sensor",
+        type=int,
+        default=DEFAULT_MAX_HEATERS_PER_SENSOR,
+        help=(
+            "Maximum number of valid heaters that automatic pairing may assign to one sensor. "
+            "The default preserves one-to-one pairing."
+        ),
+    )
+    parser.add_argument(
         "--no-detect-role-nodes",
         action="store_true",
         help="Disable CAD name/path detection for heater and sensor graph nodes.",
@@ -430,6 +440,7 @@ def _build_graph_with_optional_fallback(
         role_contact_tolerance_max_mm=float(getattr(args, "role_contact_tolerance_max_mm", args.role_contact_tolerance_mm)),
         role_contact_tolerance_growth_factor=float(getattr(args, "role_contact_tolerance_growth_factor", 2.0)),
         max_heater_sensor_pair_distance_mm=float(getattr(args, "max_heater_sensor_pair_distance_mm", 25.0)),
+        max_heaters_per_sensor=int(getattr(args, "max_heaters_per_sensor", DEFAULT_MAX_HEATERS_PER_SENSOR)),
     )
     return (leaves, graph_result, diagnostics) if include_diagnostics else (leaves, graph_result)
 

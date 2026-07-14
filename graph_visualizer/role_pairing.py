@@ -10,6 +10,7 @@ from .models import ThermalGraphModel
 
 
 DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM = 25.0
+DEFAULT_MAX_HEATERS_PER_SENSOR = 1
 
 
 def refresh_heater_power_deposition_nodes(model: ThermalGraphModel) -> list[str]:
@@ -123,11 +124,13 @@ def refresh_sensor_connected_nodes(model: ThermalGraphModel) -> list[str]:
 def recompute_heater_sensor_pairing(
     model: ThermalGraphModel,
     max_distance_mm: float = DEFAULT_MAX_HEATER_SENSOR_PAIR_DISTANCE_MM,
+    max_heaters_per_sensor: int = DEFAULT_MAX_HEATERS_PER_SENSOR,
 ) -> list[str]:
-    """Pair valid heaters to valid sensors using global one-to-one nearest AABB gaps."""
+    """Pair valid heaters to valid sensors using global nearest AABB gaps."""
     warnings = refresh_heater_power_deposition_nodes(model)
     warnings.extend(refresh_sensor_connected_nodes(model))
     max_distance = max(0.0, float(max_distance_mm))
+    sensor_capacity = max(1, int(max_heaters_per_sensor))
     heaters = [
         node
         for _, node in sorted(model.nodes.items())
@@ -152,13 +155,13 @@ def recompute_heater_sensor_pairing(
             if distance <= max_distance:
                 candidate_pairs.append((distance, int(heater.node_id), int(sensor.node_id), heater, sensor))
     assigned_heaters: set[int] = set()
-    assigned_sensors: set[int] = set()
+    assigned_sensor_counts: dict[int, int] = {}
     for distance, heater_id, sensor_id, heater, sensor in sorted(candidate_pairs, key=lambda item: (item[0], item[1], item[2])):
-        if heater_id in assigned_heaters or sensor_id in assigned_sensors:
+        if heater_id in assigned_heaters or assigned_sensor_counts.get(sensor_id, 0) >= sensor_capacity:
             continue
         _assign_pair(heater, sensor, distance)
         assigned_heaters.add(heater_id)
-        assigned_sensors.add(sensor_id)
+        assigned_sensor_counts[sensor_id] = assigned_sensor_counts.get(sensor_id, 0) + 1
         sensor.sensor_monitor_only = False
 
     _refresh_sensor_assignment_summaries(model)
