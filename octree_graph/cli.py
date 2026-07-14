@@ -21,8 +21,6 @@ import numpy as np
 from .graph_builder import (
     DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS,
     DEFAULT_ROLE_GROUP_GAP_MM,
-    DEFAULT_HEATER_NAME_PATTERNS,
-    DEFAULT_SENSOR_NAME_PATTERNS,
     build_graph,
     collapse_role_components,
 )
@@ -441,17 +439,23 @@ def _split_role_components(
     if getattr(args, "no_detect_role_nodes", False):
         args.role_components = []
         return scene, []
-    heater_patterns = list(getattr(args, "heater_name_pattern", None) or [])
-    sensor_patterns = list(getattr(args, "sensor_name_pattern", None) or [])
-    heater_patterns.extend(_substring_patterns(getattr(args, "heater_name_substring", None) or []))
-    sensor_patterns.extend(_substring_patterns(getattr(args, "sensor_name_substring", None) or []))
+    ignored_patterns = list(getattr(args, "heater_name_pattern", None) or []) + list(
+        getattr(args, "sensor_name_pattern", None) or []
+    )
+    if ignored_patterns:
+        warnings.append(
+            "Ignoring --heater-name-pattern/--sensor-name-pattern because role detection is configured "
+            "to use only --heater-name-substring and --sensor-name-substring."
+        )
+    heater_patterns = _substring_patterns(getattr(args, "heater_name_substring", None) or [])
+    sensor_patterns = _substring_patterns(getattr(args, "sensor_name_substring", None) or [])
     if not heater_patterns and not sensor_patterns:
         args.role_components = []
         return scene, []
     exclude_patterns = [] if getattr(args, "no_default_device_excludes", False) else list(DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS)
     exclude_patterns.extend(getattr(args, "device_exclude_name_pattern", None) or [])
     group_gap_mm = float(getattr(args, "role_node_group_gap_mm", DEFAULT_ROLE_GROUP_GAP_MM))
-    _body_objects, role_components = collapse_role_components(
+    body_objects, role_components = collapse_role_components(
         scene.objects,
         heater_patterns,
         sensor_patterns,
@@ -461,7 +465,7 @@ def _split_role_components(
     args.role_components = role_components
     if not role_components:
         warnings.append(
-            "No heater/sensor CAD components were detected from the configured name patterns; "
+            "No heater/sensor CAD components were detected from the configured name substrings; "
             "voxelization will include all mesh objects as body geometry."
         )
         return scene, []
@@ -469,10 +473,27 @@ def _split_role_components(
     extra = "" if len(role_components) <= 8 else f", ... and {len(role_components) - 8} more"
     warnings.append(
         f"Detected {len(role_components)} heater/sensor CAD component(s); "
-        f"their bounds will force local octree refinement and matching voxel cells will be tagged: "
+        f"their CAD bounds will be attached to body cells while voxelization uses {len(body_objects)} body object(s): "
         f"{role_names}{extra}."
     )
-    return scene, role_components
+    return _scene_with_objects(scene, body_objects), role_components
+
+
+def _scene_with_objects(scene: GltfScene, objects: list) -> GltfScene:
+    if not objects:
+        return GltfScene(
+            path=scene.path,
+            objects=[],
+            bounds_mm=scene.bounds_mm,
+            warnings=list(scene.warnings),
+        )
+    bounds = _bounds_for_objects(objects)
+    return GltfScene(
+        path=scene.path,
+        objects=list(objects),
+        bounds_mm=bounds if bounds is not None else scene.bounds_mm,
+        warnings=list(scene.warnings),
+    )
 
 
 def _substring_patterns(values: list[str]) -> list[str]:

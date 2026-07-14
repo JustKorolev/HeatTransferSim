@@ -1322,6 +1322,31 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertFalse(sensor.is_heater)
         self.assertTrue(sensor.is_sensor)
 
+    def test_octree_node_load_migrates_legacy_physical_device_role(self) -> None:
+        node = NodeProperties.from_dict(
+            {
+                "node_id": 23,
+                "coord": [23, 0, 0],
+                "node_type": "physical_heater_sensor",
+                "component_name": "legacy_role",
+                "physical_device": {
+                    "kind": "heater_sensor",
+                    "source_components": ["legacy_heater", "legacy_sensor"],
+                    "bounds_mm": {
+                        "min": [1.0, 2.0, 3.0],
+                        "max": [4.0, 5.0, 6.0],
+                    },
+                },
+            }
+        )
+
+        self.assertTrue(node.is_heater)
+        self.assertTrue(node.is_sensor)
+        self.assertEqual(node.source_components, ["legacy_heater", "legacy_sensor"])
+        self.assertEqual(node.role_source_components, ["legacy_heater", "legacy_sensor"])
+        self.assertEqual(node.source_bounds_mm["min"], [1.0, 2.0, 3.0])
+        self.assertEqual(node.source_bounds_mm["max"], [4.0, 5.0, 6.0])
+
     def test_octree_load_adjusts_duplicate_loaded_coords(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(
             {

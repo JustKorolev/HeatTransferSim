@@ -343,7 +343,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
                 [r"sensor"],
             )
 
-    def test_cli_role_component_split_requires_configured_patterns(self) -> None:
+    def test_cli_role_component_split_uses_only_configured_substrings(self) -> None:
         body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
         heater = _mesh_object("heater_strip_1", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
         sensor = _mesh_object("temperature_probe_A", "Copper", [-6.0, -1.0, -1.0], [-5.0, 1.0, 1.0])
@@ -372,14 +372,27 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(args.role_components, [])
         self.assertEqual(warnings, [])
 
-        args.heater_name_substring = ["heater_strip"]
-        args.sensor_name_substring = ["temperature-probe"]
+        args.heater_name_pattern = ["heater"]
+        args.sensor_name_pattern = ["temperature"]
+        warnings = []
         voxel_scene, role_components = _split_role_components(scene, args, warnings)
 
         self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel", "heater_strip_1", "temperature_probe_A"])
+        self.assertEqual(role_components, [])
+        self.assertEqual(args.role_components, [])
+        self.assertIn("Ignoring --heater-name-pattern/--sensor-name-pattern", warnings[0])
+
+        args.heater_name_pattern = []
+        args.sensor_name_pattern = []
+        args.heater_name_substring = ["heater_strip"]
+        args.sensor_name_substring = ["temperature-probe"]
+        warnings = []
+        voxel_scene, role_components = _split_role_components(scene, args, warnings)
+
+        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel"])
         self.assertEqual([component.kind for component in role_components], ["heater", "sensor"])
         self.assertEqual(args.role_components, role_components)
-        self.assertIn("bounds will force local octree refinement", warnings[0])
+        self.assertIn("voxelization uses 1 body object", warnings[0])
 
     def test_cli_legacy_physical_device_disable_flag_disables_role_detection(self) -> None:
         args = build_parser().parse_args(
@@ -430,7 +443,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         voxel_scene, role_components = _split_role_components(scene, args, warnings=[])
 
-        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel", "THERMAL_PICKUP_A"])
+        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel"])
         self.assertEqual(len(role_components), 1)
         self.assertEqual(role_components[0].kind, "sensor")
 

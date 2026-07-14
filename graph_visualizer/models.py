@@ -256,6 +256,22 @@ class NodeProperties:
         heater_control_data = copied.pop("heater_control", copied.pop("heaterControl", {}) or {}) or {}
         sensor_data = copied.pop("sensor", {}) or {}
         controller_data = copied.pop("controller", copied.pop("mimo_controller", {}) or {}) or {}
+        physical_device_data = copied.pop("physical_device", copied.pop("physicalDevice", {}) or {}) or {}
+        if isinstance(physical_device_data, dict):
+            device_kind = str(physical_device_data.get("kind", "")).lower()
+            if is_heater_value is None and "heater" in device_kind:
+                is_heater_value = True
+            if is_sensor_value is None and "sensor" in device_kind:
+                is_sensor_value = True
+            if not source_components:
+                source_components = list(physical_device_data.get("source_components", []) or [])
+            if not role_source_components:
+                role_source_components = list(source_components)
+            device_bounds = physical_device_data.get("bounds_mm", {}) or {}
+            if not source_bounds_mm and isinstance(device_bounds, dict):
+                source_bounds_mm = device_bounds
+            if not node_type and device_kind:
+                node_type = device_kind if device_kind in {"heater", "sensor"} else f"physical_{device_kind}"
         raw_had_sensor_control_mode = "sensor_control_mode" in copied
         raw_had_controller_setpoint = (
             "controller_setpoint_K" in copied
