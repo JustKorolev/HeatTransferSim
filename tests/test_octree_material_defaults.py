@@ -392,6 +392,48 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual([len(component.objects) for component in role_components], [2, 1])
         self.assertTrue(all("V_GUUTZ_SAFE_HEATER_HISPEC" in component.name for component in role_components))
 
+    def test_role_component_detection_uses_hierarchy_root_for_generic_leaf_names(self) -> None:
+        heater_leaf = _mesh_object("solid_body", "Copper", [10.0, 0.0, 0.0], [11.0, 1.0, 1.0])
+        heater_leaf.hierarchy_path = (
+            "Default",
+            "HISPEC-0030-A0005",
+            "V_GUUTZ_SAFE-HEATER_HISPEC#1522",
+            "solid_body",
+        )
+
+        body_objects, role_components = collapse_role_components(
+            [heater_leaf],
+            [r"safe_heater"],
+            [r"temp_sensor"],
+            group_gap_mm=10.0,
+        )
+
+        self.assertEqual(body_objects, [])
+        self.assertEqual([(component.kind, component.name) for component in role_components], [
+            ("heater", "V_GUUTZ_SAFE_HEATER_HISPEC#1522")
+        ])
+
+    def test_role_component_detection_prefers_deepest_hierarchy_role_match(self) -> None:
+        sensor_leaf = _mesh_object("solid_body", "Copper", [10.0, 0.0, 0.0], [11.0, 1.0, 1.0])
+        sensor_leaf.hierarchy_path = (
+            "Default",
+            "V_GUUTZ_SAFE-HEATER_HISPEC#1522",
+            "V_GUUTZ_TEMP-SENSOR_HISPEC#17",
+            "solid_body",
+        )
+
+        body_objects, role_components = collapse_role_components(
+            [sensor_leaf],
+            [r"safe_heater"],
+            [r"temp_sensor"],
+            group_gap_mm=10.0,
+        )
+
+        self.assertEqual(body_objects, [])
+        self.assertEqual([(component.kind, component.name) for component in role_components], [
+            ("sensor", "V_GUUTZ_TEMP_SENSOR_HISPEC#17")
+        ])
+
     def test_role_component_detection_rejects_ambiguous_heater_sensor_match(self) -> None:
         ambiguous = _mesh_object("sensor_heater_combo", "Copper", [0.0, 0.0, 0.0], [5.0, 5.0, 1.0])
 

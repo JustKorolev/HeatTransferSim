@@ -289,12 +289,7 @@ def collapse_role_components(
     body_objects: list[MeshObject] = []
     groups: dict[tuple[str, str], list[MeshObject]] = {}
     for obj in objects:
-        kind = classify_role_component_name(
-            _object_search_text(obj),
-            heater_patterns,
-            sensor_patterns,
-            exclude_patterns,
-        )
+        kind = _classify_role_component(obj, heater_patterns, sensor_patterns, exclude_patterns)
         if kind is None:
             body_objects.append(obj)
             continue
@@ -348,6 +343,32 @@ def _object_search_text(obj: MeshObject) -> str:
     if scene_path and scene_path != obj.name:
         return f"{scene_path} {obj.name}"
     return obj.name
+
+
+def _classify_role_component(
+    obj: MeshObject,
+    heater_patterns: list[str],
+    sensor_patterns: list[str],
+    exclude_patterns: list[str] | None = None,
+) -> str | None:
+    path = tuple(str(part) for part in (getattr(obj, "hierarchy_path", ()) or ()) if str(part))
+    if path:
+        if _matches_any_role_pattern(" ".join(path + (obj.name,)), exclude_patterns or []):
+            return None
+        deepest_kind: str | None = None
+        for part in path:
+            kind = classify_role_component_name(part, heater_patterns, sensor_patterns, exclude_patterns=None)
+            if kind is not None:
+                deepest_kind = kind
+        if deepest_kind is not None:
+            return deepest_kind
+        return classify_role_component_name(obj.name, heater_patterns, sensor_patterns, exclude_patterns=None)
+    return classify_role_component_name(_object_search_text(obj), heater_patterns, sensor_patterns, exclude_patterns)
+
+
+def _matches_any_role_pattern(name: str, patterns: list[str]) -> bool:
+    normalized = _normalize_role_name(name)
+    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
 
 
 def _hierarchy_role_group_name(
