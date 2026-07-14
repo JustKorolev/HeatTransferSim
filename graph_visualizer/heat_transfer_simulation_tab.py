@@ -13,7 +13,7 @@ try:  # pragma: no cover - import path depends on the installed Qt binding.
 except Exception:  # pragma: no cover
     from qtpy import QtGui
 
-from .graph_io import has_consolidated_role_edges, load_graph_folder, save_graph_folder
+from .graph_io import has_generated_role_contact_edges, load_graph_folder, save_graph_folder
 from .matrix_builder import build_matrices, refresh_geometry_edges, refresh_radiation_from_exposed_faces
 from .models import EdgeMode, ThermalGraphModel
 from .pyvista_widget import GraphPyVistaWidget
@@ -633,7 +633,7 @@ class HeatTransferSimulationTab:
         if (
             EdgeMode.normalize(self.model.metadata.edge_mode) == EdgeMode.AUTO.value
             and all(node.center_mm is not None and node.size_mm is not None for node in self.model.nodes.values())
-            and not has_consolidated_role_edges(self.model)
+            and not has_generated_role_contact_edges(self.model)
         ):
             refresh_geometry_edges(self.model)
             refresh_radiation_from_exposed_faces(self.model)

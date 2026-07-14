@@ -205,12 +205,12 @@ def _refresh_octree_auto_geometry(
 ) -> dict[str, np.ndarray]:
     if EdgeMode.normalize(model.metadata.edge_mode) != EdgeMode.AUTO.value:
         return matrices
-    if has_consolidated_role_edges(model):
+    if has_generated_role_contact_edges(model):
         model.octree_graph_data.setdefault("warnings", [])
         model.octree_graph_data["warnings"].append(
-            "Preserved loaded consolidated heater/sensor conductance edges."
+            "Preserved loaded heater/sensor role contact visual edges and rebuilt marker-only matrices."
         )
-        return matrices
+        return build_matrices(model)
     if not model.nodes:
         return matrices
     if any(node.center_mm is None or node.size_mm is None for node in model.nodes.values()):
@@ -227,12 +227,16 @@ def _refresh_octree_auto_geometry(
     return build_matrices(model)
 
 
-def has_consolidated_role_edges(model: ThermalGraphModel) -> bool:
+def has_generated_role_contact_edges(model: ThermalGraphModel) -> bool:
     return any(
-        str(edge.edge_type) == "consolidated_role_contact"
-        or str(edge.source_metadata) == "voxel_role_consolidation"
+        str(edge.edge_type) in {"consolidated_role_contact", "role_node_contact"}
+        or str(edge.source_metadata) in {"voxel_role_consolidation", "cad_role_node_contact"}
         for edge in model.edges.values()
     )
+
+
+def has_consolidated_role_edges(model: ThermalGraphModel) -> bool:
+    return has_generated_role_contact_edges(model)
 
 
 def _matrix_has_conduction(matrices: dict[str, np.ndarray]) -> bool:

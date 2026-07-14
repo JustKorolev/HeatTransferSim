@@ -264,6 +264,53 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(loaded_model.edges[(1, 20)].Gij_W_K, 0.123)
         self.assertAlmostEqual(loaded_matrices["G"][0, 1], 0.123)
 
+    def test_octree_load_preserves_dedicated_role_node_contact_edges(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="dedicated_heater"))
+        body = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        body.material = "Copper"
+        body.center_mm = (0.0, 0.0, 0.0)
+        body.size_mm = (10.0, 10.0, 10.0)
+        body.C_J_K = 10.0
+        heater = NodeProperties.with_material(20, (20, 0, 0), material="copper")
+        heater.material = "Copper"
+        heater.center_mm = (6.0, 0.0, 0.0)
+        heater.size_mm = (2.0, 8.0, 8.0)
+        heater.C_J_K = 5.0
+        heater.is_heater = True
+        heater.node_type = "heater"
+        heater.source_components = ["safe_heater_1"]
+        model.add_node(body)
+        model.add_node(heater)
+        model.set_edge(
+            1,
+            20,
+            0.123,
+            "cad_role_node_contact",
+            edge_type="role_node_contact",
+        )
+        model.octree_graph_data = {"graph_edges": []}
+
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "graph.json").write_text(
+                json.dumps(model.to_octree_graph_dict()),
+                encoding="utf-8",
+            )
+            np.save(folder / "C.npy", np.array([10.0, 5.0], dtype=float))
+            np.save(folder / "G.npy", np.array([[0.0, 0.123], [0.123, 0.0]], dtype=float))
+            np.save(folder / "L.npy", np.array([[0.123, -0.123], [-0.123, 0.123]], dtype=float))
+            (folder / "materials_used.json").write_text(
+                json.dumps(default_material_library()),
+                encoding="utf-8",
+            )
+
+            loaded_model, loaded_matrices = load_graph_folder(folder)
+
+        self.assertEqual(set(loaded_model.edges), {(1, 20)})
+        self.assertEqual(loaded_model.edges[(1, 20)].edge_type, "role_node_contact")
+        self.assertAlmostEqual(loaded_model.edges[(1, 20)].Gij_W_K, 0.123)
+        self.assertAlmostEqual(loaded_matrices["G"][0, 1], 0.0)
+
     def test_stale_octree_conductance_rebuilds_after_material_load(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="stale_conductance"))
         left = NodeProperties.with_material(1, (0, 0, 0), material="copper")

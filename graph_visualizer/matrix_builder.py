@@ -17,6 +17,8 @@ def refresh_auto_edges(model: ThermalGraphModel) -> None:
     coord_index = model.coord_index()
     seen: set[tuple[int, int]] = set()
     for node_id, node in model.nodes.items():
+        if _is_cad_role_node(node):
+            continue
         i, j, k = node.coord
         for neighbor_coord in (
             (i + 1, j, k),
@@ -28,6 +30,8 @@ def refresh_auto_edges(model: ThermalGraphModel) -> None:
         ):
             neighbor_id = coord_index.get(neighbor_coord)
             if neighbor_id is None:
+                continue
+            if _is_cad_role_node(model.nodes[neighbor_id]):
                 continue
             key = (min(node_id, neighbor_id), max(node_id, neighbor_id))
             if key in seen:
@@ -46,6 +50,8 @@ def refresh_geometry_edges(model: ThermalGraphModel, default_contact_G_W_K: floa
     tolerance_mm = 1.0e-7
     face_groups: dict[tuple[int, int], dict[str, list[tuple[int, tuple[float, float], tuple[float, float]]]]] = {}
     for node_id in node_ids:
+        if _is_cad_role_node(model.nodes[node_id]):
+            continue
         bounds = _node_bounds_mm(model.nodes[node_id])
         if bounds is None:
             continue
@@ -145,6 +151,8 @@ def exposed_areas_from_geometry_m2(model: ThermalGraphModel) -> dict[int, float]
     areas_mm2: dict[int, float] = {}
     face_groups: dict[tuple[int, int], dict[str, list[tuple[int, tuple[float, float], tuple[float, float]]]]] = {}
     for node_id in model.ordered_node_ids():
+        if _is_cad_role_node(model.nodes[node_id]):
+            continue
         bounds = _node_bounds_mm(model.nodes[node_id])
         if bounds is None:
             continue
@@ -318,8 +326,12 @@ def build_matrices(model: ThermalGraphModel) -> dict[str, np.ndarray]:
         node = model.nodes[int(node_id)]
         coords[row, :] = np.array(node.coord, dtype=int)
         C[row] = float(node.C_J_K)
-        Grad[row] = float(node.Grad_W_K)
-        G_rad[row] = float(node.G_rad_W_K if node.G_rad_W_K > 0.0 else node.Grad_W_K)
+        if _is_cad_role_node(node):
+            Grad[row] = 0.0
+            G_rad[row] = 0.0
+        else:
+            Grad[row] = float(node.Grad_W_K)
+            G_rad[row] = float(node.G_rad_W_K if node.G_rad_W_K > 0.0 else node.Grad_W_K)
         initial_temperature_K[row] = float(node.initial_temperature_K)
         is_heater[row] = bool(node.is_heater)
         heater_ids[row] = int(node.heater.heater_id)
@@ -334,6 +346,8 @@ def build_matrices(model: ThermalGraphModel) -> dict[str, np.ndarray]:
         has_cryocooler[row] = bool(node.has_cryocooler)
 
     for edge in model.edges.values():
+        if _is_visual_role_contact_edge(edge):
+            continue
         if edge.source not in index or edge.target not in index:
             continue
         i = index[edge.source]
@@ -364,3 +378,14 @@ def build_matrices(model: ThermalGraphModel) -> dict[str, np.ndarray]:
         "sensor_time_constant_s": sensor_time_constant_s,
         "has_cryocooler": has_cryocooler,
     }
+
+
+def _is_cad_role_node(node: Any) -> bool:
+    return bool(getattr(node, "is_cad_role_node", False))
+
+
+def _is_visual_role_contact_edge(edge: Any) -> bool:
+    return (
+        str(getattr(edge, "edge_type", "")) == "role_node_contact"
+        or str(getattr(edge, "source_metadata", "")) == "cad_role_node_contact"
+    )

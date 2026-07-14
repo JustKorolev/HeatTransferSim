@@ -22,6 +22,8 @@ def build_matrices(nodes: list[dict], edges: list[dict]) -> dict[str, np.ndarray
     )
     G = np.zeros((size, size), dtype=float)
     for edge in edges:
+        if _is_visual_role_contact_edge(edge):
+            continue
         i = index[int(edge["node_i"])]
         j = index[int(edge["node_j"])]
         value = max(0.0, float(edge["G_W_K"]))
@@ -36,3 +38,10 @@ def build_matrices(nodes: list[dict], edges: list[dict]) -> dict[str, np.ndarray
         "G_rad": G_rad,
         "initial_temperature_K": initial_temperature_K,
     }
+
+
+def _is_visual_role_contact_edge(edge: dict) -> bool:
+    return (
+        str(edge.get("edge_type", "")) == "role_node_contact"
+        or str(edge.get("source", edge.get("source_metadata", ""))) == "cad_role_node_contact"
+    )

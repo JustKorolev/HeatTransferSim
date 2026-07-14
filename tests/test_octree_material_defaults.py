@@ -29,6 +29,7 @@ from octree_graph.graph_builder import (
 )
 from octree_graph.load_gltf import GltfScene, MeshObject
 from octree_graph.load_contact_report import load_contact_report
+from octree_graph.matrix_builder import build_matrices as build_octree_matrices
 from octree_graph.materials import (
     DEFAULT_ASSIGNED_MATERIAL_NAME,
     Material,
@@ -413,9 +414,9 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             ("heater", "V_GUUTZ_SAFE_HEATER_HISPEC#1522")
         ])
 
-    def test_role_component_detection_prefers_deepest_hierarchy_role_match(self) -> None:
-        sensor_leaf = _mesh_object("solid_body", "Copper", [10.0, 0.0, 0.0], [11.0, 1.0, 1.0])
-        sensor_leaf.hierarchy_path = (
+    def test_role_component_detection_prefers_highest_hierarchy_role_match(self) -> None:
+        heater_leaf = _mesh_object("solid_body", "Copper", [10.0, 0.0, 0.0], [11.0, 1.0, 1.0])
+        heater_leaf.hierarchy_path = (
             "Default",
             "V_GUUTZ_SAFE-HEATER_HISPEC#1522",
             "V_GUUTZ_TEMP-SENSOR_HISPEC#17",
@@ -423,7 +424,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         )
 
         body_objects, role_components = collapse_role_components(
-            [sensor_leaf],
+            [heater_leaf],
             [r"safe_heater"],
             [r"temp_sensor"],
             group_gap_mm=10.0,
@@ -431,7 +432,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual(body_objects, [])
         self.assertEqual([(component.kind, component.name) for component in role_components], [
-            ("sensor", "V_GUUTZ_TEMP_SENSOR_HISPEC#17")
+            ("heater", "V_GUUTZ_SAFE_HEATER_HISPEC#1522")
         ])
 
     def test_role_component_detection_rejects_ambiguous_heater_sensor_match(self) -> None:
@@ -584,19 +585,19 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(len(role_components), 1)
         self.assertEqual(role_components[0].kind, "sensor")
 
-    def test_graph_build_tags_voxelized_heater_cell(self) -> None:
+    def test_graph_build_adds_dedicated_heater_node_for_detected_role(self) -> None:
         materials = self.make_materials()
         leaves = [
             OctreeCell(
-                cell_id="cell_heater",
+                cell_id="cell_body",
                 parent_id=None,
                 children_ids=[],
                 level=0,
-                center_mm=(5.5, 0.0, 0.0),
-                size_mm=(1.0, 4.0, 4.0),
-                occupancy={"heater_strip_1": 1.0},
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"body_panel": 1.0},
                 material_fractions={"Copper": 1.0},
-                dominant_component="heater_strip_1",
+                dominant_component="body_panel",
                 dominant_material="Copper",
                 confidence="high",
             )
@@ -612,30 +613,24 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             role_components=[role_component],
         )
 
-        self.assertEqual(len(result.nodes), 1)
-        heater_node = result.nodes[0]
+        self.assertEqual(len(result.nodes), 2)
+        body_node = next(node for node in result.nodes if not node["is_heater"])
+        heater_node = next(node for node in result.nodes if node["is_heater"])
         self.assertTrue(heater_node["is_heater"])
         self.assertFalse(heater_node["is_sensor"])
         self.assertEqual(heater_node["role_source_components"], ["heater_strip_1"])
-        self.assertGreater(heater_node["C_J_K"], 0.0)
-        self.assertEqual(result.edges, [])
+        self.assertEqual(heater_node["power_deposition_node_ids"], [body_node["node_id"]])
+        self.assertEqual(heater_node["mass_kg"], 0.0)
+        self.assertEqual(heater_node["volume_m3"], 0.0)
+        self.assertEqual(heater_node["C_J_K"], 1.0)
+        self.assertTrue(heater_node["C_manual_override"])
+        self.assertEqual(len(result.edges), 1)
+        self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
+        self.assertEqual(result.edges[0]["G_W_K"], 0.0)
 
-    def test_graph_build_consolidates_same_part_heater_voxels_and_preserves_external_edges(self) -> None:
+    def test_graph_build_uses_one_dedicated_role_node_for_multi_object_heater(self) -> None:
         materials = self.make_materials()
         leaves = [
-            OctreeCell(
-                cell_id="cell_heater_left",
-                parent_id=None,
-                children_ids=[],
-                level=0,
-                center_mm=(0.0, 0.0, 0.0),
-                size_mm=(10.0, 10.0, 10.0),
-                occupancy={"safe_heater_1": 1.0},
-                material_fractions={"Copper": 1.0},
-                dominant_component="safe_heater_1",
-                dominant_material="Copper",
-                confidence="high",
-            ),
             OctreeCell(
                 cell_id="cell_body",
                 parent_id=None,
@@ -648,20 +643,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
                 dominant_component="body_panel",
                 dominant_material="Copper",
                 confidence="high",
-            ),
-            OctreeCell(
-                cell_id="cell_heater_right",
-                parent_id=None,
-                children_ids=[],
-                level=0,
-                center_mm=(20.0, 0.0, 0.0),
-                size_mm=(10.0, 10.0, 10.0),
-                occupancy={"safe_heater_2": 1.0},
-                material_fractions={"Copper": 1.0},
-                dominant_component="safe_heater_2",
-                dominant_material="Copper",
-                confidence="high",
-            ),
+            )
         ]
         heater_left = _mesh_object("safe_heater_1", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
         heater_right = _mesh_object("safe_heater_2", "Copper", [15.0, -5.0, -5.0], [25.0, 5.0, 5.0])
@@ -683,13 +665,19 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         heater = heater_nodes[0]
         body = body_nodes[0]
         self.assertEqual(heater["component_name"], "safe_heater")
-        self.assertEqual(heater["source_node_ids"], [0, 2])
         self.assertEqual(sorted(heater["source_components"]), ["safe_heater_1", "safe_heater_2"])
+        self.assertNotIn("source_node_ids", heater)
+        self.assertNotIn("source_cell_ids", heater)
+        self.assertEqual(heater["power_deposition_node_ids"], [body["node_id"]])
         self.assertEqual(len(result.edges), 1)
         edge = result.edges[0]
         self.assertEqual({edge["node_i"], edge["node_j"]}, {heater["node_id"], body["node_id"]})
-        self.assertEqual(edge["edge_type"], "consolidated_role_contact")
-        self.assertGreater(edge["G_W_K"], 0.0)
+        self.assertEqual(edge["edge_type"], "role_node_contact")
+        self.assertEqual(edge["G_W_K"], 0.0)
+        matrices = build_octree_matrices(result.nodes, result.edges)
+        body_row = list(matrices["node_ids"]).index(body["node_id"])
+        heater_row = list(matrices["node_ids"]).index(heater["node_id"])
+        self.assertEqual(matrices["G"][body_row, heater_row], 0.0)
 
     def test_graph_build_adds_dedicated_role_node_when_detected_component_has_no_voxel_cells(self) -> None:
         materials = self.make_materials()
@@ -728,7 +716,6 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(heater_nodes[0]["source_components"], ["heater_strip_1"])
         self.assertEqual(heater_nodes[0]["role_source_components"], ["heater_strip_1"])
         self.assertEqual(result.edges, [])
-        self.assertIn("produced 0 solid voxel cells", warnings[0])
         self.assertIn("0 contact edges", " ".join(warnings))
 
     def test_graph_build_dedicated_role_node_survives_mesh_volume_failure(self) -> None:
@@ -780,8 +767,9 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         sensor_nodes = [node for node in result.nodes if node["is_sensor"]]
         self.assertEqual(len(sensor_nodes), 1)
         self.assertEqual(sensor_nodes[0]["component_name"], "sensor_probe")
-        self.assertGreater(sensor_nodes[0]["volume_m3"], 0.0)
-        self.assertGreater(sensor_nodes[0]["C_J_K"], 0.0)
+        self.assertEqual(sensor_nodes[0]["volume_m3"], 0.0)
+        self.assertEqual(sensor_nodes[0]["mass_kg"], 0.0)
+        self.assertEqual(sensor_nodes[0]["C_J_K"], 1.0)
 
     def test_graph_build_connects_dedicated_sensor_node_to_contacting_body_cell(self) -> None:
         materials = self.make_materials()
@@ -820,37 +808,11 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(len(result.edges), 1)
         self.assertEqual({result.edges[0]["node_i"], result.edges[0]["node_j"]}, {0, sensor["node_id"]})
         self.assertEqual(result.edges[0]["edge_type"], "role_node_contact")
-        self.assertGreater(result.edges[0]["G_W_K"], 0.0)
+        self.assertEqual(result.edges[0]["G_W_K"], 0.0)
 
-    def test_graph_build_embedded_sensor_uses_consolidated_heater_body_neighbors(self) -> None:
+    def test_graph_build_pairs_dedicated_heater_and_sensor_nodes_using_body_contacts(self) -> None:
         materials = self.make_materials()
         leaves = [
-            OctreeCell(
-                cell_id="cell_heater_left",
-                parent_id=None,
-                children_ids=[],
-                level=0,
-                center_mm=(0.0, 0.0, 0.0),
-                size_mm=(10.0, 10.0, 10.0),
-                occupancy={"heater_strip_1": 1.0},
-                material_fractions={"Copper": 1.0},
-                dominant_component="heater_strip_1",
-                dominant_material="Copper",
-                confidence="high",
-            ),
-            OctreeCell(
-                cell_id="cell_heater_right",
-                parent_id=None,
-                children_ids=[],
-                level=0,
-                center_mm=(-10.0, 0.0, 0.0),
-                size_mm=(10.0, 10.0, 10.0),
-                occupancy={"heater_strip_2": 1.0},
-                material_fractions={"Copper": 1.0},
-                dominant_component="heater_strip_2",
-                dominant_material="Copper",
-                confidence="high",
-            ),
             OctreeCell(
                 cell_id="cell_body",
                 parent_id=None,
@@ -865,10 +827,9 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
                 confidence="high",
             ),
         ]
-        heater_obj = _mesh_object("heater_strip_1", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
-        heater_obj_2 = _mesh_object("heater_strip_2", "Copper", [-15.0, -5.0, -5.0], [-5.0, 5.0, 5.0])
-        sensor_obj = _mesh_object("temperature_probe_A", "Copper", [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
-        heater_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj, heater_obj_2])
+        heater_obj = _mesh_object("heater_strip_1", "Copper", [4.0, -4.0, -4.0], [6.0, 4.0, 4.0])
+        sensor_obj = _mesh_object("temperature_probe_A", "Copper", [4.0, -1.0, -1.0], [6.0, 1.0, 1.0])
+        heater_component = RoleComponent(name="heater_strip", kind="heater", objects=[heater_obj])
         sensor_component = RoleComponent(name="temperature_probe", kind="sensor", objects=[sensor_obj])
         warnings: list[str] = []
 
@@ -886,11 +847,10 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(len(sensors), 1)
         self.assertEqual(len(heaters), 1)
         self.assertEqual(len(bodies), 1)
-        self.assertEqual(sorted(heaters[0]["source_cell_ids"]), ["cell_heater_left", "cell_heater_right"])
         self.assertEqual(sensors[0]["sensor_connected_node_ids"], [bodies[0]["node_id"]])
+        self.assertEqual(heaters[0]["power_deposition_node_ids"], [bodies[0]["node_id"]])
         self.assertTrue(sensors[0]["sensor_valid"])
         self.assertEqual(heaters[0]["assigned_sensor_id"], sensors[0]["node_id"])
-        self.assertIn("heater-adjacent body node", " ".join(warnings))
 
     def test_graph_build_adds_near_contact_edges_for_near_face_cells(self) -> None:
         materials = self.make_materials()
