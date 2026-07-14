@@ -447,6 +447,37 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(len(role_components), 1)
         self.assertEqual(role_components[0].kind, "sensor")
 
+    def test_cli_role_substrings_are_not_blocked_by_default_excludes(self) -> None:
+        body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        sensor = _mesh_object(
+            "V_GUUTZ_EXTERNAL-SENSOR-HEATER-BREAKOUT-PCB_HISPEC",
+            "Copper",
+            [-6.0, -1.0, -1.0],
+            [-5.0, 1.0, 1.0],
+        )
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[body, sensor],
+            bounds_mm=(np.array([-6.0, -5.0, -5.0]), np.array([5.0, 5.0, 5.0])),
+            warnings=[],
+        )
+        args = SimpleNamespace(
+            no_detect_role_nodes=False,
+            heater_name_pattern=[],
+            heater_name_substring=[],
+            sensor_name_pattern=[],
+            sensor_name_substring=["external-sensor-heater-breakout-pcb"],
+            device_exclude_name_pattern=[],
+            no_default_device_excludes=False,
+            role_node_group_gap_mm=10.0,
+        )
+
+        voxel_scene, role_components = _split_role_components(scene, args, warnings=[])
+
+        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel"])
+        self.assertEqual(len(role_components), 1)
+        self.assertEqual(role_components[0].kind, "sensor")
+
     def test_graph_build_tags_voxelized_heater_cell(self) -> None:
         materials = self.make_materials()
         leaves = [

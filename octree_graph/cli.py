@@ -19,7 +19,6 @@ from typing import Any
 import numpy as np
 
 from .graph_builder import (
-    DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS,
     DEFAULT_ROLE_GROUP_GAP_MM,
     build_graph,
     collapse_role_components,
@@ -307,7 +306,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-default-device-excludes",
         action="store_true",
-        help="Disable default heater/sensor CAD exclusions for cables, connectors, breakout boards, and PCBs.",
+        help=(
+            "Deprecated compatibility flag. Default heater/sensor CAD exclusions are no longer "
+            "applied; use --device-exclude-name-pattern for explicit exclusions."
+        ),
     )
     parser.add_argument(
         "--role-node-group-gap-mm",
@@ -452,8 +454,7 @@ def _split_role_components(
     if not heater_patterns and not sensor_patterns:
         args.role_components = []
         return scene, []
-    exclude_patterns = [] if getattr(args, "no_default_device_excludes", False) else list(DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS)
-    exclude_patterns.extend(getattr(args, "device_exclude_name_pattern", None) or [])
+    exclude_patterns = list(getattr(args, "device_exclude_name_pattern", None) or [])
     group_gap_mm = float(getattr(args, "role_node_group_gap_mm", DEFAULT_ROLE_GROUP_GAP_MM))
     body_objects, role_components = collapse_role_components(
         scene.objects,
