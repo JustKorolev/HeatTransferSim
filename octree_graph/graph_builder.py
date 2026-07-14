@@ -275,22 +275,27 @@ def collapse_role_components(
 ) -> tuple[list[MeshObject], list[RoleComponent]]:
     body_objects: list[MeshObject] = []
     groups: dict[tuple[str, str], list[MeshObject]] = {}
+    hierarchy_groups: set[tuple[str, str]] = set()
     for obj in objects:
         kind = _classify_role_component(obj, heater_patterns, sensor_patterns, exclude_patterns)
         if kind is None:
             body_objects.append(obj)
             continue
-        group_name = _hierarchy_role_group_name(
+        hierarchy_group_name = _hierarchy_role_group_name(
             obj,
             kind,
             heater_patterns,
             sensor_patterns,
             exclude_patterns,
-        ) or _role_group_name(obj.name)
-        groups.setdefault((kind, group_name), []).append(obj)
+        )
+        group_name = hierarchy_group_name or _role_group_name(obj.name)
+        group_key = (kind, group_name)
+        groups.setdefault(group_key, []).append(obj)
+        if hierarchy_group_name is not None:
+            hierarchy_groups.add(group_key)
     components: list[RoleComponent] = []
     for (kind, name), members in sorted(groups.items(), key=lambda item: (item[0][0], item[0][1])):
-        clusters = _spatial_role_clusters(members, group_gap_mm)
+        clusters = [members] if (kind, name) in hierarchy_groups else _spatial_role_clusters(members, group_gap_mm)
         for cluster_index, cluster in enumerate(clusters, start=1):
             component_name = name if len(clusters) == 1 else f"{name}_{cluster_index}"
             components.append(RoleComponent(name=component_name, kind=kind, objects=cluster))
