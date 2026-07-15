@@ -85,6 +85,9 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         voxel_batch_size=args.voxel_batch_size,
         crowded_component_refine_count=args.crowded_component_refine_count,
         crowded_component_refine_distance_mm=args.crowded_component_refine_distance_mm,
+        adaptive_refine_priority=args.adaptive_refine_priority,
+        multi_surface_refine_count=args.multi_surface_refine_count,
+        surface_complexity_refine_threshold=args.surface_complexity_refine_threshold,
         role_refine_component_names=_role_refine_component_names(role_components),
         role_refine_distance_mm=args.role_refine_distance_mm,
         role_refine_max_depth=args.role_refine_max_depth,
@@ -175,6 +178,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help=(
             "Padding around each octree cell when counting nearby components for crowded-region refinement."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-refine-priority",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use geometry-risk scoring so max_leaf_cells budget is spent on ambiguous/high-detail regions first."
+        ),
+    )
+    parser.add_argument(
+        "--multi-surface-refine-count",
+        type=int,
+        default=2,
+        help=(
+            "Refine cells whose near-surface neighborhood contains surfaces from at least this many components. "
+            "This targets narrow gaps and false-contact-prone regions."
+        ),
+    )
+    parser.add_argument(
+        "--surface-complexity-refine-threshold",
+        type=int,
+        default=64,
+        help=(
+            "Refine cells whose local triangle candidate count reaches this threshold. "
+            "Use 0 to disable triangle-density refinement."
         ),
     )
     parser.add_argument(

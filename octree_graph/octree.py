@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections import Counter, deque
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+import heapq
 from itertools import product
 import math
 import os
@@ -51,6 +52,9 @@ class OctreeParams:
     voxel_batch_size: int = 64
     crowded_component_refine_count: int = 0
     crowded_component_refine_distance_mm: float = 0.0
+    adaptive_refine_priority: bool = True
+    multi_surface_refine_count: int = 2
+    surface_complexity_refine_threshold: int = 64
     role_refine_component_names: tuple[str, ...] = field(default_factory=tuple)
     role_refine_distance_mm: float = 0.0
     role_refine_max_depth: int | None = None
@@ -95,6 +99,8 @@ class CellClassification:
     candidate_mesh_ids: set[int]
     crowded_component_count: int
     role_component_count: int
+    surface_component_count: int
+    near_surface_component_count: int
     material_ids: set[str]
     part_ids: set[str]
     occupancy: dict[str, float]
@@ -103,6 +109,8 @@ class CellClassification:
     dominant_material: str | None
     volume_fraction: float | None
     acceptance_reason: str
+    refinement_score: float = 0.0
+    refinement_reasons: tuple[str, ...] = field(default_factory=tuple)
     warnings: list[str] = field(default_factory=list)
     triangle_candidate_tests: int = 0
     triangle_intersection_tests: int = 0
@@ -137,6 +145,9 @@ class OctreeDiagnostics:
     cells_bbox_only_hit: int = 0
     cells_crowded_component_hit: int = 0
     cells_role_component_hit: int = 0
+    cells_multi_surface_hit: int = 0
+    cells_surface_complexity_hit: int = 0
+    cells_refined_by_reason: dict[str, int] = field(default_factory=dict)
     triangle_candidate_tests: int = 0
     triangle_intersection_tests: int = 0
     max_depth_reached: int = 0
@@ -161,6 +172,9 @@ class OctreeDiagnostics:
             "cells_bbox_only_hit": self.cells_bbox_only_hit,
             "cells_crowded_component_hit": self.cells_crowded_component_hit,
             "cells_role_component_hit": self.cells_role_component_hit,
+            "cells_multi_surface_hit": self.cells_multi_surface_hit,
+            "cells_surface_complexity_hit": self.cells_surface_complexity_hit,
+            "cells_refined_by_reason": dict(sorted(self.cells_refined_by_reason.items())),
             "triangle_candidate_tests": self.triangle_candidate_tests,
             "triangle_intersection_tests": self.triangle_intersection_tests,
             "max_depth_reached": self.max_depth_reached,
@@ -252,8 +266,23 @@ def build_octree(
         diagnostics.root_bounds_mm = {"min": mins.astype(float).tolist(), "max": maxs.astype(float).tolist()}
         diagnostics.root_cell_size_mm = root[1].astype(float).tolist()
 
-    queue = deque([_CellWorkItem("cell_0", tuple(float(v) for v in root[0]), tuple(float(v) for v in root[1]), 0, None)])
+    queue: list[tuple[float, int, _CellWorkItem]] = []
     counter = 1
+    push_counter = 0
+
+    def push_cell(work_item: _CellWorkItem, priority: float = 0.0) -> None:
+        nonlocal push_counter
+        heap_priority = -float(priority) if bool(getattr(params, "adaptive_refine_priority", True)) else 0.0
+        heapq.heappush(queue, (heap_priority, push_counter, work_item))
+        push_counter += 1
+
+    def pop_cell() -> _CellWorkItem:
+        return heapq.heappop(queue)[2]
+
+    push_cell(
+        _CellWorkItem("cell_0", tuple(float(v) for v in root[0]), tuple(float(v) for v in root[1]), 0, None),
+        priority=0.0,
+    )
 
     def append_leaf(
         cell_id: str,
@@ -329,6 +358,28 @@ def build_octree(
         )
         crowded_component_refinement = _needs_crowded_component_refinement(classification, params)
         role_component_refinement = _needs_role_component_refinement(classification, params, level)
+        multi_surface_refinement = _needs_multi_surface_refinement(classification, params)
+        surface_complexity_refinement = _needs_surface_complexity_refinement(classification, params)
+        if diagnostics is not None:
+            if multi_surface_refinement:
+                diagnostics.cells_multi_surface_hit += 1
+            if surface_complexity_refinement:
+                diagnostics.cells_surface_complexity_hit += 1
+        refinement_score, refinement_reasons = _refinement_priority(
+            classification,
+            params,
+            size_mm,
+            mixed_parts=mixed_parts,
+            mixed_materials=mixed_materials,
+            high_contrast=high_contrast,
+            crowded_component_refinement=crowded_component_refinement,
+            role_component_refinement=role_component_refinement,
+            multi_surface_refinement=multi_surface_refinement,
+            surface_complexity_refinement=surface_complexity_refinement,
+            needs_surface_refinement=needs_surface_refinement,
+        )
+        classification.refinement_score = refinement_score
+        classification.refinement_reasons = tuple(refinement_reasons)
         effective_queue_len = len(queue) + int(remaining_batch_items)
         budget_allows_children = (
             params.max_leaf_cells is None
@@ -348,6 +399,8 @@ def build_octree(
             or high_contrast
             or crowded_component_refinement
             or role_component_refinement
+            or multi_surface_refinement
+            or surface_complexity_refinement
             or (needs_surface_refinement and float(max(size_mm)) > params.min_cell_size_mm)
             or (
                 classification.occupied
@@ -358,19 +411,22 @@ def build_octree(
         if should_subdivide:
             if diagnostics is not None:
                 diagnostics.cells_subdivided += 1
+                for reason in refinement_reasons:
+                    diagnostics.cells_refined_by_reason[reason] = diagnostics.cells_refined_by_reason.get(reason, 0) + 1
             quarter = size_mm * 0.25
             child_size = size_mm * 0.5
             for signs in product((-1.0, 1.0), repeat=3):
                 child_id = f"cell_{counter}"
                 counter += 1
-                queue.append(
+                push_cell(
                     _CellWorkItem(
                         child_id,
                         tuple(float(v) for v in center_mm + quarter * np.array(signs)),
                         tuple(float(v) for v in child_size),
                         level + 1,
                         work_item.cell_id,
-                    )
+                    ),
+                    priority=refinement_score + 0.01 * float(level + 1),
                 )
             return
 
@@ -397,7 +453,7 @@ def build_octree(
 
     if worker_count <= 1:
         while queue:
-            work_item = queue.popleft()
+            work_item = pop_cell()
             classification = _classify_cell(
                 scene.objects,
                 triangle_indices,
@@ -421,7 +477,7 @@ def build_octree(
                 while queue:
                     batch: list[_CellWorkItem] = []
                     while queue and len(batch) < batch_size:
-                        batch.append(queue.popleft())
+                        batch.append(pop_cell())
                     classifications = list(
                         executor.map(
                             _classify_cell_work_item,
@@ -458,7 +514,7 @@ def build_octree(
                     remaining_batch_items=len(batch) - index - 1,
                 )
             while queue:
-                work_item = queue.popleft()
+                work_item = pop_cell()
                 classification = _classify_cell(
                     scene.objects,
                     triangle_indices,
@@ -599,6 +655,10 @@ def _record_leaf_diagnostics(
                 "bbox_only_hit": classification.bbox_only_hit,
                 "crowded_component_count": int(classification.crowded_component_count),
                 "role_component_count": int(classification.role_component_count),
+                "surface_component_count": int(classification.surface_component_count),
+                "near_surface_component_count": int(classification.near_surface_component_count),
+                "refinement_score": float(classification.refinement_score),
+                "refinement_reasons": list(classification.refinement_reasons),
                 "accepted_by_exact_geometry": classification.occupied,
                 "accepted_by_bbox_fallback": False,
             }
@@ -709,6 +769,8 @@ def _classify_cell(
     surface_mesh_ids = {id(obj) for obj in surface_objects}
     inside_mesh_ids = {id(obj) for obj in watertight_candidates if inside_counts.get(obj.name, 0) > 0}
     near_surface_mesh_ids = {id(obj) for obj in near_surface_objects}
+    surface_component_count = len({obj.name for obj in surface_objects})
+    near_surface_component_count = len({obj.name for obj in surface_objects + near_surface_objects})
     hit_objects = _unique_objects(surface_objects + [obj for obj in watertight_candidates if inside_counts.get(obj.name, 0) > 0])
     component_counts: Counter[str] = Counter()
     for obj in surface_objects:
@@ -758,6 +820,8 @@ def _classify_cell(
         candidate_mesh_ids=candidate_mesh_ids,
         crowded_component_count=len({id(obj) for obj in crowded_objects}),
         role_component_count=len({id(obj) for obj in role_refine_objects}),
+        surface_component_count=surface_component_count,
+        near_surface_component_count=near_surface_component_count,
         material_ids=set(material_fractions),
         part_ids={obj.name for obj in hit_objects},
         occupancy=occupancy,
@@ -786,6 +850,72 @@ def _needs_crowded_component_refinement(
 ) -> bool:
     threshold = int(params.crowded_component_refine_count)
     return threshold > 0 and int(classification.crowded_component_count) >= threshold
+
+
+def _needs_multi_surface_refinement(
+    classification: CellClassification,
+    params: OctreeParams,
+) -> bool:
+    threshold = int(getattr(params, "multi_surface_refine_count", 0))
+    return threshold > 0 and int(classification.near_surface_component_count) >= threshold
+
+
+def _needs_surface_complexity_refinement(
+    classification: CellClassification,
+    params: OctreeParams,
+) -> bool:
+    threshold = int(getattr(params, "surface_complexity_refine_threshold", 0))
+    return threshold > 0 and int(classification.triangle_candidate_tests) >= threshold
+
+
+def _refinement_priority(
+    classification: CellClassification,
+    params: OctreeParams,
+    size_mm: np.ndarray,
+    *,
+    mixed_parts: bool,
+    mixed_materials: bool,
+    high_contrast: bool,
+    crowded_component_refinement: bool,
+    role_component_refinement: bool,
+    multi_surface_refinement: bool,
+    surface_complexity_refinement: bool,
+    needs_surface_refinement: bool,
+) -> tuple[float, tuple[str, ...]]:
+    score = 0.0
+    reasons: list[str] = []
+
+    def add(reason: str, value: float) -> None:
+        nonlocal score
+        score += float(value)
+        reasons.append(reason)
+
+    if role_component_refinement:
+        add("role_region", 120.0)
+    if multi_surface_refinement:
+        add("multi_surface_ambiguity", 90.0 + 5.0 * float(classification.near_surface_component_count))
+    if surface_complexity_refinement:
+        add("surface_complexity", min(80.0, 10.0 + 0.25 * float(classification.triangle_candidate_tests)))
+    if crowded_component_refinement:
+        add("crowded_component_bounds", 30.0 + 2.0 * float(classification.crowded_component_count))
+    if mixed_parts:
+        add("mixed_parts", 45.0)
+    if mixed_materials:
+        add("mixed_materials", 35.0)
+    if high_contrast:
+        add("material_contrast", 25.0)
+    if needs_surface_refinement:
+        add("surface_or_near_surface", 20.0)
+    if classification.occupied and float(max(size_mm)) > float(params.max_cell_size_mm):
+        add("above_max_cell_size", 10.0)
+    if classification.bbox_only_hit:
+        add("bbox_only_candidate", 5.0)
+    if classification.inside_hit and not classification.surface_hit and classification.near_surface_component_count <= 1:
+        score -= 15.0
+        reasons.append("simple_inside_deprioritized")
+    if not reasons:
+        reasons.append("default")
+    return max(0.0, score), tuple(reasons)
 
 
 def _needs_role_component_refinement(
