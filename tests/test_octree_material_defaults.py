@@ -1545,6 +1545,80 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual(matches.tolist(), [0, 1])
 
+    def test_triangle_index_large_query_filters_bounds_in_chunks(self) -> None:
+        triangles = np.array(
+            [
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
+                [[10.0, 10.0, 0.0], [11.0, 10.0, 0.0], [10.0, 11.0, 0.0]],
+                [[12.0, 10.0, 0.0], [13.0, 10.0, 0.0], [12.0, 11.0, 0.0]],
+                [[20.0, 20.0, 0.0], [21.0, 20.0, 0.0], [20.0, 21.0, 0.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(triangles=triangles)
+        obj = MeshObject(
+            name="part",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangles.reshape(-1, 3),
+            bounds_mm=(np.array([0.0, 0.0, 0.0]), np.array([21.0, 21.0, 0.0])),
+            watertight=False,
+        )
+        index = TriangleSpatialIndex.from_mesh(obj, target_bucket_size_mm=1000.0)
+
+        with patch("octree_graph.octree._TRIANGLE_QUERY_CHUNK_SIZE", 2):
+            matches = index.query(np.array([-0.5, -0.5, -0.5]), np.array([12.5, 10.5, 0.5]))
+
+        self.assertEqual(matches.tolist(), [0, 1, 2, 3])
+
+    def test_triangle_index_uses_triangle_bounds_when_object_bounds_are_invalid(self) -> None:
+        triangles = np.array(
+            [
+                [[4.0, 4.0, 4.0], [6.0, 4.0, 4.0], [4.0, 6.0, 4.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(triangles=triangles)
+        obj = MeshObject(
+            name="part",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangles.reshape(-1, 3),
+            bounds_mm=(np.array([float("nan"), 0.0, 0.0]), np.array([1.0, 1.0, 1.0])),
+            watertight=False,
+        )
+
+        index = TriangleSpatialIndex.from_mesh(obj, target_bucket_size_mm=1.0)
+        matches = index.query(np.array([3.0, 3.0, 3.0]), np.array([7.0, 7.0, 5.0]))
+
+        self.assertEqual(matches.tolist(), [0])
+
+    def test_triangle_index_keeps_large_bucket_span_triangles_queryable(self) -> None:
+        triangles = np.array(
+            [
+                [[0.0, 0.0, 0.0], [1000.0, 0.0, 0.0], [0.0, 1000.0, 0.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(triangles=triangles)
+        obj = MeshObject(
+            name="part",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangles.reshape(-1, 3),
+            bounds_mm=(np.array([0.0, 0.0, 0.0]), np.array([1000.0, 1000.0, 0.0])),
+            watertight=False,
+        )
+
+        with patch("octree_graph.octree._TRIANGLE_BUCKET_INSERT_LIMIT", 1):
+            index = TriangleSpatialIndex.from_mesh(obj, target_bucket_size_mm=1.0)
+        matches = index.query(np.array([-1.0, -1.0, -1.0]), np.array([1.0, 1.0, 1.0]))
+
+        self.assertEqual(len(index.buckets), 0)
+        self.assertEqual(index.unbucketed_triangle_indices.tolist(), [0])
+        self.assertEqual(matches.tolist(), [0])
+
     def test_bbox_fallback_does_not_assign_aabb_only_leaf_when_refinement_budget_stops(self) -> None:
         materials = self.make_materials()
         mesh = SimpleNamespace(vertices=[], faces=[], triangles=np.empty((0, 3, 3)), is_watertight=False)

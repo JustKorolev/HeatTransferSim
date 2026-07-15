@@ -32,6 +32,8 @@ _WORKER_TRIANGLE_INDICES: dict[int, "TriangleSpatialIndex"] = {}
 _WORKER_CONTACT_REPORT: ContactReport | None = None
 _WORKER_PARAMS: "OctreeParams | None" = None
 _WORKER_KNOWN_MATERIALS: set[str] = set()
+_TRIANGLE_QUERY_CHUNK_SIZE = 16384
+_TRIANGLE_BUCKET_INSERT_LIMIT = 4096
 
 
 @dataclass
@@ -192,6 +194,7 @@ class TriangleSpatialIndex:
     bounds_max: np.ndarray
     bucket_size_mm: float
     buckets: dict[tuple[int, int, int], list[int]]
+    unbucketed_triangle_indices: np.ndarray = field(default_factory=lambda: np.empty((0,), dtype=int))
 
     @classmethod
     def from_mesh(cls, obj: MeshObject, target_bucket_size_mm: float) -> "TriangleSpatialIndex":
@@ -199,20 +202,45 @@ class TriangleSpatialIndex:
         if triangles.size == 0:
             empty = np.empty((0, 3), dtype=float)
             return cls(triangles, empty, empty, max(float(target_bucket_size_mm), 1.0), {})
-        bounds_min = np.min(triangles, axis=1)
-        bounds_max = np.max(triangles, axis=1)
-        mesh_min, mesh_max = obj.bounds_mm
-        extent = float(np.max(np.asarray(mesh_max, dtype=float) - np.asarray(mesh_min, dtype=float)))
-        bucket_size = max(float(target_bucket_size_mm), extent / 64.0, 1.0e-6)
+        bounds_min, bounds_max = _triangle_bounds(triangles)
+        object_bounds = _object_bounds_tuple(obj) or _bounds_from_triangle_bounds(bounds_min, bounds_max)
+        extent = _bounds_extent_mm(object_bounds)
+        try:
+            target_bucket_size = float(target_bucket_size_mm)
+        except (TypeError, ValueError):
+            target_bucket_size = 1.0
+        if not math.isfinite(target_bucket_size) or target_bucket_size <= 0.0:
+            target_bucket_size = 1.0
+        bucket_size = max(target_bucket_size, extent / 64.0, 1.0e-6)
         buckets: dict[tuple[int, int, int], list[int]] = {}
+        unbucketed: list[int] = []
         for index, (tri_min, tri_max) in enumerate(zip(bounds_min, bounds_max)):
             min_key = _bucket_key(tri_min, bucket_size)
             max_key = _bucket_key(tri_max, bucket_size)
+            span_x = max_key[0] - min_key[0] + 1
+            span_y = max_key[1] - min_key[1] + 1
+            span_z = max_key[2] - min_key[2] + 1
+            bucket_insert_count = int(span_x * span_y * span_z)
+            if (
+                span_x <= 0
+                or span_y <= 0
+                or span_z <= 0
+                or bucket_insert_count > _TRIANGLE_BUCKET_INSERT_LIMIT
+            ):
+                unbucketed.append(index)
+                continue
             for ix in range(min_key[0], max_key[0] + 1):
                 for iy in range(min_key[1], max_key[1] + 1):
                     for iz in range(min_key[2], max_key[2] + 1):
                         buckets.setdefault((ix, iy, iz), []).append(index)
-        return cls(triangles, bounds_min, bounds_max, bucket_size, buckets)
+        return cls(
+            triangles,
+            bounds_min,
+            bounds_max,
+            bucket_size,
+            buckets,
+            np.asarray(unbucketed, dtype=int),
+        )
 
     def query(self, cell_min: np.ndarray, cell_max: np.ndarray) -> np.ndarray:
         if self.triangles.size == 0:
@@ -233,16 +261,52 @@ class TriangleSpatialIndex:
                 for iz in range(min_key[2], max_key[2] + 1):
                     matches.update(self.buckets.get((ix, iy, iz), ()))
         if not matches:
-            return np.empty((0,), dtype=int)
-        candidates = np.fromiter(sorted(matches), dtype=int)
-        overlap = np.all(self.bounds_max[candidates] >= cell_min, axis=1) & np.all(
-            self.bounds_min[candidates] <= cell_max, axis=1
-        )
-        return candidates[overlap]
+            if self.unbucketed_triangle_indices.size == 0:
+                return np.empty((0,), dtype=int)
+            candidates = self.unbucketed_triangle_indices.astype(int, copy=True)
+        else:
+            candidates = np.fromiter(sorted(matches), dtype=int)
+            if self.unbucketed_triangle_indices.size:
+                candidates = np.concatenate((candidates, self.unbucketed_triangle_indices)).astype(int, copy=False)
+        return self._filter_candidates_by_bounds(candidates, cell_min, cell_max)
 
     def _query_all_bounds(self, cell_min: np.ndarray, cell_max: np.ndarray) -> np.ndarray:
-        overlap = np.all(self.bounds_max >= cell_min, axis=1) & np.all(self.bounds_min <= cell_max, axis=1)
-        return np.nonzero(overlap)[0].astype(int)
+        all_indices = np.arange(self.bounds_min.shape[0], dtype=int)
+        return self._filter_candidates_by_bounds(all_indices, cell_min, cell_max)
+
+    def _filter_candidates_by_bounds(
+        self, candidates: np.ndarray, cell_min: np.ndarray, cell_max: np.ndarray
+    ) -> np.ndarray:
+        if candidates.size == 0:
+            return np.empty((0,), dtype=int)
+        cell_min = np.asarray(cell_min, dtype=float)
+        cell_max = np.asarray(cell_max, dtype=float)
+        if candidates.size <= _TRIANGLE_QUERY_CHUNK_SIZE:
+            return self._filter_candidate_chunk(candidates, cell_min, cell_max)
+        matches: list[np.ndarray] = []
+        for start in range(0, int(candidates.size), _TRIANGLE_QUERY_CHUNK_SIZE):
+            chunk = candidates[start : start + _TRIANGLE_QUERY_CHUNK_SIZE]
+            filtered = self._filter_candidate_chunk(chunk, cell_min, cell_max)
+            if filtered.size:
+                matches.append(filtered)
+        if not matches:
+            return np.empty((0,), dtype=int)
+        return np.concatenate(matches).astype(int, copy=False)
+
+    def _filter_candidate_chunk(
+        self, candidates: np.ndarray, cell_min: np.ndarray, cell_max: np.ndarray
+    ) -> np.ndarray:
+        mins = self.bounds_min[candidates]
+        maxs = self.bounds_max[candidates]
+        overlap = (
+            (maxs[:, 0] >= cell_min[0])
+            & (mins[:, 0] <= cell_max[0])
+            & (maxs[:, 1] >= cell_min[1])
+            & (mins[:, 1] <= cell_max[1])
+            & (maxs[:, 2] >= cell_min[2])
+            & (mins[:, 2] <= cell_max[2])
+        )
+        return candidates[overlap]
 
 
 def build_octree(
@@ -257,7 +321,8 @@ def build_octree(
     contact_report = contact_report or ContactReport()
     mins, maxs = scene.bounds_mm
     center = (mins + maxs) * 0.5
-    side = float(np.max(maxs - mins))
+    span = maxs - mins
+    side = float(max(float(span[0]), float(span[1]), float(span[2])))
     root = (center, np.array([side, side, side], dtype=float))
     leaves: list[OctreeCell] = []
     triangle_indices = _build_triangle_indices(scene.objects, params)
@@ -1009,12 +1074,80 @@ def _mesh_triangles(obj: MeshObject) -> np.ndarray:
     if triangles.ndim != 3 or triangles.shape[1:] != (3, 3):
         triangles = np.empty((0, 3, 3), dtype=float)
     elif triangles.size:
-        finite = np.all(np.isfinite(triangles), axis=(1, 2))
-        if not np.all(finite):
+        finite_values = np.isfinite(triangles)
+        finite = (
+            finite_values[:, 0, 0]
+            & finite_values[:, 0, 1]
+            & finite_values[:, 0, 2]
+            & finite_values[:, 1, 0]
+            & finite_values[:, 1, 1]
+            & finite_values[:, 1, 2]
+            & finite_values[:, 2, 0]
+            & finite_values[:, 2, 1]
+            & finite_values[:, 2, 2]
+        )
+        if np.nonzero(~finite)[0].size:
             triangles = triangles[finite]
         triangles = np.ascontiguousarray(triangles, dtype=float)
     _TRIANGLE_CACHE[cache_key] = (obj.mesh, triangles)
     return triangles
+
+
+def _triangle_bounds(triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if triangles.size == 0:
+        empty = np.empty((0, 3), dtype=float)
+        return empty, empty
+    first = triangles[:, 0, :]
+    second = triangles[:, 1, :]
+    third = triangles[:, 2, :]
+    bounds_min = np.minimum(np.minimum(first, second), third)
+    bounds_max = np.maximum(np.maximum(first, second), third)
+    return (
+        np.ascontiguousarray(bounds_min, dtype=float),
+        np.ascontiguousarray(bounds_max, dtype=float),
+    )
+
+
+def _bounds_from_triangle_bounds(
+    bounds_min: np.ndarray, bounds_max: np.ndarray
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    if bounds_min.size == 0 or bounds_max.size == 0:
+        return None
+    min_x = min_y = min_z = math.inf
+    max_x = max_y = max_z = -math.inf
+    for tri_min, tri_max in zip(bounds_min, bounds_max):
+        try:
+            tri_min_x, tri_min_y, tri_min_z = (float(value) for value in tri_min)
+            tri_max_x, tri_max_y, tri_max_z = (float(value) for value in tri_max)
+        except (TypeError, ValueError):
+            continue
+        if not all(math.isfinite(value) for value in (tri_min_x, tri_min_y, tri_min_z, tri_max_x, tri_max_y, tri_max_z)):
+            continue
+        min_x = min(min_x, tri_min_x)
+        min_y = min(min_y, tri_min_y)
+        min_z = min(min_z, tri_min_z)
+        max_x = max(max_x, tri_max_x)
+        max_y = max(max_y, tri_max_y)
+        max_z = max(max_z, tri_max_z)
+    if not all(math.isfinite(value) for value in (min_x, min_y, min_z, max_x, max_y, max_z)):
+        return None
+    return (min_x, min_y, min_z), (max_x, max_y, max_z)
+
+
+def _bounds_extent_mm(
+    bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None
+) -> float:
+    if bounds is None:
+        return 0.0
+    bounds_min, bounds_max = bounds
+    try:
+        span_x = max(0.0, float(bounds_max[0]) - float(bounds_min[0]))
+        span_y = max(0.0, float(bounds_max[1]) - float(bounds_min[1]))
+        span_z = max(0.0, float(bounds_max[2]) - float(bounds_min[2]))
+    except (TypeError, ValueError, IndexError):
+        return 0.0
+    extent = max(span_x, span_y, span_z)
+    return extent if math.isfinite(extent) else 0.0
 
 
 def _ray_contains_point(obj: MeshObject, point: np.ndarray) -> bool:
@@ -1031,19 +1164,19 @@ def _ray_contains_point(obj: MeshObject, point: np.ndarray) -> bool:
     h = np.cross(np.broadcast_to(direction, edge2.shape), edge2)
     a = np.einsum("ij,ij->i", edge1, h)
     mask = np.abs(a) > eps
-    if not np.any(mask):
+    if not bool(mask.nonzero()[0].size):
         return False
     f = np.zeros_like(a)
     f[mask] = 1.0 / a[mask]
     s = point - v0
     u = f * np.einsum("ij,ij->i", s, h)
     mask &= (u >= -eps) & (u <= 1.0 + eps)
-    if not np.any(mask):
+    if not bool(mask.nonzero()[0].size):
         return False
     q = np.cross(s, edge1)
     v = f * np.einsum("ij,j->i", q, direction)
     mask &= (v >= -eps) & ((u + v) <= 1.0 + eps)
-    if not np.any(mask):
+    if not bool(mask.nonzero()[0].size):
         return False
     t = f * np.einsum("ij,ij->i", edge2, q)
     hits = t[mask & (t > eps)]
@@ -1151,9 +1284,11 @@ def _triangle_intersects_aabb(triangle: np.ndarray, box_center: np.ndarray, box_
     if tri.shape != (3, 3):
         return False
     eps = 1.0e-9
-    tri_min = np.min(tri, axis=0)
-    tri_max = np.max(tri, axis=0)
-    if np.any(tri_min > box_half_size + eps) or np.any(tri_max < -box_half_size - eps):
+    tri_min = np.minimum(np.minimum(tri[0], tri[1]), tri[2])
+    tri_max = np.maximum(np.maximum(tri[0], tri[1]), tri[2])
+    upper_miss = tri_min > box_half_size + eps
+    lower_miss = tri_max < -box_half_size - eps
+    if bool(upper_miss[0] or upper_miss[1] or upper_miss[2] or lower_miss[0] or lower_miss[1] or lower_miss[2]):
         return False
     normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
     if np.linalg.norm(normal) > eps and not _plane_intersects_aabb(normal, tri[0], box_half_size):
@@ -1167,7 +1302,9 @@ def _triangle_intersects_aabb(triangle: np.ndarray, box_center: np.ndarray, box_
                 continue
             projections = tri @ test_axis
             radius = np.dot(box_half_size, np.abs(test_axis))
-            if float(np.min(projections)) > radius + eps or float(np.max(projections)) < -radius - eps:
+            p_min = min(float(projections[0]), float(projections[1]), float(projections[2]))
+            p_max = max(float(projections[0]), float(projections[1]), float(projections[2]))
+            if p_min > radius + eps or p_max < -radius - eps:
                 return False
     return True
 
