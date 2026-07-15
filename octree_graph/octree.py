@@ -425,6 +425,7 @@ def build_octree(
         role_component_refinement = _needs_role_component_refinement(classification, params, level)
         multi_surface_refinement = _needs_multi_surface_refinement(classification, params)
         surface_complexity_refinement = _needs_surface_complexity_refinement(classification, params)
+        gap_preservation_refinement = _needs_gap_preservation_refinement(classification, params)
         if diagnostics is not None:
             if multi_surface_refinement:
                 diagnostics.cells_multi_surface_hit += 1
@@ -441,6 +442,7 @@ def build_octree(
             role_component_refinement=role_component_refinement,
             multi_surface_refinement=multi_surface_refinement,
             surface_complexity_refinement=surface_complexity_refinement,
+            gap_preservation_refinement=gap_preservation_refinement,
             needs_surface_refinement=needs_surface_refinement,
         )
         classification.refinement_score = refinement_score
@@ -466,6 +468,7 @@ def build_octree(
             or role_component_refinement
             or multi_surface_refinement
             or surface_complexity_refinement
+            or gap_preservation_refinement
             or (needs_surface_refinement and float(max(size_mm)) > params.min_cell_size_mm)
             or (
                 classification.occupied
@@ -933,6 +936,21 @@ def _needs_surface_complexity_refinement(
     return threshold > 0 and int(classification.triangle_candidate_tests) >= threshold
 
 
+def _needs_gap_preservation_refinement(
+    classification: CellClassification,
+    params: OctreeParams,
+) -> bool:
+    if not bool(getattr(params, "boundary_refine", True)):
+        return False
+    if int(classification.near_surface_component_count) < 2:
+        return False
+    if not (classification.surface_hit or classification.near_surface_hit or classification.bbox_only_hit):
+        return False
+    fill_fraction = float(classification.volume_fraction or 0.0)
+    low_fill_threshold = max(float(params.min_solid_fraction), float(params.minority_fraction_ignore))
+    return (not classification.inside_hit) or fill_fraction <= low_fill_threshold
+
+
 def _refinement_priority(
     classification: CellClassification,
     params: OctreeParams,
@@ -945,6 +963,7 @@ def _refinement_priority(
     role_component_refinement: bool,
     multi_surface_refinement: bool,
     surface_complexity_refinement: bool,
+    gap_preservation_refinement: bool,
     needs_surface_refinement: bool,
 ) -> tuple[float, tuple[str, ...]]:
     score = 0.0
@@ -957,6 +976,8 @@ def _refinement_priority(
 
     if role_component_refinement:
         add("role_region", 120.0)
+    if gap_preservation_refinement:
+        add("gap_preservation", 7500.0 + 250.0 * float(classification.near_surface_component_count))
     if multi_surface_refinement:
         add("multi_surface_ambiguity", 90.0 + 5.0 * float(classification.near_surface_component_count))
     if surface_complexity_refinement:

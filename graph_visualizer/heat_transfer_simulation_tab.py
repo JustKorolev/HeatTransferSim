@@ -151,6 +151,21 @@ class HeatTransferSimulationTab:
         toggles.addWidget(self.show_heaters)
         toggles.addWidget(self.show_sensors)
         toggles.addWidget(self.show_coolers)
+        toggles.addWidget(self.QtWidgets.QLabel("Opacity"))
+        self.opacity_slider = self._view_slider(5, 100, 34, self._handle_visual_control_changed)
+        toggles.addWidget(self.opacity_slider)
+        self.depth_focus_toggle = self._checkbox("Depth", False, self._handle_visual_control_changed)
+        toggles.addWidget(self.depth_focus_toggle)
+        self.depth_axis_combo = self.QtWidgets.QComboBox()
+        self.depth_axis_combo.addItems(["X", "Y", "Z"])
+        self.depth_axis_combo.setCurrentText("Z")
+        self.depth_axis_combo.currentTextChanged.connect(self._handle_visual_control_changed)
+        toggles.addWidget(self.depth_axis_combo)
+        self.depth_slider = self._view_slider(0, 100, 50, self._handle_visual_control_changed)
+        toggles.addWidget(self.depth_slider)
+        toggles.addWidget(self.QtWidgets.QLabel("Width"))
+        self.depth_width_slider = self._view_slider(1, 100, 12, self._handle_visual_control_changed)
+        toggles.addWidget(self.depth_width_slider)
         toggles.addStretch(1)
         layout.addLayout(toggles)
         self.viewer.set_toggles(
@@ -160,6 +175,7 @@ class HeatTransferSimulationTab:
             self.show_sensors.isChecked(),
             self.show_coolers.isChecked(),
         )
+        self._sync_view_controls_to_viewer()
         layout.addWidget(self.viewer.interactor, 1)
 
     def _add_parameter_controls(self, form: Any) -> None:
@@ -1308,6 +1324,7 @@ class HeatTransferSimulationTab:
             self.show_sensors.isChecked(),
             self.show_coolers.isChecked(),
         )
+        self._sync_view_controls_to_viewer()
         self.viewer.selected_node_id = None
         self.viewer.draw(
             self.model,
@@ -1509,6 +1526,22 @@ class HeatTransferSimulationTab:
     def _handle_visual_toggle(self, *_: Any) -> None:
         self._draw_current(reset_camera=False)
 
+    def _handle_visual_control_changed(self, *_: Any) -> None:
+        self._sync_view_controls_to_viewer()
+        self._draw_current(reset_camera=False)
+
+    def _sync_view_controls_to_viewer(self) -> None:
+        if not hasattr(self, "viewer") or not hasattr(self, "opacity_slider"):
+            return
+        self.viewer.set_cell_opacity(float(self.opacity_slider.value()) / 100.0, render=False)
+        self.viewer.set_depth_focus(
+            self.depth_focus_toggle.isChecked(),
+            float(self.depth_slider.value()) / 100.0,
+            axis=self.depth_axis_combo.currentText().lower(),
+            width=float(self.depth_width_slider.value()) / 100.0,
+            render=False,
+        )
+
     def _handle_marker_toggle(self, *_: Any) -> None:
         self.viewer.update_io_marker_visibility(
             self.show_heaters.isChecked(),
@@ -1592,6 +1625,14 @@ class HeatTransferSimulationTab:
         if callback is not None:
             widget.stateChanged.connect(callback)
         return widget
+
+    def _view_slider(self, minimum: int, maximum: int, value: int, callback: Any) -> Any:
+        slider = self.QtWidgets.QSlider(self.QtCore.Qt.Horizontal)
+        slider.setRange(int(minimum), int(maximum))
+        slider.setValue(int(value))
+        slider.setFixedWidth(110)
+        slider.valueChanged.connect(callback)
+        return slider
 
     def _section(self, title: str) -> tuple[Any, Any]:
         box = self.QtWidgets.QGroupBox(title)

@@ -43,6 +43,7 @@ from octree_graph.octree import (
     OctreeParams,
     _mesh_contains_point,
     _mesh_triangles,
+    _needs_gap_preservation_refinement,
     _objects_intersecting_bounds,
     _physical_material_name,
     _refinement_priority,
@@ -1748,6 +1749,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             role_component_refinement=False,
             multi_surface_refinement=False,
             surface_complexity_refinement=False,
+            gap_preservation_refinement=False,
             needs_surface_refinement=False,
         )
         detail_score, detail_reasons = _refinement_priority(
@@ -1761,12 +1763,100 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
             role_component_refinement=False,
             multi_surface_refinement=True,
             surface_complexity_refinement=True,
+            gap_preservation_refinement=False,
             needs_surface_refinement=True,
         )
 
         self.assertIn("above_max_cell_size", above_reasons)
         self.assertNotIn("above_max_cell_size", detail_reasons)
         self.assertGreater(above_score, detail_score)
+
+    def test_gap_preservation_refinement_prioritizes_low_fill_cells_between_components(self) -> None:
+        params = OctreeParams(max_cell_size_mm=8.0, min_solid_fraction=0.12)
+        gap_cell = CellClassification(
+            occupied=True,
+            surface_hit=True,
+            inside_hit=False,
+            near_surface_hit=True,
+            bbox_only_hit=False,
+            surface_mesh_ids={1},
+            inside_mesh_ids=set(),
+            near_surface_mesh_ids={2},
+            candidate_mesh_ids={1, 2},
+            crowded_component_count=2,
+            role_component_count=0,
+            surface_component_count=1,
+            near_surface_component_count=2,
+            material_ids={"Aluminum"},
+            part_ids={"left_part"},
+            occupancy={"left_part": 0.12},
+            material_fractions={"Aluminum": 0.12},
+            dominant_component="left_part",
+            dominant_material="Aluminum",
+            volume_fraction=0.12,
+            acceptance_reason="triangle_surface_intersection",
+            triangle_candidate_tests=64,
+        )
+        detailed_surface = CellClassification(
+            occupied=True,
+            surface_hit=True,
+            inside_hit=False,
+            near_surface_hit=True,
+            bbox_only_hit=False,
+            surface_mesh_ids={3},
+            inside_mesh_ids=set(),
+            near_surface_mesh_ids={3},
+            candidate_mesh_ids={3},
+            crowded_component_count=1,
+            role_component_count=0,
+            surface_component_count=1,
+            near_surface_component_count=1,
+            material_ids={"Copper"},
+            part_ids={"detailed_part"},
+            occupancy={"detailed_part": 0.5},
+            material_fractions={"Copper": 0.5},
+            dominant_component="detailed_part",
+            dominant_material="Copper",
+            volume_fraction=0.5,
+            acceptance_reason="triangle_surface_intersection",
+            triangle_candidate_tests=1024,
+        )
+
+        self.assertTrue(_needs_gap_preservation_refinement(gap_cell, params))
+        self.assertFalse(_needs_gap_preservation_refinement(detailed_surface, params))
+
+        gap_score, gap_reasons = _refinement_priority(
+            gap_cell,
+            params,
+            np.array([6.0, 6.0, 6.0]),
+            mixed_parts=False,
+            mixed_materials=False,
+            high_contrast=False,
+            crowded_component_refinement=True,
+            role_component_refinement=False,
+            multi_surface_refinement=True,
+            surface_complexity_refinement=True,
+            gap_preservation_refinement=True,
+            needs_surface_refinement=True,
+        )
+        detail_score, detail_reasons = _refinement_priority(
+            detailed_surface,
+            params,
+            np.array([6.0, 6.0, 6.0]),
+            mixed_parts=False,
+            mixed_materials=False,
+            high_contrast=False,
+            crowded_component_refinement=False,
+            role_component_refinement=False,
+            multi_surface_refinement=False,
+            surface_complexity_refinement=True,
+            gap_preservation_refinement=False,
+            needs_surface_refinement=True,
+        )
+
+        self.assertIn("gap_preservation", gap_reasons)
+        self.assertNotIn("gap_preservation", detail_reasons)
+        self.assertGreater(gap_score, detail_score)
 
     def test_detected_role_bounds_force_local_octree_refinement(self) -> None:
         materials = self.make_materials()

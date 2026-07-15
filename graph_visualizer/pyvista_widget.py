@@ -48,6 +48,11 @@ class GraphPyVistaWidget:
         self.show_sensors = True
         self.show_coolers = True
         self.shader_mode_enabled = False
+        self.cell_opacity = 0.34
+        self.depth_focus_enabled = False
+        self.depth_focus_axis = "z"
+        self.depth_focus_fraction = 0.5
+        self.depth_focus_width = 0.12
         self._node_actors: dict[int, Any] = {}
         self._node_meshes: dict[int, Any] = {}
         self._actor_node_ids: dict[str, int] = {}
@@ -69,6 +74,8 @@ class GraphPyVistaWidget:
         self._hover_node_id: int | None = None
         self._hover_tooltips_enabled = True
         self._material_colors: dict[str, str] = {}
+        self._last_model_nodes: dict[int, Any] = {}
+        self._last_committed_bounds: tuple[float, float, float, float, float, float] | None = None
         self._closed = False
 
     def _load_dependencies(self) -> None:
@@ -176,6 +183,31 @@ class GraphPyVistaWidget:
     def toggle_shader_mode(self) -> bool:
         return self.set_shader_mode(not self.shader_mode_enabled)
 
+    def set_cell_opacity(self, opacity: float, render: bool = True) -> bool:
+        self.cell_opacity = max(0.02, min(1.0, float(opacity)))
+        self._apply_shader_mode_to_scene()
+        return self.safe_render() if render else True
+
+    def set_depth_focus(
+        self,
+        enabled: bool,
+        fraction: float | None = None,
+        axis: str | None = None,
+        width: float | None = None,
+        render: bool = True,
+    ) -> bool:
+        self.depth_focus_enabled = bool(enabled)
+        if fraction is not None:
+            self.depth_focus_fraction = max(0.0, min(1.0, float(fraction)))
+        if axis is not None:
+            normalized_axis = str(axis).strip().lower()
+            if normalized_axis in {"x", "y", "z"}:
+                self.depth_focus_axis = normalized_axis
+        if width is not None:
+            self.depth_focus_width = max(0.01, min(1.0, float(width)))
+        self._apply_shader_mode_to_scene()
+        return self.safe_render() if render else True
+
     def draw(
         self,
         model: ThermalGraphModel,
@@ -197,6 +229,8 @@ class GraphPyVistaWidget:
         preview_coords = list(getattr(self, "_last_preview_coords", []))
         preview_side = float(getattr(self, "_last_preview_side", 1.0))
         committed_bounds = self._committed_model_bounds(model)
+        self._last_model_nodes = dict(model.nodes)
+        self._last_committed_bounds = committed_bounds
         self.plotter.clear()
         self._node_actors = {}
         self._node_meshes = {}
@@ -222,6 +256,7 @@ class GraphPyVistaWidget:
                 scalar_cmap=scalar_cmap,
                 scalar_clim=scalar_clim,
                 scalar_bar_title=scalar_bar_title,
+                committed_bounds=committed_bounds,
             )
             log_event("pyvista draw batched mesh complete")
             self._draw_role_interface_overlays(model, visible)
@@ -238,6 +273,7 @@ class GraphPyVistaWidget:
             if geometry is None:
                 continue
             center, lengths = geometry
+            depth_focused = self._node_in_depth_focus(center, committed_bounds)
             marker_side = max(lengths)
             mesh = self.pv.Cube(
                 center=center,
@@ -249,7 +285,7 @@ class GraphPyVistaWidget:
             selected = node_id == self.selected_node_id or node_id in self.selected_node_ids
             color = (node_colors or {}).get(node_id, self._color_for_material(node.material))
             mesh_kwargs = {
-                "opacity": self._cell_opacity(node_scalar_values is not None, selected),
+                "opacity": self._cell_opacity(node_scalar_values is not None, selected, depth_focused),
                 "show_edges": True,
                 "edge_color": "#f87171" if selected else self._node_edge_color(),
                 "line_width": 3 if selected else 1,
@@ -1034,6 +1070,7 @@ class GraphPyVistaWidget:
         scalar_cmap: str = "jet",
         scalar_clim: tuple[float, float] | None = None,
         scalar_bar_title: str = "Temperature [K]",
+        committed_bounds: tuple[float, float, float, float, float, float] | None = None,
     ) -> None:
         log_event("pyvista draw_batched build mesh start", visible=len(visible))
         points: list[list[float]] = []
@@ -1071,7 +1108,8 @@ class GraphPyVistaWidget:
             ):
                 points.append((center + half * np.array(signs, dtype=float)).tolist())
             color = (node_colors or {}).get(node_id, self._color_for_material(node.material))
-            rgb = self._hex_to_uint8_rgb(color)
+            depth_focused = self._node_in_depth_focus(center, committed_bounds)
+            rgb = self._depth_adjust_rgb(self._hex_to_uint8_rgb(color), depth_focused)
             scalar_value = (
                 float(node_scalar_values[node_id])
                 if node_scalar_values is not None and node_id in node_scalar_values
@@ -1104,7 +1142,7 @@ class GraphPyVistaWidget:
             mesh.cell_data["cell_rgb"] = np.asarray(cell_colors, dtype=np.uint8)
         self._batched_mesh = mesh
         mesh_kwargs = {
-            "opacity": self._cell_opacity(node_scalar_values is not None, False),
+            "opacity": self._cell_opacity(node_scalar_values is not None, False, True),
             "show_edges": True,
             "edge_color": self._node_edge_color(),
             "line_width": 0.35,
@@ -1193,7 +1231,7 @@ class GraphPyVistaWidget:
         self._batched_selected_actor = self.plotter.add_mesh(
             mesh,
             color="#ffd166",
-            opacity=self._cell_opacity(False, True),
+            opacity=self._cell_opacity(False, True, True),
             show_edges=True,
             edge_color="#f87171",
             line_width=3,
@@ -1201,12 +1239,36 @@ class GraphPyVistaWidget:
             **self._lit_mesh_kwargs(),
         )
 
-    def _cell_opacity(self, scalar_active: bool, selected: bool) -> float:
+    def _cell_opacity(self, scalar_active: bool, selected: bool, depth_focused: bool = True) -> float:
         if self.shader_mode_enabled:
             return 1.0
+        base = float(self.cell_opacity)
+        if self.depth_focus_enabled and not selected and not depth_focused:
+            base *= 0.22
         if scalar_active and not selected:
-            return 0.78
-        return 0.62 if selected else 0.34
+            return max(0.02, min(1.0, base))
+        return max(base, min(1.0, base + 0.28)) if selected else max(0.02, min(1.0, base))
+
+    def _node_in_depth_focus(
+        self,
+        center: np.ndarray,
+        bounds: tuple[float, float, float, float, float, float] | None,
+    ) -> bool:
+        if not self.depth_focus_enabled or bounds is None:
+            return True
+        axis_index = {"x": 0, "y": 1, "z": 2}.get(str(self.depth_focus_axis).lower(), 2)
+        bound_index = axis_index * 2
+        axis_min = float(bounds[bound_index])
+        axis_max = float(bounds[bound_index + 1])
+        span = max(axis_max - axis_min, 1.0e-9)
+        depth = (float(center[axis_index]) - axis_min) / span
+        return abs(depth - float(self.depth_focus_fraction)) <= float(self.depth_focus_width) * 0.5
+
+    def _depth_adjust_rgb(self, rgb: list[int], depth_focused: bool) -> list[int]:
+        if not self.depth_focus_enabled or depth_focused:
+            return rgb
+        background = 24 if self.dark_mode else 238
+        return [int(round(background + 0.28 * (int(value) - background))) for value in rgb]
 
     def _lit_mesh_kwargs(self) -> dict[str, Any]:
         if not self.shader_mode_enabled:
@@ -1223,7 +1285,16 @@ class GraphPyVistaWidget:
     def _apply_shader_mode_to_scene(self) -> None:
         for node_id, actor in self._node_actors.items():
             selected = node_id in self.selected_node_ids
-            self._set_actor_opacity(actor, self._cell_opacity(self._actor_has_temperature_scalars(actor), selected))
+            depth_focused = True
+            geometry = self._batched_node_geometry.get(node_id) or _safe_node_cube_geometry(
+                self._last_model_nodes.get(node_id)
+            )
+            if geometry is not None:
+                depth_focused = self._node_in_depth_focus(geometry[0], self._last_committed_bounds)
+            self._set_actor_opacity(
+                actor,
+                self._cell_opacity(self._actor_has_temperature_scalars(actor), selected, depth_focused),
+            )
             self._apply_lighting_to_actor(actor)
         for actor in (self._batched_actor, self._batched_selected_actor):
             if actor is None:
@@ -1242,7 +1313,7 @@ class GraphPyVistaWidget:
                 scalar_active = "temperature_K" in self._batched_mesh.cell_data
             except Exception:
                 scalar_active = False
-        return self._cell_opacity(scalar_active, selected)
+        return self._cell_opacity(scalar_active, selected, True)
 
     @staticmethod
     def _set_actor_opacity(actor: Any, opacity: float) -> None:

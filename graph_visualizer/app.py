@@ -165,6 +165,21 @@ class GraphVisualizerApp:
             self.show_coolers,
         ):
             toggles.addWidget(widget)
+        toggles.addWidget(self.QtWidgets.QLabel("Opacity"))
+        self.opacity_slider = self._view_slider(5, 100, 34, self._handle_view_control_changed)
+        toggles.addWidget(self.opacity_slider)
+        self.depth_focus_toggle = self._checkbox("Depth", False, self._handle_view_control_changed)
+        toggles.addWidget(self.depth_focus_toggle)
+        self.depth_axis_combo = self.QtWidgets.QComboBox()
+        self.depth_axis_combo.addItems(["X", "Y", "Z"])
+        self.depth_axis_combo.setCurrentText("Z")
+        self.depth_axis_combo.currentTextChanged.connect(self._handle_view_control_changed)
+        toggles.addWidget(self.depth_axis_combo)
+        self.depth_slider = self._view_slider(0, 100, 50, self._handle_view_control_changed)
+        toggles.addWidget(self.depth_slider)
+        toggles.addWidget(self.QtWidgets.QLabel("Width"))
+        self.depth_width_slider = self._view_slider(1, 100, 12, self._handle_view_control_changed)
+        toggles.addWidget(self.depth_width_slider)
         toggles.addStretch(1)
         three_d_layout.addLayout(toggles)
         self.viewer = GraphPyVistaWidget(
@@ -1607,6 +1622,7 @@ class GraphVisualizerApp:
             self.show_coolers.isChecked(),
         )
         self.viewer.set_draw_mode(self.draw_mode_enabled)
+        self._sync_view_controls_to_viewer()
         self.viewer.selected_node_id = self.selected_node_id
         self.viewer.selected_node_ids = set(self.selected_node_ids)
         log_event("editor refresh_all before viewer.draw")
@@ -1747,6 +1763,22 @@ class GraphVisualizerApp:
 
     def _handle_visual_toggle(self, *_: Any) -> None:
         self._refresh_all(reset_camera=False)
+
+    def _handle_view_control_changed(self, *_: Any) -> None:
+        self._sync_view_controls_to_viewer()
+        self._refresh_all(reset_camera=False)
+
+    def _sync_view_controls_to_viewer(self) -> None:
+        if not hasattr(self, "viewer") or not hasattr(self, "opacity_slider"):
+            return
+        self.viewer.set_cell_opacity(float(self.opacity_slider.value()) / 100.0, render=False)
+        self.viewer.set_depth_focus(
+            self.depth_focus_toggle.isChecked(),
+            float(self.depth_slider.value()) / 100.0,
+            axis=self.depth_axis_combo.currentText().lower(),
+            width=float(self.depth_width_slider.value()) / 100.0,
+            render=False,
+        )
 
     def _handle_marker_toggle(self, *_: Any) -> None:
         if hasattr(self, "viewer"):
@@ -1962,6 +1994,14 @@ class GraphVisualizerApp:
         if callback is not None:
             widget.stateChanged.connect(callback)
         return widget
+
+    def _view_slider(self, minimum: int, maximum: int, value: int, callback: Any) -> Any:
+        slider = self.QtWidgets.QSlider(self.QtCore.Qt.Horizontal)
+        slider.setRange(int(minimum), int(maximum))
+        slider.setValue(int(value))
+        slider.setFixedWidth(110)
+        slider.valueChanged.connect(callback)
+        return slider
 
     def _int_spin(self, minimum: int, maximum: int, value: int) -> Any:
         class NoWheelSpinBox(self.QtWidgets.QSpinBox):

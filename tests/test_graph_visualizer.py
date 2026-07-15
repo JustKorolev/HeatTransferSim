@@ -1536,6 +1536,62 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(model.coord_index(), {(8, 0, 0): 8})
         self.assertIn("non-finite coord", " ".join(node.warnings))
 
+    def test_depth_focus_classifies_nodes_by_normalized_axis_layer(self) -> None:
+        try:
+            from graph_visualizer.pyvista_widget import GraphPyVistaWidget
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"PyVista widget dependency unavailable: {exc}")
+        widget = object.__new__(GraphPyVistaWidget)
+        widget.depth_focus_enabled = True
+        widget.depth_focus_axis = "x"
+        widget.depth_focus_fraction = 0.5
+        widget.depth_focus_width = 0.2
+
+        bounds = (0.0, 10.0, 0.0, 10.0, 0.0, 100.0)
+
+        self.assertTrue(widget._node_in_depth_focus(np.array([5.0, 0.0, 0.0]), bounds))
+        self.assertFalse(widget._node_in_depth_focus(np.array([1.0, 0.0, 50.0]), bounds))
+
+        widget.depth_focus_axis = "z"
+        self.assertTrue(widget._node_in_depth_focus(np.array([1.0, 0.0, 50.0]), bounds))
+
+    def test_depth_focus_dims_unfocused_opacity_and_color(self) -> None:
+        try:
+            from graph_visualizer.pyvista_widget import GraphPyVistaWidget
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"PyVista widget dependency unavailable: {exc}")
+        widget = object.__new__(GraphPyVistaWidget)
+        widget.shader_mode_enabled = False
+        widget.cell_opacity = 0.5
+        widget.depth_focus_enabled = True
+        widget.depth_focus_fraction = 0.5
+        widget.depth_focus_width = 0.2
+        widget.dark_mode = False
+
+        self.assertAlmostEqual(widget._cell_opacity(False, False, False), 0.11)
+        self.assertAlmostEqual(widget._cell_opacity(False, True, False), 0.78)
+        self.assertEqual(widget._depth_adjust_rgb([100, 150, 200], False), [199, 213, 227])
+
+    def test_depth_focus_setter_updates_axis_and_width(self) -> None:
+        try:
+            from graph_visualizer.pyvista_widget import GraphPyVistaWidget
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"PyVista widget dependency unavailable: {exc}")
+        widget = object.__new__(GraphPyVistaWidget)
+        widget.depth_focus_enabled = False
+        widget.depth_focus_axis = "z"
+        widget.depth_focus_fraction = 0.5
+        widget.depth_focus_width = 0.12
+        widget._apply_shader_mode_to_scene = lambda: None
+        widget.safe_render = lambda: True
+
+        widget.set_depth_focus(True, 0.25, axis="Y", width=0.4, render=False)
+
+        self.assertTrue(widget.depth_focus_enabled)
+        self.assertEqual(widget.depth_focus_axis, "y")
+        self.assertAlmostEqual(widget.depth_focus_fraction, 0.25)
+        self.assertAlmostEqual(widget.depth_focus_width, 0.4)
+
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(
             {
