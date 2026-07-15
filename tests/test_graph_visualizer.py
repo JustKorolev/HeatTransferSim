@@ -37,7 +37,6 @@ from graph_visualizer.matrix_builder import (
     refresh_radiation_from_exposed_faces,
 )
 from graph_visualizer.models import EdgeMode, GraphMetadata, NodeProperties, ThermalGraphModel
-from graph_visualizer.pyvista_widget import _safe_node_cube_geometry
 from graph_visualizer.role_assignment import (
     assign_matching_nodes_to_role,
     node_has_heater_sensor_role,
@@ -1460,27 +1459,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(node.role_source_components, ["legacy_heater", "legacy_sensor"])
         self.assertEqual(node.source_bounds_mm["min"], [1.0, 2.0, 3.0])
         self.assertEqual(node.source_bounds_mm["max"], [4.0, 5.0, 6.0])
-
-    def test_cad_role_node_draws_as_bounded_marker_not_full_source_bounds(self) -> None:
-        node = NodeProperties.from_dict(
-            {
-                "node_id": 24,
-                "coord": [24, 0, 0],
-                "node_type": "heater",
-                "component_name": "long_safe_heater",
-                "center_mm": [10.0, 0.0, 0.0],
-                "size_mm": [120.0, 4.0, 2.0],
-                "source_components": ["SAFE-HEATER-1"],
-                "is_heater": True,
-            }
-        )
-
-        geometry = _safe_node_cube_geometry(node)
-
-        self.assertIsNotNone(geometry)
-        _center, lengths = geometry
-        self.assertEqual(lengths, (2.0, 2.0, 2.0))
-        self.assertEqual(node.size_mm, (120.0, 4.0, 2.0))
 
     def test_octree_load_adjusts_duplicate_loaded_coords(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(

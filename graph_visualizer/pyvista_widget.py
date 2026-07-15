@@ -1535,17 +1535,4 @@ def _safe_node_cube_geometry(node: Any) -> tuple[np.ndarray, tuple[float, float,
     if lengths.shape != (3,) or not np.all(np.isfinite(lengths)):
         return None
     lengths = np.maximum(lengths, 1.0e-6)
-    if bool(getattr(node, "is_cad_role_node", False)):
-        marker_side = _role_marker_display_side_mm(lengths)
-        lengths = np.array([marker_side, marker_side, marker_side], dtype=float)
     return center, tuple(float(value) for value in lengths)
-
-
-def _role_marker_display_side_mm(lengths: np.ndarray) -> float:
-    finite_lengths = [float(value) for value in lengths if np.isfinite(float(value)) and float(value) > 0.0]
-    if not finite_lengths:
-        return 1.0
-    source_extent = max(finite_lengths)
-    # Marker-only heater/sensor nodes carry CAD bounds for provenance/contact lookup, not thermal volume.
-    # Keep their visual glyph visible without letting long strips/probes look like body voxels.
-    return max(0.5, min(2.0, source_extent * 0.05))
