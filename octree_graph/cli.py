@@ -18,6 +18,7 @@ import traceback
 from typing import Any
 
 import numpy as np
+from scipy.sparse import issparse
 
 from .graph_builder import (
     DEFAULT_MAX_HEATERS_PER_SENSOR,
@@ -28,7 +29,7 @@ from .graph_builder import (
 from .load_contact_report import load_contact_report
 from .load_gltf import GltfScene, load_gltf_scene
 from .materials import load_material_table
-from .matrix_builder import build_matrices
+from .matrix_builder import DENSE_MATRIX_NODE_LIMIT, build_matrices
 from .octree import OctreeDiagnostics, OctreeParams, build_octree
 from .validation import format_validation_report, validate_graph
 
@@ -106,7 +107,11 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     )
     _raise_if_empty_graph(graph_result.nodes, leaves, args)
     progress.phase("Building matrices")
-    matrices = build_matrices(graph_result.nodes, graph_result.edges)
+    matrices = build_matrices(
+        graph_result.nodes,
+        graph_result.edges,
+        dense_node_limit=args.dense_matrix_node_limit,
+    )
     output = Path(args.output_root) / args.graph_name
     input_files = {
         "gltf": str(gltf_path),
@@ -152,6 +157,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--materials", default="materials.json")
     parser.add_argument("--graph-name", required=True)
     parser.add_argument("--output-root", default="graphs")
+    parser.add_argument(
+        "--dense-matrix-node-limit",
+        type=int,
+        default=DENSE_MATRIX_NODE_LIMIT,
+        help=(
+            "Write dense G.npy/L.npy only at or below this node count. Larger graphs write sparse "
+            "L_sparse.json and skip dense conductance matrices to avoid RAM exhaustion. Use 0 to "
+            "force sparse matrix output."
+        ),
+    )
     parser.add_argument("--min-cell-size-mm", type=float, default=5.0)
     parser.add_argument("--max-cell-size-mm", type=float, default=50.0)
     parser.add_argument("--max-depth", type=int, default=8)
@@ -1005,6 +1020,8 @@ def _write_outputs(
         writer.writerow(["warning"])
         writer.writerows([[warning] for warning in warnings])
     for key, value in matrices.items():
+        if issparse(value):
+            continue
         np.save(output / f"{key}.npy", value)
     _write_browser_matrix_exports(output, matrices)
     (output / "simulations").mkdir(exist_ok=True)
@@ -1035,7 +1052,19 @@ def _write_browser_matrix_exports(output: Path, matrices: dict[str, np.ndarray])
     if "G_rad" in matrices:
         _atomic_write_json(output / "G_rad_diag.json", {"data": np.asarray(matrices["G_rad"], dtype=float).tolist()})
     if "L" in matrices:
-        L = np.asarray(matrices["L"], dtype=float)
+        L_value = matrices["L"]
+        if issparse(L_value):
+            L_coo = L_value.tocoo()
+            payload = {
+                "shape": list(L_coo.shape),
+                "format": "coo",
+                "row": L_coo.row.astype(int).tolist(),
+                "col": L_coo.col.astype(int).tolist(),
+                "data": L_coo.data.astype(float).tolist(),
+            }
+            _atomic_write_json(output / "L_sparse.json", payload)
+            return
+        L = np.asarray(L_value, dtype=float)
         row, col = np.nonzero(L)
         payload = {
             "shape": list(L.shape),

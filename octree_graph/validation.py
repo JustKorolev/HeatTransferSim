@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.sparse import issparse
 
 
 def validate_graph(graph: dict, matrices: dict[str, np.ndarray]) -> tuple[list[str], list[str]]:
@@ -28,16 +29,22 @@ def validate_graph(graph: dict, matrices: dict[str, np.ndarray]) -> tuple[list[s
         if float(edge.get("G_W_K", 0.0)) < 0.0:
             errors.append(f"Edge {edge.get('edge_id')} has negative conductance.")
     size = len(nodes)
-    for key in ("C", "G", "L"):
+    for key in ("C", "L"):
         if key not in matrices:
             errors.append(f"Missing matrix {key}.")
+    if "G" not in matrices and not issparse(matrices.get("L")):
+        errors.append("Missing matrix G.")
     if "G" in matrices and matrices["G"].shape != (size, size):
         errors.append(f"G shape {matrices['G'].shape} does not match node count {size}.")
     if "L" in matrices and matrices["L"].shape != (size, size):
         errors.append(f"L shape {matrices['L'].shape} does not match node count {size}.")
     if "G" in matrices and not np.allclose(matrices["G"], matrices["G"].T):
         errors.append("G is not symmetric.")
-    if "L" in matrices and not np.allclose(matrices["L"], matrices["L"].T):
+    if "L" in matrices and issparse(matrices["L"]):
+        difference = matrices["L"] - matrices["L"].T
+        if difference.nnz and np.max(np.abs(difference.data)) > 1.0e-12:
+            errors.append("L is not symmetric.")
+    elif "L" in matrices and not np.allclose(matrices["L"], matrices["L"].T):
         errors.append("L is not symmetric.")
     return errors, warnings
 

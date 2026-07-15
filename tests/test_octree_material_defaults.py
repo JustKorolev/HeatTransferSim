@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from scipy.sparse import issparse
 
 from octree_graph.cli import (
     build_parser,
@@ -17,6 +18,7 @@ from octree_graph.cli import (
     _raise_if_empty_graph,
     _resolve_material_lookup_path,
     _split_role_components,
+    _write_outputs,
 )
 from octree_graph.load_contact_report import ContactReport
 from octree_graph.graph_builder import (
@@ -52,6 +54,7 @@ from octree_graph.octree import (
     TriangleSpatialIndex,
     build_octree,
 )
+from octree_graph.validation import validate_graph
 
 
 def _mesh_object(
@@ -631,6 +634,20 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual(args.contains_backend, "ray")
 
+    def test_cli_accepts_dense_matrix_node_limit(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--mesh-dir",
+                "meshes",
+                "--graph-name",
+                "graph",
+                "--dense-matrix-node-limit",
+                "0",
+            ]
+        )
+
+        self.assertEqual(args.dense_matrix_node_limit, 0)
+
     def test_cli_role_substrings_are_normalized_like_cad_names(self) -> None:
         body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
         sensor = _mesh_object("THERMAL_PICKUP_A", "Copper", [-6.0, -1.0, -1.0], [-5.0, 1.0, 1.0])
@@ -781,6 +798,73 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         body_row = list(matrices["node_ids"]).index(body["node_id"])
         heater_row = list(matrices["node_ids"]).index(heater["node_id"])
         self.assertEqual(matrices["G"][body_row, heater_row], 0.0)
+
+    def test_large_octree_matrix_builder_uses_sparse_laplacian_without_dense_g(self) -> None:
+        nodes = [
+            {
+                "node_id": node_id,
+                "component_name": f"component_{node_id}",
+                "material_name": "Copper",
+                "C_J_K": 1.0,
+                "radiation": {"G_rad_W_K": 0.0},
+            }
+            for node_id in range(4)
+        ]
+        edges = [
+            {"edge_id": "edge_0", "node_i": 0, "node_j": 1, "G_W_K": 2.0},
+            {"edge_id": "edge_1", "node_i": 1, "node_j": 2, "G_W_K": 3.0},
+            {
+                "edge_id": "marker",
+                "node_i": 2,
+                "node_j": 3,
+                "G_W_K": 99.0,
+                "edge_type": "role_node_contact",
+            },
+        ]
+
+        matrices = build_octree_matrices(nodes, edges, dense_node_limit=1)
+
+        self.assertNotIn("G", matrices)
+        self.assertTrue(issparse(matrices["L"]))
+        dense_l = matrices["L"].toarray()
+        self.assertEqual(dense_l[0, 0], 2.0)
+        self.assertEqual(dense_l[1, 1], 5.0)
+        self.assertEqual(dense_l[2, 2], 3.0)
+        self.assertEqual(dense_l[2, 3], 0.0)
+        self.assertEqual(validate_graph({"graph_nodes": nodes, "graph_edges": edges, "warnings": []}, matrices)[0], [])
+
+    def test_sparse_octree_output_writes_l_sparse_without_dense_matrix_files(self) -> None:
+        nodes = [
+            {
+                "node_id": node_id,
+                "component_name": f"component_{node_id}",
+                "material_name": "Copper",
+                "C_J_K": 1.0,
+                "radiation": {"G_rad_W_K": 0.0},
+            }
+            for node_id in range(3)
+        ]
+        edges = [{"edge_id": "edge_0", "node_i": 0, "node_j": 1, "G_W_K": 2.0}]
+        matrices = build_octree_matrices(nodes, edges, dense_node_limit=1)
+        graph = {
+            "metadata": {"graph_name": "sparse_output"},
+            "parameters": {},
+            "diagnostics": {},
+            "graph_nodes": nodes,
+            "graph_edges": edges,
+            "warnings": [],
+        }
+        materials = {"Copper": Material("Copper", density_kg_m3=1.0, cp_J_kgK=1.0, k_W_mK=1.0, emissivity=0.5)}
+
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            _write_outputs(output, graph, matrices, materials, warnings=[])
+
+            self.assertTrue((output / "L_sparse.json").exists())
+            self.assertTrue((output / "C.npy").exists())
+            self.assertTrue((output / "G_rad.npy").exists())
+            self.assertFalse((output / "G.npy").exists())
+            self.assertFalse((output / "L.npy").exists())
 
     def test_graph_build_adds_dedicated_role_node_when_detected_component_has_no_voxel_cells(self) -> None:
         materials = self.make_materials()
