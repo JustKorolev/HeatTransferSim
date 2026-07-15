@@ -190,6 +190,7 @@ class HeatTransferSimulationTab:
             ("playback_speed", "playback speed", 0.01, 1.0e6, 0.25),
         ):
             self._add_double_parameter(run_form, name, label, minimum, maximum, step)
+        self._add_int_parameter(run_form, "simulation_history_limit", "history limit", 0, 1_000_000, 1)
         self.inputs["loop_playback"] = self._checkbox(
             "Loop playback", self.params.loop_playback, self._handle_parameter_change
         )
@@ -1229,6 +1230,7 @@ class HeatTransferSimulationTab:
             color_max_K=float(self.inputs["color_max_K"].value()),
             loop_playback=bool(self.inputs["loop_playback"].isChecked()),
             gpu_simulation_enabled=bool(self.inputs["gpu_simulation_enabled"].isChecked()),
+            simulation_history_limit=int(self.inputs["simulation_history_limit"].value()),
             mimo_controller_enabled=self._mimo_controller_should_run(),
             mimo_hold_threshold_K=float(self.inputs["mimo_hold_threshold_K"].value()),
             mimo_coarse_threshold_K=float(self.inputs["mimo_coarse_threshold_K"].value()),
@@ -1306,7 +1308,11 @@ class HeatTransferSimulationTab:
                 continue
             if hasattr(widget, "setValue"):
                 widget.blockSignals(True)
-                widget.setValue(float(getattr(self.params, key)))
+                value = getattr(self.params, key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    widget.setValue(int(value))
+                else:
+                    widget.setValue(float(value))
                 widget.blockSignals(False)
             elif hasattr(widget, "setChecked"):
                 widget.blockSignals(True)
@@ -1536,7 +1542,7 @@ class HeatTransferSimulationTab:
 
     def _handle_visual_control_changed(self, *_: Any) -> None:
         self._sync_view_controls_to_viewer()
-        self._draw_current(reset_camera=False)
+        self.viewer.safe_render()
 
     def _sync_view_controls_to_viewer(self) -> None:
         if not hasattr(self, "viewer") or not hasattr(self, "opacity_slider"):
@@ -1660,6 +1666,31 @@ class HeatTransferSimulationTab:
         widget.valueChanged.connect(self._handle_parameter_change)
         self.inputs[name] = widget
         form.addRow(label, widget)
+
+    def _add_int_parameter(
+        self,
+        form: Any,
+        name: str,
+        label: str,
+        minimum: int,
+        maximum: int,
+        step: int,
+    ) -> None:
+        widget = self._int_spin(minimum, maximum, int(getattr(self.params, name)), step)
+        widget.valueChanged.connect(self._handle_parameter_change)
+        self.inputs[name] = widget
+        form.addRow(label, widget)
+
+    def _int_spin(self, minimum: int, maximum: int, value: int, step: int) -> Any:
+        class NoWheelSpinBox(self.QtWidgets.QSpinBox):
+            def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802 - Qt override name.
+                event.ignore()
+
+        widget = NoWheelSpinBox()
+        widget.setRange(int(minimum), int(maximum))
+        widget.setSingleStep(int(step))
+        widget.setValue(int(value))
+        return widget
 
     def _double_spin(self, minimum: float, maximum: float, value: float, step: float) -> Any:
         class NoWheelDoubleSpinBox(self.QtWidgets.QDoubleSpinBox):

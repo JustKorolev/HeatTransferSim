@@ -283,9 +283,16 @@ class PreparedSimulation:
             dict(self.controller_last_power_by_heater),
             self.controller_mode,
         )
-        self.history.append(state)
-        self.history_index = len(self.history) - 1
+        self._append_history_state(state)
         return state
+
+    def _append_history_state(self, state: SimulationState) -> None:
+        self.history.append(state)
+        limit = max(0, int(getattr(self.params, "simulation_history_limit", 0)))
+        if limit > 0 and len(self.history) > limit:
+            overflow = len(self.history) - limit
+            del self.history[:overflow]
+        self.history_index = len(self.history) - 1
 
     def step_with_forced_heater_powers(
         self,

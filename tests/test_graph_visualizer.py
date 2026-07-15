@@ -1583,7 +1583,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         widget.depth_focus_axis = "z"
         widget.depth_focus_fraction = 0.5
         widget.depth_focus_width = 0.12
-        widget._apply_shader_mode_to_scene = lambda: None
+        widget._apply_visual_controls_to_scene = lambda: None
         widget.safe_render = lambda: True
 
         widget.set_depth_focus(True, 0.25, axis="Y", width=0.4, render=False)
@@ -1592,6 +1592,56 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(widget.depth_focus_axis, "y")
         self.assertAlmostEqual(widget.depth_focus_fraction, 0.25)
         self.assertAlmostEqual(widget.depth_focus_width, 0.4)
+
+    def test_editor_view_controls_do_not_redraw_voxel_geometry(self) -> None:
+        try:
+            from graph_visualizer.app import GraphVisualizerApp
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Viewer:
+            def __init__(self) -> None:
+                self.render_count = 0
+
+            def safe_render(self) -> bool:
+                self.render_count += 1
+                return True
+
+        app = object.__new__(GraphVisualizerApp)
+        app.viewer = Viewer()
+        sync_calls = []
+        app._sync_view_controls_to_viewer = lambda: sync_calls.append(True)
+        app._refresh_all = lambda reset_camera=False: (_ for _ in ()).throw(AssertionError("redrew voxels"))
+
+        app._handle_view_control_changed()
+
+        self.assertEqual(sync_calls, [True])
+        self.assertEqual(app.viewer.render_count, 1)
+
+    def test_simulation_view_controls_do_not_redraw_voxel_geometry(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Viewer:
+            def __init__(self) -> None:
+                self.render_count = 0
+
+            def safe_render(self) -> bool:
+                self.render_count += 1
+                return True
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.viewer = Viewer()
+        sync_calls = []
+        tab._sync_view_controls_to_viewer = lambda: sync_calls.append(True)
+        tab._draw_current = lambda reset_camera=False: (_ for _ in ()).throw(AssertionError("redrew voxels"))
+
+        tab._handle_visual_control_changed()
+
+        self.assertEqual(sync_calls, [True])
+        self.assertEqual(tab.viewer.render_count, 1)
 
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(
@@ -2306,6 +2356,38 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertEqual(prepared.history_index, 3)
         self.assertEqual(len(prepared.history), 4)
+
+    def test_simulation_history_limit_retains_recent_states_only(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="bounded_history"))
+        node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        node.C_J_K = 10.0
+        node.G_rad_W_K = 1.0
+        node.initial_temperature_K = 310.0
+        model.add_node(node)
+        matrices = {
+            "node_ids": np.array([1], dtype=int),
+            "C": np.array([10.0]),
+            "L": np.zeros((1, 1)),
+            "G_rad": np.array([1.0]),
+        }
+        prepared = prepare_simulation(
+            model,
+            matrices,
+            SimulationParameters(
+                dt_s=1.0,
+                T_env_K=290.0,
+                use_ambient_radiation=True,
+                simulation_history_limit=3,
+            ),
+        )
+
+        for _ in range(5):
+            prepared.step_forward()
+
+        self.assertEqual(len(prepared.history), 3)
+        self.assertEqual(prepared.history_index, 2)
+        self.assertAlmostEqual(prepared.history[0].time_s, 3.0)
+        self.assertAlmostEqual(prepared.time_s, 5.0)
 
     def test_initial_temperature_parameter_payload_is_keyed_by_node_id(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="initials"))

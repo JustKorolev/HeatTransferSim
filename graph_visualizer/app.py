@@ -1766,7 +1766,8 @@ class GraphVisualizerApp:
 
     def _handle_view_control_changed(self, *_: Any) -> None:
         self._sync_view_controls_to_viewer()
-        self._refresh_all(reset_camera=False)
+        if hasattr(self, "viewer"):
+            self.viewer.safe_render()
 
     def _sync_view_controls_to_viewer(self) -> None:
         if not hasattr(self, "viewer") or not hasattr(self, "opacity_slider"):
