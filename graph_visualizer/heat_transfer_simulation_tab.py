@@ -194,6 +194,13 @@ class HeatTransferSimulationTab:
             "Loop playback", self.params.loop_playback, self._handle_parameter_change
         )
         run_form.addRow(self.inputs["loop_playback"])
+        self.inputs["gpu_simulation_enabled"] = self._checkbox(
+            "GPU sparse stepping", self.params.gpu_simulation_enabled, self._handle_parameter_change
+        )
+        self.inputs["gpu_simulation_enabled"].setToolTip(
+            "Use CuPy for large sparse temperature stepping when available. Falls back to CPU if unavailable."
+        )
+        run_form.addRow(self.inputs["gpu_simulation_enabled"])
         self.input_mode = self.QtWidgets.QComboBox()
         self.input_mode.addItems(["zero", "heater_inputs"])
         self.input_mode.setCurrentText(self.params.input_mode)
@@ -1221,6 +1228,7 @@ class HeatTransferSimulationTab:
             color_min_K=float(self.inputs["color_min_K"].value()),
             color_max_K=float(self.inputs["color_max_K"].value()),
             loop_playback=bool(self.inputs["loop_playback"].isChecked()),
+            gpu_simulation_enabled=bool(self.inputs["gpu_simulation_enabled"].isChecked()),
             mimo_controller_enabled=self._mimo_controller_should_run(),
             mimo_hold_threshold_K=float(self.inputs["mimo_hold_threshold_K"].value()),
             mimo_coarse_threshold_K=float(self.inputs["mimo_coarse_threshold_K"].value()),

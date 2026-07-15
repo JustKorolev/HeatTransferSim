@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from scipy.sparse import csr_matrix
 
 import graph_visualizer.graph_io as graph_io
 from graph_visualizer.draw_tools import (
@@ -2201,6 +2202,70 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertIsNone(prepared.Phi_aug)
         self.assertLess(float(prepared.temperatures_K[0]), float(before[0]))
+
+    def test_gpu_simulation_request_falls_back_when_cupy_unavailable(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="gpu_unavailable"))
+        node_count = 513
+        for node_id in range(node_count):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+            node.C_J_K = 10.0
+            node.G_rad_W_K = 1.0
+            node.initial_temperature_K = 310.0
+            model.add_node(node)
+        matrices = {
+            "node_ids": np.arange(node_count, dtype=int),
+            "C": np.full(node_count, 10.0),
+            "L": csr_matrix((node_count, node_count), dtype=float),
+            "G_rad": np.ones(node_count),
+        }
+
+        with patch(
+            "graph_visualizer.simulation_model._optional_cupy_modules",
+            return_value=(None, None, "not installed"),
+        ):
+            prepared = prepare_simulation(
+                model,
+                matrices,
+                SimulationParameters(dt_s=1.0, gpu_simulation_enabled=True),
+            )
+
+        self.assertIsNone(prepared.gpu_stepper)
+        self.assertTrue(any("CuPy is unavailable" in warning for warning in prepared.warnings))
+
+    def test_gpu_stepper_is_used_when_available(self) -> None:
+        class FakeGpuStepper:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def step(self, temperatures_K: np.ndarray, heater_power: np.ndarray) -> np.ndarray:
+                self.calls += 1
+                return np.asarray(temperatures_K, dtype=float) - 2.0
+
+        fake_stepper = FakeGpuStepper()
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="gpu_hook"))
+        node_count = 513
+        for node_id in range(node_count):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+            node.C_J_K = 10.0
+            node.initial_temperature_K = 310.0
+            model.add_node(node)
+        matrices = {
+            "node_ids": np.arange(node_count, dtype=int),
+            "C": np.full(node_count, 10.0),
+            "L": csr_matrix((node_count, node_count), dtype=float),
+            "G_rad": np.zeros(node_count),
+        }
+
+        with patch("graph_visualizer.simulation_model._build_gpu_sparse_stepper", return_value=fake_stepper):
+            prepared = prepare_simulation(
+                model,
+                matrices,
+                SimulationParameters(dt_s=1.0, gpu_simulation_enabled=True),
+            )
+        prepared.step_forward()
+
+        self.assertEqual(fake_stepper.calls, 1)
+        self.assertAlmostEqual(float(prepared.temperatures_K[0]), 308.0)
 
     def test_simulation_history_seek_preserves_computed_future(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="history_cursor"))

@@ -29,6 +29,34 @@ STEFAN_BOLTZMANN_W_M2K4 = 5.670374419e-8
 
 
 @dataclass
+class GpuSparseStepper:
+    cp: Any
+    A_gpu: Any
+    inv_C_gpu: Any
+    base_b_gpu: Any
+    radiation_coeff_gpu: Any
+    use_ambient_radiation: bool
+    ambient_K: float
+    dt_s: float
+    substeps: int
+
+    def step(self, temperatures_K: np.ndarray, heater_power: np.ndarray) -> np.ndarray:
+        cp = self.cp
+        temperatures = cp.asarray(np.asarray(temperatures_K, dtype=float).reshape(-1))
+        powers = cp.asarray(np.asarray(heater_power, dtype=float).reshape(-1))
+        h = float(self.dt_s) / max(1, int(self.substeps))
+        source = self.base_b_gpu + self.inv_C_gpu * powers
+        for _ in range(max(1, int(self.substeps))):
+            rhs = self.A_gpu @ temperatures + source
+            if self.use_ambient_radiation:
+                rhs = rhs + self.inv_C_gpu * self.radiation_coeff_gpu * (
+                    float(self.ambient_K) ** 4 - temperatures**4
+                )
+            temperatures = temperatures + h * rhs
+        return cp.asnumpy(temperatures)
+
+
+@dataclass
 class SimulationState:
     time_s: float
     temperatures_K: np.ndarray
@@ -73,6 +101,7 @@ class PreparedSimulation:
     A: Any | None = None
     base_b: np.ndarray | None = None
     radiation_coeff_W_K4: np.ndarray | None = None
+    gpu_stepper: Any | None = None
     dynamic_heater_inputs: bool = False
     warnings: list[str] = field(default_factory=list)
     controller_integrators: dict[int, float] = field(default_factory=dict)
@@ -234,11 +263,12 @@ class PreparedSimulation:
         if self.dynamic_heater_inputs:
             self._step_dynamic_heater_inputs()
         elif self.Phi_aug is None:
-            self.z = np.asarray(
-                expm_multiply(self.A_aug * float(self.params.dt_s), self.z),
-                dtype=float,
-            )
-            self.z[-1] = 1.0
+            if not self._advance_with_gpu_power_vector(np.zeros(len(self.node_ids), dtype=float)):
+                self.z = np.asarray(
+                    expm_multiply(self.A_aug * float(self.params.dt_s), self.z),
+                    dtype=float,
+                )
+                self.z[-1] = 1.0
         else:
             self.z = self.Phi_aug @ self.z
         state = SimulationState(
@@ -324,6 +354,8 @@ class PreparedSimulation:
     def _advance_with_power_vector(self, heater_power: np.ndarray) -> None:
         if self.inv_C is None or self.A is None or self.base_b is None:
             return
+        if self._advance_with_gpu_power_vector(heater_power):
+            return
         b = (
             np.asarray(self.base_b, dtype=float)
             + np.asarray(self.inv_C, dtype=float) * np.asarray(heater_power, dtype=float)
@@ -344,6 +376,18 @@ class PreparedSimulation:
             A_aug[: len(self.node_ids), len(self.node_ids)] = b
             self.z = expm(A_aug * float(self.params.dt_s)) @ self.z
         self.z[-1] = 1.0
+
+    def _advance_with_gpu_power_vector(self, heater_power: np.ndarray) -> bool:
+        if self.gpu_stepper is None:
+            return False
+        try:
+            temperatures = self.gpu_stepper.step(self.temperatures_K, heater_power)
+        except Exception as exc:
+            self.warnings.append(f"GPU simulation step failed; falling back to CPU stepping: {exc}")
+            self.gpu_stepper = None
+            return False
+        self.z = np.concatenate([np.asarray(temperatures, dtype=float), np.array([1.0])])
+        return True
 
     def _radiation_source_vector(self, temperatures_K: np.ndarray | None = None) -> np.ndarray:
         if (
@@ -1003,6 +1047,17 @@ def prepare_simulation(
             A_aug[:n, :n] = A
             A_aug[:n, n] = b
             Phi_aug = expm(A_aug * float(params.dt_s))
+    gpu_stepper = _build_gpu_sparse_stepper(
+        A,
+        inv_C,
+        b,
+        radiation_coeff,
+        C,
+        L,
+        G_rad,
+        params,
+        warnings,
+    )
     prepared = PreparedSimulation(
         node_ids=node_ids,
         A_aug=A_aug,
@@ -1015,11 +1070,93 @@ def prepare_simulation(
         A=A,
         base_b=b,
         radiation_coeff_W_K4=radiation_coeff,
+        gpu_stepper=gpu_stepper,
         dynamic_heater_inputs=dynamic_heater_inputs,
         warnings=warnings,
     )
     prepared.reset()
     return prepared
+
+
+def _build_gpu_sparse_stepper(
+    A: Any,
+    inv_C: np.ndarray,
+    base_b: np.ndarray,
+    radiation_coeff: np.ndarray,
+    C: np.ndarray,
+    L: Any,
+    G_rad: np.ndarray,
+    params: SimulationParameters,
+    warnings: list[str],
+) -> GpuSparseStepper | None:
+    if not bool(getattr(params, "gpu_simulation_enabled", False)):
+        return None
+    if not issparse(A):
+        warnings.append("GPU sparse stepping requested, but this graph is using a dense CPU stepper.")
+        return None
+    cp, cupyx_sparse, reason = _optional_cupy_modules()
+    if cp is None or cupyx_sparse is None:
+        warnings.append(f"GPU sparse stepping requested, but CuPy is unavailable: {reason}")
+        return None
+    try:
+        if int(cp.cuda.runtime.getDeviceCount()) <= 0:
+            warnings.append("GPU sparse stepping requested, but no CUDA device was reported by CuPy.")
+            return None
+    except Exception as exc:
+        warnings.append(f"GPU sparse stepping requested, but CUDA device detection failed: {exc}")
+        return None
+    substeps = _gpu_substep_count(C, L, G_rad, params)
+    if substeps is None:
+        warnings.append("GPU sparse stepping requested, but no positive thermal time constant could be estimated.")
+        return None
+    max_substeps = max(1, int(getattr(params, "gpu_simulation_max_substeps", 128)))
+    if substeps > max_substeps:
+        warnings.append(
+            "GPU sparse stepping requested, but the timestep would require "
+            f"{substeps} explicit substeps; CPU exponential stepping is safer. "
+            f"Reduce dt_s or increase gpu_simulation_max_substeps above {max_substeps}."
+        )
+        return None
+    try:
+        stepper = GpuSparseStepper(
+            cp=cp,
+            A_gpu=cupyx_sparse.csr_matrix(A),
+            inv_C_gpu=cp.asarray(np.asarray(inv_C, dtype=float).reshape(-1)),
+            base_b_gpu=cp.asarray(np.asarray(base_b, dtype=float).reshape(-1)),
+            radiation_coeff_gpu=cp.asarray(np.asarray(radiation_coeff, dtype=float).reshape(-1)),
+            use_ambient_radiation=bool(params.use_ambient_radiation and np.any(radiation_coeff > 0.0)),
+            ambient_K=float(params.T_env_K),
+            dt_s=float(params.dt_s),
+            substeps=int(substeps),
+        )
+    except Exception as exc:
+        warnings.append(f"GPU sparse stepping requested, but GPU array initialization failed: {exc}")
+        return None
+    warnings.append(f"GPU sparse stepping enabled with {int(substeps)} explicit substep(s) per simulation step.")
+    return stepper
+
+
+def _optional_cupy_modules() -> tuple[Any | None, Any | None, str]:
+    try:
+        import cupy as cp
+        from cupyx.scipy import sparse as cupyx_sparse
+    except Exception as exc:
+        return None, None, str(exc)
+    return cp, cupyx_sparse, ""
+
+
+def _gpu_substep_count(
+    C: np.ndarray,
+    L: Any,
+    G_rad: np.ndarray,
+    params: SimulationParameters,
+) -> int | None:
+    tau_min = estimate_min_time_constant(C, L, G_rad)
+    if tau_min is None or not np.isfinite(tau_min) or tau_min <= 0.0:
+        return None
+    safety = max(1.0e-6, min(1.0, float(getattr(params, "gpu_simulation_safety_factor", 0.2))))
+    max_substep_s = max(float(tau_min) * safety, 1.0e-12)
+    return max(1, int(np.ceil(float(params.dt_s) / max_substep_s)))
 
 
 def validate_simulation_inputs(
