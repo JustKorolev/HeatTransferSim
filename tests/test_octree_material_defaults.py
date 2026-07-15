@@ -38,12 +38,14 @@ from octree_graph.materials import (
 )
 from octree_graph.octree import (
     OctreeCell,
+    CellClassification,
     OctreeDiagnostics,
     OctreeParams,
     _mesh_contains_point,
     _mesh_triangles,
     _objects_intersecting_bounds,
     _physical_material_name,
+    _refinement_priority,
     _sample_points,
     _triangle_intersects_aabb,
     TriangleSpatialIndex,
@@ -1684,6 +1686,87 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(len(coarse), 1)
         self.assertGreater(len(crowded), len(coarse))
         self.assertLess(min(max(cell.size_mm) for cell in crowded), max(coarse[0].size_mm))
+
+    def test_occupied_above_max_cell_size_dominates_discretionary_refinement_priority(self) -> None:
+        params = OctreeParams(max_cell_size_mm=8.0)
+        occupied_above_max = CellClassification(
+            occupied=True,
+            surface_hit=False,
+            inside_hit=True,
+            near_surface_hit=False,
+            bbox_only_hit=False,
+            surface_mesh_ids=set(),
+            inside_mesh_ids={1},
+            near_surface_mesh_ids=set(),
+            candidate_mesh_ids={1},
+            crowded_component_count=1,
+            role_component_count=0,
+            surface_component_count=0,
+            near_surface_component_count=1,
+            material_ids={"Aluminum"},
+            part_ids={"large_part"},
+            occupancy={"large_part": 1.0},
+            material_fractions={"Aluminum": 1.0},
+            dominant_component="large_part",
+            dominant_material="Aluminum",
+            volume_fraction=1.0,
+            acceptance_reason="inside",
+        )
+        crowded_detail = CellClassification(
+            occupied=True,
+            surface_hit=True,
+            inside_hit=False,
+            near_surface_hit=True,
+            bbox_only_hit=False,
+            surface_mesh_ids={2, 3},
+            inside_mesh_ids=set(),
+            near_surface_mesh_ids={2, 3, 4, 5, 6},
+            candidate_mesh_ids={2, 3, 4, 5, 6},
+            crowded_component_count=8,
+            role_component_count=0,
+            surface_component_count=2,
+            near_surface_component_count=5,
+            material_ids={"Aluminum", "Copper"},
+            part_ids={"a", "b"},
+            occupancy={"a": 0.5, "b": 0.5},
+            material_fractions={"Aluminum": 0.5, "Copper": 0.5},
+            dominant_component="a",
+            dominant_material="Aluminum",
+            volume_fraction=0.5,
+            acceptance_reason="triangle_surface_intersection",
+            triangle_candidate_tests=512,
+        )
+
+        above_score, above_reasons = _refinement_priority(
+            occupied_above_max,
+            params,
+            np.array([46.0, 46.0, 46.0]),
+            mixed_parts=False,
+            mixed_materials=False,
+            high_contrast=False,
+            crowded_component_refinement=False,
+            role_component_refinement=False,
+            multi_surface_refinement=False,
+            surface_complexity_refinement=False,
+            needs_surface_refinement=False,
+        )
+        detail_score, detail_reasons = _refinement_priority(
+            crowded_detail,
+            params,
+            np.array([4.0, 4.0, 4.0]),
+            mixed_parts=True,
+            mixed_materials=True,
+            high_contrast=True,
+            crowded_component_refinement=True,
+            role_component_refinement=False,
+            multi_surface_refinement=True,
+            surface_complexity_refinement=True,
+            needs_surface_refinement=True,
+        )
+
+        self.assertIn("above_max_cell_size", above_reasons)
+        self.assertNotIn("above_max_cell_size", detail_reasons)
+        self.assertGreater(above_score, detail_score)
 
     def test_detected_role_bounds_force_local_octree_refinement(self) -> None:
         materials = self.make_materials()

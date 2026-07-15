@@ -972,7 +972,9 @@ def _refinement_priority(
     if needs_surface_refinement:
         add("surface_or_near_surface", 20.0)
     if classification.occupied and float(max(size_mm)) > float(params.max_cell_size_mm):
-        add("above_max_cell_size", 10.0)
+        target = max(float(params.max_cell_size_mm), 1.0e-9)
+        oversize_ratio = float(max(size_mm)) / target
+        add("above_max_cell_size", 10000.0 + 100.0 * oversize_ratio)
     if classification.bbox_only_hit:
         add("bbox_only_candidate", 5.0)
     if classification.inside_hit and not classification.surface_hit and classification.near_surface_component_count <= 1:
