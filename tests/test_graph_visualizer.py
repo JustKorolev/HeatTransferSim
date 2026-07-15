@@ -9,9 +9,11 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, issparse
 
 import graph_visualizer.graph_io as graph_io
+import graph_visualizer.matrix_builder as gv_matrix_builder
+import graph_visualizer.validation as graph_validation
 from graph_visualizer.draw_tools import (
     clone_node_for_extrusion,
     compute_face_normal,
@@ -67,6 +69,7 @@ from graph_visualizer.two_d_graph_widget import (
     expand_positions,
     node_connection_counts,
 )
+from graph_visualizer.validation import validate_conductance_matrix, validate_matrices
 
 
 class GraphVisualizerModelTests(unittest.TestCase):
@@ -80,6 +83,24 @@ class GraphVisualizerModelTests(unittest.TestCase):
         model.add_node(node_7)
         refresh_auto_edges(model)
         return model
+
+    def test_validation_skips_oversized_dense_symmetry_check(self) -> None:
+        matrices = {
+            "node_ids": np.array([1, 2], dtype=int),
+            "coords": np.array([[0, 0, 0], [1, 0, 0]], dtype=int),
+            "C": np.ones(2, dtype=float),
+            "Grad": np.zeros(2, dtype=float),
+            "G": np.array([[0.0, 1.0], [1.0, 0.0]], dtype=float),
+            "L": np.array([[1.0, -1.0], [-1.0, 1.0]], dtype=float),
+        }
+        old_limit = graph_validation._DENSE_SYMMETRY_CHECK_MAX_BYTES
+        graph_validation._DENSE_SYMMETRY_CHECK_MAX_BYTES = 1
+        try:
+            with patch("graph_visualizer.validation.np.allclose", side_effect=AssertionError):
+                self.assertEqual(validate_matrices(matrices, [1, 2]), [])
+                self.assertEqual(validate_conductance_matrix(matrices, [1, 2]), [])
+        finally:
+            graph_validation._DENSE_SYMMETRY_CHECK_MAX_BYTES = old_limit
 
     def test_auto_edges_use_six_neighbor_adjacency(self) -> None:
         model = self.make_model()
@@ -348,6 +369,120 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertTrue(hasattr(loaded_matrices["L"], "tocsr"))
         self.assertGreater(float(loaded_matrices["L"][0, 0]), 0.0)
         self.assertLess(float(loaded_matrices["L"][0, 1]), 0.0)
+
+    def test_visualizer_matrix_builder_uses_sparse_laplacian_above_limit(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="large_visualizer_matrix"))
+        left = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        right = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        for node in (left, right):
+            node.C_J_K = 10.0
+            model.add_node(node)
+        model.set_edge(1, 2, 0.75, EdgeMode.AUTO.value)
+
+        matrices = build_matrices(model, dense_node_limit=1)
+
+        self.assertNotIn("G", matrices)
+        self.assertTrue(issparse(matrices["L"]))
+        self.assertAlmostEqual(float(matrices["L"][0, 0]), 0.75)
+        self.assertAlmostEqual(float(matrices["L"][0, 1]), -0.75)
+
+    def test_visualizer_matrix_builder_forces_sparse_when_dense_byte_budget_exceeded(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="byte_guard_visualizer_matrix"))
+        left = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        right = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        for node in (left, right):
+            node.C_J_K = 10.0
+            model.add_node(node)
+        model.set_edge(1, 2, 0.25, EdgeMode.AUTO.value)
+        old_limit = gv_matrix_builder.DENSE_MATRIX_MAX_TOTAL_BYTES
+        gv_matrix_builder.DENSE_MATRIX_MAX_TOTAL_BYTES = 1
+        try:
+            matrices = build_matrices(model, dense_node_limit=100)
+        finally:
+            gv_matrix_builder.DENSE_MATRIX_MAX_TOTAL_BYTES = old_limit
+
+        self.assertNotIn("G", matrices)
+        self.assertTrue(issparse(matrices["L"]))
+        self.assertAlmostEqual(float(matrices["L"][0, 0]), 0.25)
+
+    def test_large_octree_load_preserves_existing_sparse_laplacian(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="preserve_sparse_octree"))
+        left = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        right = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        for node in (left, right):
+            node.material = "Copper"
+            node.size_mm = (1.0, 1.0, 1.0)
+            node.C_J_K = 10.0
+            model.add_node(node)
+        model.set_edge(1, 2, 99.0, EdgeMode.AUTO.value)
+        model.octree_graph_data = {"graph_edges": []}
+
+        old_limit = graph_io._DENSE_OCTREE_MATRIX_NODE_LIMIT
+        graph_io._DENSE_OCTREE_MATRIX_NODE_LIMIT = 1
+        try:
+            with TemporaryDirectory() as directory:
+                folder = Path(directory)
+                (folder / "graph.json").write_text(
+                    json.dumps(model.to_octree_graph_dict()),
+                    encoding="utf-8",
+                )
+                (folder / "L_sparse.json").write_text(
+                    json.dumps(
+                        {
+                            "shape": [2, 2],
+                            "format": "coo",
+                            "row": [0, 0, 1, 1],
+                            "col": [0, 1, 0, 1],
+                            "data": [0.25, -0.25, -0.25, 0.25],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                loaded_model, loaded_matrices = load_graph_folder(folder)
+        finally:
+            graph_io._DENSE_OCTREE_MATRIX_NODE_LIMIT = old_limit
+
+        self.assertEqual(set(loaded_model.edges), {(1, 2)})
+        self.assertTrue(issparse(loaded_matrices["L"]))
+        self.assertAlmostEqual(float(loaded_matrices["L"][0, 0]), 0.25)
+
+    def test_large_octree_save_preserves_existing_matrix_payload(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="metadata_only_large_save"))
+        left = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        right = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        for node in (left, right):
+            node.material = "Copper"
+            node.size_mm = (1.0, 1.0, 1.0)
+            node.C_J_K = 10.0
+            model.add_node(node)
+        model.set_edge(1, 2, 0.5, EdgeMode.AUTO.value)
+        model.octree_graph_data = {"graph_edges": []}
+
+        old_limit = graph_io._DENSE_OCTREE_MATRIX_NODE_LIMIT
+        graph_io._DENSE_OCTREE_MATRIX_NODE_LIMIT = 1
+        try:
+            with TemporaryDirectory() as directory:
+                folder = Path(directory)
+                (folder / "L_sparse.json").write_text(
+                    json.dumps(
+                        {
+                            "shape": [2, 2],
+                            "format": "coo",
+                            "row": [0, 0, 1, 1],
+                            "col": [0, 1, 0, 1],
+                            "data": [0.5, -0.5, -0.5, 0.5],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with patch("graph_visualizer.graph_io._save_octree_outputs") as save_outputs:
+                    matrices = save_graph_folder(model, folder)
+                save_outputs.assert_not_called()
+                self.assertTrue((folder / "graph.json").exists())
+                self.assertTrue(issparse(matrices["L"]))
+        finally:
+            graph_io._DENSE_OCTREE_MATRIX_NODE_LIMIT = old_limit
 
     def test_stale_octree_conductance_rebuilds_after_material_load(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="stale_conductance"))

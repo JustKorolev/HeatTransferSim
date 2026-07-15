@@ -5,10 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from scipy.sparse import coo_matrix
 
 from .models import EdgeMode, ThermalGraphModel
 
 STEFAN_BOLTZMANN_W_M2K4 = 5.670374419e-8
+DENSE_MATRIX_NODE_LIMIT = 6000
+DENSE_MATRIX_MAX_TOTAL_BYTES = 768 * 1024 * 1024
 
 
 def refresh_auto_edges(model: ThermalGraphModel) -> None:
@@ -298,7 +301,11 @@ def apply_conductance_matrix(
     model.metadata.edge_mode = EdgeMode.LOADED_G.value
 
 
-def build_matrices(model: ThermalGraphModel) -> dict[str, np.ndarray]:
+def build_matrices(
+    model: ThermalGraphModel,
+    *,
+    dense_node_limit: int = DENSE_MATRIX_NODE_LIMIT,
+) -> dict[str, np.ndarray]:
     """Build matrix arrays using sorted node IDs as row/column ordering."""
     node_ids = np.array(model.ordered_node_ids(), dtype=int)
     size = len(node_ids)
@@ -308,7 +315,6 @@ def build_matrices(model: ThermalGraphModel) -> dict[str, np.ndarray]:
     Grad = np.zeros(size, dtype=float)
     G_rad = np.zeros(size, dtype=float)
     initial_temperature_K = np.zeros(size, dtype=float)
-    G = np.zeros((size, size), dtype=float)
     is_heater = np.zeros(size, dtype=bool)
     heater_ids = np.full(size, -1, dtype=int)
     heater_min_power_W = np.zeros(size, dtype=float)
@@ -345,27 +351,13 @@ def build_matrices(model: ThermalGraphModel) -> dict[str, np.ndarray]:
         sensor_time_constant_s[row] = float(node.sensor.sensor_time_constant_s)
         has_cryocooler[row] = bool(node.has_cryocooler)
 
-    for edge in model.edges.values():
-        if _is_visual_role_contact_edge(edge):
-            continue
-        if edge.source not in index or edge.target not in index:
-            continue
-        i = index[edge.source]
-        j = index[edge.target]
-        conductance = max(0.0, float(edge.Gij_W_K))
-        G[i, j] = conductance
-        G[j, i] = conductance
-
-    L = np.diag(G.sum(axis=1)) - G
-    return {
+    matrices = {
         "node_ids": node_ids,
         "coords": coords,
         "C": C,
         "Grad": Grad,
         "G_rad": G_rad,
         "initial_temperature_K": initial_temperature_K,
-        "G": G,
-        "L": L,
         "is_heater": is_heater,
         "heater_ids": heater_ids,
         "heater_min_power_W": heater_min_power_W,
@@ -378,6 +370,62 @@ def build_matrices(model: ThermalGraphModel) -> dict[str, np.ndarray]:
         "sensor_time_constant_s": sensor_time_constant_s,
         "has_cryocooler": has_cryocooler,
     }
+    if not _should_build_dense_matrices(size, dense_node_limit):
+        matrices["L"] = _sparse_laplacian_from_edges(model, index, size)
+        return matrices
+
+    G = np.zeros((size, size), dtype=float)
+    for edge in model.edges.values():
+        if _is_visual_role_contact_edge(edge):
+            continue
+        if edge.source not in index or edge.target not in index:
+            continue
+        i = index[edge.source]
+        j = index[edge.target]
+        conductance = max(0.0, float(edge.Gij_W_K))
+        G[i, j] = conductance
+        G[j, i] = conductance
+    matrices["G"] = G
+    matrices["L"] = np.diag(G.sum(axis=1)) - G
+    return matrices
+
+
+def _should_build_dense_matrices(size: int, dense_node_limit: int) -> bool:
+    if size > int(dense_node_limit):
+        return False
+    dense_pair_bytes = int(size) * int(size) * np.dtype(float).itemsize * 2
+    return dense_pair_bytes <= DENSE_MATRIX_MAX_TOTAL_BYTES
+
+
+def _sparse_laplacian_from_edges(
+    model: ThermalGraphModel,
+    index: dict[int, int],
+    size: int,
+):
+    diagonal = np.zeros(size, dtype=float)
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    for edge in model.edges.values():
+        if _is_visual_role_contact_edge(edge):
+            continue
+        if edge.source not in index or edge.target not in index:
+            continue
+        i = index[edge.source]
+        j = index[edge.target]
+        conductance = max(0.0, float(edge.Gij_W_K))
+        if conductance <= 0.0:
+            continue
+        diagonal[i] += conductance
+        diagonal[j] += conductance
+        rows.extend([i, j])
+        cols.extend([j, i])
+        data.extend([-conductance, -conductance])
+    nonzero = np.nonzero(diagonal > 0.0)[0]
+    rows.extend(nonzero.astype(int).tolist())
+    cols.extend(nonzero.astype(int).tolist())
+    data.extend(diagonal[nonzero].astype(float).tolist())
+    return coo_matrix((data, (rows, cols)), shape=(size, size)).tocsr()
 
 
 def _is_cad_role_node(node: Any) -> bool:

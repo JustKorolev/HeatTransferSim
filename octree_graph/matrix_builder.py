@@ -6,6 +6,7 @@ import numpy as np
 from scipy.sparse import coo_matrix
 
 DENSE_MATRIX_NODE_LIMIT = 6000
+DENSE_MATRIX_MAX_TOTAL_BYTES = 768 * 1024 * 1024
 
 
 def build_matrices(
@@ -28,7 +29,7 @@ def build_matrices(
     initial_temperature_K = np.array(
         [float(node.get("initial_temperature_K", 293.15)) for node in nodes], dtype=float
     )
-    if size > int(dense_node_limit):
+    if not _should_build_dense_matrices(size, dense_node_limit):
         L = _build_sparse_laplacian(edges, index, size)
         return {
             "node_ids": node_ids,
@@ -55,6 +56,13 @@ def build_matrices(
         "G_rad": G_rad,
         "initial_temperature_K": initial_temperature_K,
     }
+
+
+def _should_build_dense_matrices(size: int, dense_node_limit: int) -> bool:
+    if size > int(dense_node_limit):
+        return False
+    dense_pair_bytes = int(size) * int(size) * np.dtype(float).itemsize * 2
+    return dense_pair_bytes <= DENSE_MATRIX_MAX_TOTAL_BYTES
 
 
 def _build_sparse_laplacian(edges: list[dict], index: dict[int, int], size: int):

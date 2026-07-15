@@ -11,6 +11,8 @@ from unittest.mock import patch
 import numpy as np
 from scipy.sparse import issparse
 
+import octree_graph.validation as octree_validation
+import octree_graph.matrix_builder as octree_matrix_builder
 from octree_graph.cli import (
     build_parser,
     _build_graph_with_optional_fallback,
@@ -118,6 +120,58 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         warnings: list[str] = []
         material = resolve_material("Not assigned", self.make_materials(), warnings)
         self.assertEqual(material.name, DEFAULT_ASSIGNED_MATERIAL_NAME)
+
+    def test_validate_graph_skips_oversized_dense_symmetry_check(self) -> None:
+        nodes = [
+            {
+                "node_id": 1,
+                "component_name": "A",
+                "material_name": "Copper",
+                "C_J_K": 1.0,
+            },
+            {
+                "node_id": 2,
+                "component_name": "B",
+                "material_name": "Copper",
+                "C_J_K": 1.0,
+            },
+        ]
+        matrices = {
+            "C": np.ones(2, dtype=float),
+            "G": np.array([[0.0, 1.0], [1.0, 0.0]], dtype=float),
+            "L": np.array([[1.0, -1.0], [-1.0, 1.0]], dtype=float),
+        }
+        old_limit = octree_validation._DENSE_SYMMETRY_CHECK_MAX_BYTES
+        octree_validation._DENSE_SYMMETRY_CHECK_MAX_BYTES = 1
+        try:
+            with patch("octree_graph.validation.np.allclose", side_effect=AssertionError):
+                errors, warnings = validate_graph(
+                    {"graph_nodes": nodes, "graph_edges": [], "warnings": []},
+                    matrices,
+                )
+        finally:
+            octree_validation._DENSE_SYMMETRY_CHECK_MAX_BYTES = old_limit
+
+        self.assertEqual(errors, [])
+        self.assertTrue(any("Skipped dense G symmetry validation" in warning for warning in warnings))
+        self.assertTrue(any("Skipped dense L symmetry validation" in warning for warning in warnings))
+
+    def test_octree_matrix_builder_forces_sparse_when_dense_byte_budget_exceeded(self) -> None:
+        nodes = [
+            {"node_id": 1, "C_J_K": 1.0},
+            {"node_id": 2, "C_J_K": 1.0},
+        ]
+        edges = [{"node_i": 1, "node_j": 2, "G_W_K": 0.5}]
+        old_limit = octree_matrix_builder.DENSE_MATRIX_MAX_TOTAL_BYTES
+        octree_matrix_builder.DENSE_MATRIX_MAX_TOTAL_BYTES = 1
+        try:
+            matrices = build_octree_matrices(nodes, edges, dense_node_limit=100)
+        finally:
+            octree_matrix_builder.DENSE_MATRIX_MAX_TOTAL_BYTES = old_limit
+
+        self.assertNotIn("G", matrices)
+        self.assertTrue(issparse(matrices["L"]))
+        self.assertAlmostEqual(float(matrices["L"][0, 0]), 0.5)
 
     def test_resolve_material_maps_unknown_material_placeholder_to_aluminum(self) -> None:
         warnings: list[str] = []

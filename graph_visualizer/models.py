@@ -739,6 +739,7 @@ class ThermalGraphModel:
     material_library: dict[str, dict[str, float]] = field(default_factory=dict)
     octree_graph_data: dict[str, Any] = field(default_factory=dict)
     controller_gain_matrix: dict[int, dict[int, float]] = field(default_factory=dict)
+    _coord_index_cache: dict[tuple[int, int, int], int] | None = field(default=None, init=False, repr=False)
 
     def add_node(self, node: NodeProperties) -> None:
         self._check_unique(node.node_id, node.coord)
@@ -835,12 +836,15 @@ class ThermalGraphModel:
         return sorted(self.nodes)
 
     def coord_index(self) -> dict[tuple[int, int, int], int]:
+        if self._coord_index_cache is not None:
+            return dict(self._coord_index_cache)
         index: dict[tuple[int, int, int], int] = {}
         for node_id, node in self.nodes.items():
             coord, _warning = _safe_coord_tuple(getattr(node, "coord", None), fallback=None)
             if coord is None:
                 continue
             index.setdefault(coord, int(node_id))
+        self._coord_index_cache = dict(index)
         return index
 
     def find_by_coord(self, coord: tuple[int, int, int]) -> NodeProperties | None:
@@ -988,6 +992,7 @@ class ThermalGraphModel:
             raise ValueError(f"Duplicate coord {coord}.")
 
     def touch(self) -> None:
+        self._coord_index_cache = None
         self.metadata.updated_at = utc_now_iso()
 
 

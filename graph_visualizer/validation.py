@@ -9,6 +9,8 @@ from scipy.sparse import issparse
 
 from .models import ThermalGraphModel
 
+_DENSE_SYMMETRY_CHECK_MAX_BYTES = 512 * 1024 * 1024
+
 
 class ValidationError(ValueError):
     """Raised when graph folder validation fails."""
@@ -90,8 +92,10 @@ def validate_matrices(
     if G is not None:
         if G.shape != (size, size):
             errors.append(f"G must have shape ({size}, {size}), got {G.shape}.")
-        if G.ndim == 2 and not np.allclose(G, G.T, rtol=1.0e-7, atol=1.0e-12):
-            errors.append("G must be symmetric within tolerance.")
+        if G.ndim == 2:
+            result = _symmetric_check_result(G)
+            if result is False:
+                errors.append("G must be symmetric within tolerance.")
         if np.any(G < -1.0e-12):
             errors.append("G contains negative conductances.")
     if L is not None:
@@ -106,6 +110,9 @@ def validate_matrices(
                 errors.append(f"L must have shape ({size}, {size}), got {dense_l.shape}.")
             if np.any(~np.isfinite(dense_l)):
                 errors.append("L contains non-finite values.")
+            result = _symmetric_check_result(dense_l)
+            if result is False:
+                errors.append("L must be symmetric within tolerance.")
     if np.any(C < -1.0e-12):
         errors.append("C contains negative thermal capacitances.")
     if np.any(Grad < -1.0e-12):
@@ -140,11 +147,23 @@ def validate_conductance_matrix(
         errors.append("node_ids length does not match number of graph nodes.")
     if set(node_ids.tolist()) != set(expected.tolist()):
         errors.append("node_ids in matrices.npz do not match graph node IDs.")
-    if G.ndim == 2 and not np.allclose(G, G.T, rtol=1.0e-7, atol=1.0e-12):
-        errors.append("G must be symmetric within tolerance.")
+    if G.ndim == 2:
+        result = _symmetric_check_result(G)
+        if result is False:
+            errors.append("G must be symmetric within tolerance.")
     if np.any(G < -1.0e-12):
         errors.append("G contains negative conductances.")
     return errors
+
+
+def _symmetric_check_result(matrix: np.ndarray) -> bool | None:
+    if issparse(matrix):
+        difference = matrix - matrix.T
+        return not (difference.nnz and np.max(np.abs(difference.data)) > 1.0e-12)
+    array = np.asarray(matrix)
+    if array.nbytes > _DENSE_SYMMETRY_CHECK_MAX_BYTES:
+        return None
+    return bool(np.allclose(array, array.T, rtol=1.0e-7, atol=1.0e-12))
 
 
 def raise_if_errors(errors: list[str], heading: str = "Validation failed") -> None:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.sparse import issparse
 
+_DENSE_SYMMETRY_CHECK_MAX_BYTES = 512 * 1024 * 1024
+
 
 def validate_graph(graph: dict, matrices: dict[str, np.ndarray]) -> tuple[list[str], list[str]]:
     errors: list[str] = []
@@ -38,15 +40,45 @@ def validate_graph(graph: dict, matrices: dict[str, np.ndarray]) -> tuple[list[s
         errors.append(f"G shape {matrices['G'].shape} does not match node count {size}.")
     if "L" in matrices and matrices["L"].shape != (size, size):
         errors.append(f"L shape {matrices['L'].shape} does not match node count {size}.")
-    if "G" in matrices and not np.allclose(matrices["G"], matrices["G"].T):
-        errors.append("G is not symmetric.")
-    if "L" in matrices and issparse(matrices["L"]):
-        difference = matrices["L"] - matrices["L"].T
-        if difference.nnz and np.max(np.abs(difference.data)) > 1.0e-12:
+    if "G" in matrices:
+        result = _symmetric_check_result(matrices["G"])
+        if result is False:
+            errors.append("G is not symmetric.")
+        elif result is None:
+            warnings.append(_skipped_dense_symmetry_warning("G", matrices["G"]))
+    if "L" in matrices:
+        result = _symmetric_check_result(matrices["L"])
+        if result is False:
             errors.append("L is not symmetric.")
-    elif "L" in matrices and not np.allclose(matrices["L"], matrices["L"].T):
-        errors.append("L is not symmetric.")
+        elif result is None:
+            warnings.append(_skipped_dense_symmetry_warning("L", matrices["L"]))
     return errors, warnings
+
+
+def _symmetric_check_result(matrix: np.ndarray) -> bool | None:
+    if issparse(matrix):
+        difference = matrix - matrix.T
+        return not (difference.nnz and np.max(np.abs(difference.data)) > 1.0e-12)
+    array = np.asarray(matrix)
+    if array.nbytes > _DENSE_SYMMETRY_CHECK_MAX_BYTES:
+        return None
+    return bool(np.allclose(array, array.T, rtol=1.0e-7, atol=1.0e-12))
+
+
+def _skipped_dense_symmetry_warning(name: str, matrix: np.ndarray) -> str:
+    array = np.asarray(matrix)
+    return (
+        f"Skipped dense {name} symmetry validation because matrix shape {array.shape} "
+        f"uses {_format_bytes(array.nbytes)}; use sparse L output for large graphs."
+    )
+
+
+def _format_bytes(value: int) -> str:
+    number = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if number < 1024.0 or unit == "TiB":
+            return f"{number:.1f} {unit}"
+        number /= 1024.0
 
 
 def format_validation_report(graph: dict, errors: list[str], warnings: list[str]) -> str:

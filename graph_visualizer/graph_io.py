@@ -191,6 +191,8 @@ def _refresh_octree_auto_geometry(
 ) -> dict[str, np.ndarray]:
     if EdgeMode.normalize(model.metadata.edge_mode) != EdgeMode.AUTO.value:
         return matrices
+    if _uses_sparse_laplacian(matrices) and _matrix_has_conduction(matrices) and not has_generated_role_contact_edges(model):
+        return matrices
     if has_generated_role_contact_edges(model):
         model.octree_graph_data.setdefault("warnings", [])
         model.octree_graph_data["warnings"].append(
@@ -466,12 +468,24 @@ def _save_octree_graph_folder_lightweight(
     _atomic_write_json(folder / METADATA_FILE, model.metadata.to_dict(), indent=2)
     material_library = model.material_library or default_material_library()
     _atomic_write_json(folder / MATERIAL_FILE, material_library, indent=2)
+    if len(model.nodes) > _DENSE_OCTREE_MATRIX_NODE_LIMIT and _has_existing_octree_matrix_payload(folder):
+        matrices = _base_octree_matrix_payload(model, np.array(model.ordered_node_ids(), dtype=int))
+        sparse_l = _load_sparse_laplacian(folder / "L_sparse.json")
+        if sparse_l is not None:
+            matrices["L"] = sparse_l
+        else:
+            matrices["L"] = _sparse_laplacian_from_model(model, matrices["node_ids"])
+        return matrices
     if len(model.nodes) > _DENSE_OCTREE_MATRIX_NODE_LIMIT:
         matrices = _build_sparse_octree_matrices_from_model(model)
     else:
         matrices = build_matrices(model)
     _save_octree_outputs(model, matrices, folder)
     return matrices
+
+
+def _has_existing_octree_matrix_payload(folder: Path) -> bool:
+    return any((folder / name).exists() for name in ("L_sparse.json", "L.npy", "G.npy", MATRIX_FILE))
 
 
 def _save_octree_outputs(model: ThermalGraphModel, matrices: dict[str, np.ndarray], folder: Path) -> None:

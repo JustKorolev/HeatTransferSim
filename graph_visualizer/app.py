@@ -1102,7 +1102,7 @@ class GraphVisualizerApp:
             )
             self.dirty = False
             self._update_window_title()
-            self._refresh_all(reset_camera=False)
+            self._refresh_details()
         except Exception as exc:
             self._set_status(str(exc), error=True)
 
@@ -1596,11 +1596,14 @@ class GraphVisualizerApp:
 
     def _sync_simulation_from_editor(self, reinitialize: bool = False) -> None:
         if hasattr(self, "simulation_tab"):
-            self.simulation_tab.sync_from_editor(
-                self.model,
-                self.current_folder,
-                reinitialize=reinitialize,
-            )
+            if reinitialize:
+                self.simulation_tab.sync_from_editor(
+                    self.model,
+                    self.current_folder,
+                    reinitialize=True,
+                )
+            else:
+                self.simulation_tab.refresh_live_readouts_from_editor(self.model, self.current_folder)
 
     def _refresh_all(self, reset_camera: bool = False) -> None:
         log_event(
