@@ -251,7 +251,7 @@ class NodeProperties:
         coord_value = copied.pop("coord", None)
         if coord_value is None and center_mm is not None:
             coord_value = [round(float(v)) for v in center_mm]
-        coord = tuple(int(v) for v in (coord_value or (0, 0, 0)))
+        coord, coord_warning = _safe_coord_tuple(coord_value, fallback=(node_id, 0, 0))
         heater_data = copied.pop("heater", {}) or {}
         heater_control_data = copied.pop("heater_control", copied.pop("heaterControl", {}) or {}) or {}
         sensor_data = copied.pop("sensor", {}) or {}
@@ -392,7 +392,7 @@ class NodeProperties:
         size_tuple, size_warning = _finite_vector3(size_mm, field_name="size_mm", positive=True)
         source_bounds_mm, bounds_warning = _finite_source_bounds(source_bounds_mm)
         existing_warnings = list(copied.get("warnings", []) or [])
-        for warning in (center_warning, size_warning, bounds_warning):
+        for warning in (coord_warning, center_warning, size_warning, bounds_warning):
             if warning:
                 existing_warnings.append(warning)
         if existing_warnings:
@@ -835,7 +835,13 @@ class ThermalGraphModel:
         return sorted(self.nodes)
 
     def coord_index(self) -> dict[tuple[int, int, int], int]:
-        return {node.coord: node_id for node_id, node in self.nodes.items()}
+        index: dict[tuple[int, int, int], int] = {}
+        for node_id, node in self.nodes.items():
+            coord, _warning = _safe_coord_tuple(getattr(node, "coord", None), fallback=None)
+            if coord is None:
+                continue
+            index.setdefault(coord, int(node_id))
+        return index
 
     def find_by_coord(self, coord: tuple[int, int, int]) -> NodeProperties | None:
         node_id = self.coord_index().get(coord)
@@ -936,6 +942,7 @@ class ThermalGraphModel:
         model.octree_graph_data = dict(data)
         model.controller_gain_matrix = _parse_controller_gain_matrix(data.get("controller_gain_matrix"))
         top_level_tags = data.get("heater_sensor_tags", {}) or {}
+        coord_index: dict[tuple[int, int, int], int] = {}
         for raw_node in data.get("graph_nodes", []):
             raw_node = dict(raw_node)
             raw_node_id = raw_node.get("node_id", raw_node.get("id"))
@@ -945,13 +952,16 @@ class ThermalGraphModel:
                 merged_tags.update(tag_payload)
                 raw_node["tags"] = merged_tags
             node = NodeProperties.from_dict(raw_node)
-            if node.coord in model.coord_index():
-                node.coord = _unique_loaded_coord(node.node_id, model.coord_index())
+            if node.coord in coord_index:
+                node.coord = _unique_loaded_coord(node.node_id, coord_index)
                 model.octree_graph_data.setdefault("warnings", [])
                 model.octree_graph_data["warnings"].append(
                     f"Adjusted duplicate loaded coordinate for node {node.node_id}."
                 )
-            model.add_node(node)
+            if node.node_id in model.nodes:
+                raise ValueError(f"Duplicate node_id {node.node_id}.")
+            model.nodes[node.node_id] = node
+            coord_index[node.coord] = node.node_id
         for raw_edge in data.get("graph_edges", []):
             edge = EdgeProperties.from_dict(dict(raw_edge))
             if edge.source in model.nodes and edge.target in model.nodes:
@@ -968,6 +978,7 @@ class ThermalGraphModel:
                     warnings=edge.warnings,
                 )
         model.prune_controller_gain_matrix()
+        model.touch()
         return model
 
     def _check_unique(self, node_id: int, coord: tuple[int, int, int]) -> None:
@@ -1075,6 +1086,31 @@ def _int_list(values: Any) -> list[int]:
 def _normalize_sensor_control_mode(value: Any) -> str:
     mode = str(value or "manual").strip().lower()
     return "mimo" if mode in {"mimo", "mimo_pid", "pid"} else "manual"
+
+
+def _safe_coord_tuple(
+    values: Any,
+    *,
+    fallback: tuple[int, int, int] | None = (0, 0, 0),
+) -> tuple[tuple[int, int, int] | None, str]:
+    if values is None:
+        return fallback, "" if fallback is not None else ""
+    try:
+        vector = tuple(values)
+    except TypeError:
+        return fallback, "Ignored invalid coord while loading graph."
+    if len(vector) != 3:
+        return fallback, "Ignored invalid coord while loading graph."
+    coord: list[int] = []
+    for value in vector:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return fallback, "Ignored invalid coord while loading graph."
+        if not _is_finite(number):
+            return fallback, "Ignored non-finite coord while loading graph."
+        coord.append(int(round(number)))
+    return (coord[0], coord[1], coord[2]), ""
 
 
 def _finite_vector3(

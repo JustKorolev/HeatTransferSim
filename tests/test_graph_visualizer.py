@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -1491,6 +1492,49 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(set(model.nodes), {1, 2})
         self.assertNotEqual(model.nodes[1].coord, model.nodes[2].coord)
         self.assertIn("Adjusted duplicate loaded coordinate", " ".join(model.octree_graph_data["warnings"]))
+
+    def test_octree_load_uses_incremental_coord_index(self) -> None:
+        payload = {
+            "metadata": {"graph_name": "large_coord_index"},
+            "graph_nodes": [
+                {
+                    "node_id": node_id,
+                    "coord": [node_id, 0, 0],
+                    "component_name": "body",
+                    "material_name": "Copper",
+                    "mass_kg": 0.01,
+                    "C_J_K": 1.0,
+                }
+                for node_id in range(1, 50)
+            ],
+            "graph_edges": [],
+        }
+
+        with patch.object(ThermalGraphModel, "coord_index", side_effect=AssertionError("coord_index rebuilt")):
+            model = ThermalGraphModel.from_octree_graph_dict(payload)
+
+        self.assertEqual(len(model.nodes), 49)
+
+    def test_octree_node_load_sanitizes_invalid_coord(self) -> None:
+        model = ThermalGraphModel.from_octree_graph_dict(
+            {
+                "metadata": {"graph_name": "bad_coord"},
+                "graph_nodes": [
+                    {
+                        "node_id": 8,
+                        "coord": [0, float("nan"), 0],
+                        "component_name": "bad_coord",
+                        "material_name": "Copper",
+                    }
+                ],
+                "graph_edges": [],
+            }
+        )
+
+        node = model.nodes[8]
+        self.assertEqual(node.coord, (8, 0, 0))
+        self.assertEqual(model.coord_index(), {(8, 0, 0): 8})
+        self.assertIn("non-finite coord", " ".join(node.warnings))
 
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(
