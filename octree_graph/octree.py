@@ -348,6 +348,7 @@ def build_octree(
         return heapq.heappop(queue)[2]
 
     max_cell_size_warning_emitted = False
+    max_leaf_budget_override_warning_emitted = False
 
     push_cell(
         _CellWorkItem("cell_0", tuple(float(v) for v in root[0]), tuple(float(v) for v in root[1]), 0, None),
@@ -390,7 +391,7 @@ def build_octree(
         classification: CellClassification,
         remaining_batch_items: int,
     ) -> None:
-        nonlocal counter, max_cell_size_warning_emitted
+        nonlocal counter, max_cell_size_warning_emitted, max_leaf_budget_override_warning_emitted
         center_mm = np.asarray(work_item.center_mm, dtype=float)
         size_mm = np.asarray(work_item.size_mm, dtype=float)
         max_size_mm = float(max(size_mm))
@@ -462,6 +463,7 @@ def build_octree(
             diagnostics.max_leaf_cells_reached = True
         above_max_cell_size = classification.occupied and max_size_mm > params.max_cell_size_mm
         can_subdivide = level < params.max_depth and max_size_mm > params.min_cell_size_mm
+        mandatory_max_size_subdivision = above_max_cell_size and can_subdivide
         discretionary_refinement = (
             mixed_parts
             or mixed_materials
@@ -478,11 +480,21 @@ def build_octree(
                 and max_size_mm > params.min_cell_size_mm
             )
         )
-        should_subdivide = can_subdivide and budget_allows_children and (
-            above_max_cell_size or discretionary_refinement
+        should_subdivide = mandatory_max_size_subdivision or (
+            can_subdivide and budget_allows_children and discretionary_refinement
         )
+        if mandatory_max_size_subdivision and not budget_allows_children:
+            if diagnostics is not None:
+                diagnostics.max_leaf_cells_reached = True
+            if not max_leaf_budget_override_warning_emitted and params.max_leaf_cells is not None:
+                warnings.append(
+                    "max_leaf_cells was exceeded to enforce max_cell_size_mm on occupied cells. "
+                    "Optional adaptive refinement remains capped by max_leaf_cells; increase "
+                    "--max-leaf-cells if you want more refinement after the mandatory max-size pass."
+                )
+                max_leaf_budget_override_warning_emitted = True
         if above_max_cell_size and not should_subdivide:
-            block_reason = "max_leaf_cells" if not budget_allows_children else "max_depth or min_cell_size_mm"
+            block_reason = "max_depth or min_cell_size_mm"
             active_cells = len(leaves) + effective_queue_len
             limit_warning = (
                 "Cannot satisfy max_cell_size_mm without exceeding refinement limits. "
@@ -490,15 +502,14 @@ def build_octree(
                 f"active_or_leaf_cells={active_cells}, max_leaf_cells={params.max_leaf_cells}, "
                 f"level={level}, max_depth={params.max_depth}, "
                 f"cell_size_mm={max_size_mm:.6g}, max_cell_size_mm={float(params.max_cell_size_mm):.6g}. "
-                "Increase --max-leaf-cells, increase --max-depth, decrease --min-cell-size-mm, "
-                "or increase --max-cell-size-mm."
+                "Increase --max-depth, decrease --min-cell-size-mm, or increase --max-cell-size-mm."
             )
             classification.warnings.append(limit_warning)
             if not max_cell_size_warning_emitted:
                 warnings.append(
                     "Some occupied cells exceed max_cell_size_mm because refinement limits were reached. "
-                    "Inspect cell warnings or increase --max-leaf-cells/--max-depth, decrease "
-                    "--min-cell-size-mm, or increase --max-cell-size-mm."
+                    "Inspect cell warnings, increase --max-depth, decrease --min-cell-size-mm, "
+                    "or increase --max-cell-size-mm."
                 )
                 max_cell_size_warning_emitted = True
         if should_subdivide:
@@ -527,7 +538,7 @@ def build_octree(
         if above_max_cell_size:
             classification.warnings.append(
                 "Accepted occupied cell above max_cell_size_mm because refinement was blocked "
-                "by max_leaf_cells, max_depth, or min_cell_size_mm."
+                "by max_depth or min_cell_size_mm."
             )
             confidence = "low"
         if classification.bbox_only_hit and params.bbox_fallback:
@@ -828,8 +839,8 @@ def _mark_final_oversized_leaves(
         return
     summary = (
         "Some occupied cells exceed max_cell_size_mm because refinement limits were reached. "
-        "Inspect cell warnings or increase --max-leaf-cells/--max-depth, decrease "
-        "--min-cell-size-mm, or increase --max-cell-size-mm."
+        "Inspect cell warnings, increase --max-depth, decrease --min-cell-size-mm, "
+        "or increase --max-cell-size-mm."
     )
     if summary not in warnings:
         warnings.append(summary)
@@ -837,7 +848,7 @@ def _mark_final_oversized_leaves(
         leaf.confidence = "low"
         warning = (
             "Accepted occupied cell above max_cell_size_mm because refinement was blocked "
-            "by max_leaf_cells, max_depth, or min_cell_size_mm."
+            "by max_depth or min_cell_size_mm."
         )
         if warning not in leaf.warnings:
             leaf.warnings.append(warning)

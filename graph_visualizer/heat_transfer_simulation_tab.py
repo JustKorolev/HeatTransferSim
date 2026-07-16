@@ -1645,8 +1645,21 @@ class HeatTransferSimulationTab:
             fast_sparse_simulation_max_substeps=int(getattr(self.params, "fast_sparse_simulation_max_substeps", 128)),
             fast_sparse_simulation_safety_factor=float(getattr(self.params, "fast_sparse_simulation_safety_factor", 0.2)),
             implicit_sparse_simulation_enabled=True,
-            implicit_sparse_simulation_rtol=float(getattr(self.params, "implicit_sparse_simulation_rtol", 1.0e-5)),
-            implicit_sparse_simulation_maxiter=int(getattr(self.params, "implicit_sparse_simulation_maxiter", 200)),
+            implicit_sparse_simulation_method=str(getattr(self.params, "implicit_sparse_simulation_method", "tr_bdf2")),
+            implicit_sparse_simulation_rtol=float(getattr(self.params, "implicit_sparse_simulation_rtol", 1.0e-6)),
+            implicit_sparse_simulation_maxiter=int(getattr(self.params, "implicit_sparse_simulation_maxiter", 300)),
+            implicit_sparse_adaptive_substeps_enabled=bool(
+                getattr(self.params, "implicit_sparse_adaptive_substeps_enabled", True)
+            ),
+            implicit_sparse_adaptive_target_delta_K=float(
+                getattr(self.params, "implicit_sparse_adaptive_target_delta_K", 1.0)
+            ),
+            implicit_sparse_adaptive_max_substeps=int(
+                getattr(self.params, "implicit_sparse_adaptive_max_substeps", 4)
+            ),
+            implicit_sparse_residual_check_enabled=bool(
+                getattr(self.params, "implicit_sparse_residual_check_enabled", True)
+            ),
             simulation_history_limit=int(self.inputs["simulation_history_limit"].value()),
             live_step_profiling_enabled=True,
             live_step_profile_threshold_ms=float(getattr(self.params, "live_step_profile_threshold_ms", 1000.0)),
@@ -2168,6 +2181,7 @@ def _format_live_step_profile(profile: dict[str, float], steps_completed: int, m
         "controller_heater_power_ms": "heater controller",
         "zero_power_vector_ms": "zero power vector",
         "gpu_step_ms": "GPU step",
+        "cpu_sparse_implicit_step_ms": "TR-BDF2 sparse step",
         "cpu_fast_sparse_step_ms": "fast sparse step",
         "state_vector_update_ms": "state vector",
         "radiation_source_ms": "radiation source",

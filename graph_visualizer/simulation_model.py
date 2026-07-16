@@ -66,37 +66,182 @@ class GpuSparseStepper:
 
 @dataclass
 class SparseImplicitStepper:
-    system_matrix: Any
-    preconditioner: Any | None
     dt_s: float
     rtol: float
     maxiter: int
     solver: str
     state_operator: Any
     capacitance_J_K: np.ndarray | None = None
+    method: str = "tr_bdf2"
+    adaptive_substeps_enabled: bool = True
+    adaptive_target_delta_K: float = 1.0
+    adaptive_max_substeps: int = 4
+    residual_check_enabled: bool = True
+    gamma: float = 2.0 - float(np.sqrt(2.0))
     last_info: int = 0
     last_iterations: int = 0
+    last_substeps: int = 1
+    last_residual_norm: float = 0.0
+    last_relative_residual_norm: float = 0.0
+    last_predicted_delta_K: float = 0.0
+    _stage_cache: dict[int, tuple[Any, Any | None, Any, Any | None]] = field(default_factory=dict)
 
     def step(self, temperatures_K: np.ndarray, source_K_s: np.ndarray) -> np.ndarray:
         temperatures = np.asarray(temperatures_K, dtype=float).reshape(-1)
         source = np.asarray(source_K_s, dtype=float).reshape(-1)
         if temperatures.shape != source.shape:
             raise ValueError(f"Source vector length {source.shape} does not match temperatures {temperatures.shape}.")
+        if str(self.method).lower() != "tr_bdf2":
+            return self._backward_euler_step(temperatures, source)
+        substeps = self._adaptive_substep_count(temperatures, source)
+        h = float(self.dt_s) / max(1, int(substeps))
+        current = temperatures.copy()
+        self.last_iterations = 0
+        self.last_info = 0
+        self.last_substeps = int(substeps)
+        self.last_residual_norm = 0.0
+        self.last_relative_residual_norm = 0.0
+        for _ in range(max(1, int(substeps))):
+            current = self._tr_bdf2_substep(current, source, h)
+        if current.shape != temperatures.shape or not np.all(np.isfinite(current)):
+            raise RuntimeError(f"{self.solver} returned an invalid temperature vector.")
+        return current
+
+    def _backward_euler_step(self, temperatures: np.ndarray, source: np.ndarray) -> np.ndarray:
+        self.last_iterations = 0
+        self.last_info = 0
+        self.last_substeps = 1
+        self.last_residual_norm = 0.0
+        self.last_relative_residual_norm = 0.0
+        self.last_predicted_delta_K = 0.0
         if self.capacitance_J_K is not None:
             capacitance = np.asarray(self.capacitance_J_K, dtype=float).reshape(-1)
             if capacitance.shape != temperatures.shape:
                 raise ValueError(f"Capacitance vector length {capacitance.shape} does not match temperatures {temperatures.shape}.")
             rhs = float(self.dt_s) * (capacitance * source - np.asarray(self.state_operator @ temperatures, dtype=float).reshape(-1))
+            system_matrix = (diags(capacitance, format="csr") + float(self.dt_s) * csr_matrix(self.state_operator)).tocsr()
         else:
             rhs = float(self.dt_s) * (
                 np.asarray(self.state_operator @ temperatures, dtype=float).reshape(-1) + source
             )
+            system_matrix = (eye(temperatures.shape[0], format="csr") - float(self.dt_s) * csr_matrix(self.state_operator)).tocsr()
         if not np.all(np.isfinite(rhs)):
             raise RuntimeError(f"{self.solver} received an invalid implicit update right-hand side.")
         if np.linalg.norm(rhs) <= 0.0:
             return temperatures.copy()
+        preconditioner = _jacobi_preconditioner(system_matrix)
+        result = self._solve_linear(system_matrix, np.asarray(rhs, dtype=float).reshape(-1), preconditioner, np.zeros_like(temperatures))
+        if result.shape != temperatures.shape or not np.all(np.isfinite(result)):
+            raise RuntimeError(f"{self.solver} returned an invalid temperature vector.")
+        return temperatures + result
+
+    def _tr_bdf2_substep(self, temperatures: np.ndarray, source: np.ndarray, h_s: float) -> np.ndarray:
+        gamma = min(0.95, max(0.05, float(self.gamma)))
+        h = max(float(h_s), 1.0e-30)
+        alpha = 0.5 * gamma * h
+        stage1_matrix, stage1_preconditioner, stage2_matrix, stage2_preconditioner = self._stage_matrices_for_h(h)
         if self.capacitance_J_K is not None:
-            rhs = np.asarray(rhs, dtype=float).reshape(-1)
+            capacitance = np.asarray(self.capacitance_J_K, dtype=float).reshape(-1)
+            operator = csr_matrix(self.state_operator)
+            rhs1 = capacitance * temperatures - alpha * np.asarray(operator @ temperatures, dtype=float).reshape(-1)
+            rhs1 = rhs1 + gamma * h * capacitance * source
+            stage1 = self._solve_linear(stage1_matrix, rhs1, stage1_preconditioner, temperatures)
+            rhs2 = (
+                (1.0 / (gamma * (1.0 - gamma) * h)) * capacitance * stage1
+                - ((1.0 - gamma) / (gamma * h)) * capacitance * temperatures
+                + capacitance * source
+            )
+        else:
+            operator = csr_matrix(self.state_operator)
+            rhs1 = temperatures + alpha * np.asarray(operator @ temperatures, dtype=float).reshape(-1)
+            rhs1 = rhs1 + gamma * h * source
+            stage1 = self._solve_linear(stage1_matrix, rhs1, stage1_preconditioner, temperatures)
+            rhs2 = (
+                (1.0 / (gamma * (1.0 - gamma) * h)) * stage1
+                - ((1.0 - gamma) / (gamma * h)) * temperatures
+                + source
+            )
+        result = self._solve_linear(stage2_matrix, rhs2, stage2_preconditioner, stage1)
+        if self.residual_check_enabled:
+            residual = np.asarray(stage2_matrix @ result, dtype=float).reshape(-1) - np.asarray(rhs2, dtype=float).reshape(-1)
+            residual_norm = float(np.linalg.norm(residual))
+            rhs_norm = float(np.linalg.norm(rhs2))
+            self.last_residual_norm = max(float(self.last_residual_norm), residual_norm)
+            relative = residual_norm / max(rhs_norm, 1.0e-30)
+            self.last_relative_residual_norm = max(float(self.last_relative_residual_norm), float(relative))
+        return np.asarray(result, dtype=float).reshape(-1)
+
+    def _stage_matrices_for_h(self, h_s: float) -> tuple[Any, Any | None, Any, Any | None]:
+        key = int(round(float(h_s) / max(float(self.dt_s), 1.0e-30) * 1.0e9))
+        cached = self._stage_cache.get(key)
+        if cached is not None:
+            return cached
+        gamma = min(0.95, max(0.05, float(self.gamma)))
+        h = max(float(h_s), 1.0e-30)
+        alpha = 0.5 * gamma * h
+        if self.capacitance_J_K is not None:
+            capacitance = np.asarray(self.capacitance_J_K, dtype=float).reshape(-1)
+            C_diag = diags(capacitance, format="csr")
+            operator = csr_matrix(self.state_operator)
+            stage1_matrix = (C_diag + alpha * operator).tocsr()
+            stage2_scale = (2.0 - gamma) / ((1.0 - gamma) * h)
+            stage2_matrix = (stage2_scale * C_diag + operator).tocsr()
+        else:
+            operator = csr_matrix(self.state_operator)
+            identity = eye(operator.shape[0], format="csr")
+            stage1_matrix = (identity - alpha * operator).tocsr()
+            stage2_scale = (2.0 - gamma) / ((1.0 - gamma) * h)
+            stage2_matrix = (stage2_scale * identity - operator).tocsr()
+        cached = (
+            stage1_matrix,
+            _jacobi_preconditioner(stage1_matrix),
+            stage2_matrix,
+            _jacobi_preconditioner(stage2_matrix),
+        )
+        self._stage_cache[key] = cached
+        return cached
+
+    def _adaptive_substep_count(self, temperatures: np.ndarray, source: np.ndarray) -> int:
+        max_substeps = max(1, int(self.adaptive_max_substeps))
+        if not bool(self.adaptive_substeps_enabled) or max_substeps <= 1:
+            self.last_predicted_delta_K = 0.0
+            return 1
+        rate = self._thermal_rate(temperatures, source)
+        if rate.shape != temperatures.shape or not np.all(np.isfinite(rate)):
+            self.last_predicted_delta_K = 0.0
+            return 1
+        predicted_delta = float(self.dt_s) * float(np.max(np.abs(rate))) if rate.size else 0.0
+        self.last_predicted_delta_K = max(0.0, predicted_delta)
+        target = max(float(self.adaptive_target_delta_K), 1.0e-12)
+        return max(1, min(max_substeps, int(np.ceil(self.last_predicted_delta_K / target))))
+
+    def _thermal_rate(self, temperatures: np.ndarray, source: np.ndarray) -> np.ndarray:
+        if self.capacitance_J_K is not None:
+            capacitance = np.asarray(self.capacitance_J_K, dtype=float).reshape(-1)
+            if capacitance.shape != temperatures.shape:
+                return np.zeros_like(temperatures)
+            conduction = np.asarray(self.state_operator @ temperatures, dtype=float).reshape(-1)
+            return source - conduction / capacitance
+        return np.asarray(self.state_operator @ temperatures, dtype=float).reshape(-1) + source
+
+    def _solve_linear(
+        self,
+        matrix: Any,
+        rhs: np.ndarray,
+        preconditioner: Any | None,
+        x0: np.ndarray,
+    ) -> np.ndarray:
+        rhs = np.asarray(rhs, dtype=float).reshape(-1)
+        if not np.all(np.isfinite(rhs)):
+            raise RuntimeError(f"{self.solver} received an invalid right-hand side.")
+        guess = np.asarray(x0, dtype=float).reshape(-1)
+        if guess.shape != rhs.shape:
+            raise RuntimeError(f"{self.solver} received an invalid initial guess.")
+        correction_rhs = rhs - np.asarray(matrix @ guess, dtype=float).reshape(-1)
+        if not np.all(np.isfinite(correction_rhs)):
+            raise RuntimeError(f"{self.solver} received an invalid correction right-hand side.")
+        if float(np.linalg.norm(correction_rhs)) <= 0.0:
+            return guess.copy()
         iterations = 0
 
         def _count_iteration(_x: np.ndarray) -> None:
@@ -105,23 +250,23 @@ class SparseImplicitStepper:
 
         solve = cg if self.solver == "cg" else bicgstab
         result, info = solve(
-            self.system_matrix,
-            rhs,
-            x0=np.zeros_like(temperatures),
+            matrix,
+            correction_rhs,
+            x0=np.zeros_like(correction_rhs),
             rtol=max(0.0, float(self.rtol)),
             atol=0.0,
             maxiter=max(1, int(self.maxiter)),
-            M=self.preconditioner,
+            M=preconditioner,
             callback=_count_iteration,
         )
         self.last_info = int(info)
-        self.last_iterations = int(iterations)
+        self.last_iterations += int(iterations)
         if int(info) != 0:
             raise RuntimeError(f"{self.solver} did not converge; info={int(info)}, iterations={int(iterations)}")
         result = np.asarray(result, dtype=float).reshape(-1)
-        if result.shape != temperatures.shape or not np.all(np.isfinite(result)):
+        if result.shape != rhs.shape or not np.all(np.isfinite(result)):
             raise RuntimeError(f"{self.solver} returned an invalid temperature vector.")
-        return temperatures + result
+        return guess + result
 
 
 @dataclass
@@ -578,6 +723,14 @@ class PreparedSimulation:
             _record_profile_ms(profile, "cpu_sparse_implicit_step_ms", step_start)
             if profile is not None:
                 profile["cpu_sparse_implicit_iterations"] = float(self.sparse_implicit_stepper.last_iterations)
+                profile["cpu_sparse_implicit_substeps"] = float(self.sparse_implicit_stepper.last_substeps)
+                profile["cpu_sparse_implicit_residual_norm"] = float(self.sparse_implicit_stepper.last_residual_norm)
+                profile["cpu_sparse_implicit_relative_residual"] = float(
+                    self.sparse_implicit_stepper.last_relative_residual_norm
+                )
+                profile["cpu_sparse_implicit_predicted_delta_K"] = float(
+                    self.sparse_implicit_stepper.last_predicted_delta_K
+                )
             sync_start = time.perf_counter()
             self.z = np.concatenate([temperatures_next, np.array([1.0])])
             _record_profile_ms(profile, "state_vector_update_ms", sync_start)
@@ -1455,37 +1608,40 @@ def _build_sparse_implicit_stepper(
             return None
         L_sparse = csr_matrix(L)
         if _sparse_matrix_is_symmetric(L_sparse):
-            system_matrix = (diags(C_values, format="csr") + dt * L_sparse).tocsr()
             solver = "cg"
             capacitance = C_values
             state_operator = L_sparse
         else:
-            system_matrix = (eye(L_sparse.shape[0], format="csr") - dt * csr_matrix(A)).tocsr()
             solver = "bicgstab"
             capacitance = None
             state_operator = csr_matrix(A)
-        diagonal = np.asarray(system_matrix.diagonal(), dtype=float).reshape(-1)
-        inv_diagonal = np.zeros_like(diagonal)
-        valid = np.isfinite(diagonal) & (np.abs(diagonal) > 1.0e-30)
-        inv_diagonal[valid] = 1.0 / diagonal[valid]
-        preconditioner = LinearOperator(system_matrix.shape, matvec=lambda values: inv_diagonal * values)
-        rtol = max(0.0, float(getattr(params, "implicit_sparse_simulation_rtol", 1.0e-5)))
-        maxiter = max(1, int(getattr(params, "implicit_sparse_simulation_maxiter", 200)))
+        method = str(getattr(params, "implicit_sparse_simulation_method", "tr_bdf2") or "tr_bdf2").lower()
+        if method not in {"tr_bdf2", "backward_euler"}:
+            warnings.append(f"Unknown sparse implicit method {method!r}; using tr_bdf2.")
+            method = "tr_bdf2"
+        rtol = max(0.0, float(getattr(params, "implicit_sparse_simulation_rtol", 1.0e-6)))
+        maxiter = max(1, int(getattr(params, "implicit_sparse_simulation_maxiter", 300)))
         stepper = SparseImplicitStepper(
-            system_matrix=system_matrix,
-            preconditioner=preconditioner,
             dt_s=dt,
             rtol=rtol,
             maxiter=maxiter,
             solver=solver,
             state_operator=state_operator,
             capacitance_J_K=capacitance,
+            method=method,
+            adaptive_substeps_enabled=bool(getattr(params, "implicit_sparse_adaptive_substeps_enabled", True)),
+            adaptive_target_delta_K=max(
+                1.0e-12,
+                float(getattr(params, "implicit_sparse_adaptive_target_delta_K", 1.0)),
+            ),
+            adaptive_max_substeps=max(1, int(getattr(params, "implicit_sparse_adaptive_max_substeps", 4))),
+            residual_check_enabled=bool(getattr(params, "implicit_sparse_residual_check_enabled", True)),
         )
     except Exception as exc:
         warnings.append(f"Sparse implicit CPU stepping unavailable; setup failed: {exc}")
         return None
     warnings.append(
-        f"Sparse implicit CPU stepping enabled with {solver} solver "
+        f"Sparse implicit CPU stepping enabled with {method} / {solver} solver "
         f"(rtol={rtol:g}, maxiter={maxiter})."
     )
     return stepper
@@ -1550,6 +1706,15 @@ def _record_profile_ms(profile: dict[str, float] | None, key: str, start: float)
     if profile is None:
         return
     profile[key] = profile.get(key, 0.0) + (time.perf_counter() - start) * 1000.0
+
+
+def _jacobi_preconditioner(matrix: Any) -> LinearOperator:
+    sparse = csr_matrix(matrix)
+    diagonal = np.asarray(sparse.diagonal(), dtype=float).reshape(-1)
+    inv_diagonal = np.zeros_like(diagonal)
+    valid = np.isfinite(diagonal) & (np.abs(diagonal) > 1.0e-30)
+    inv_diagonal[valid] = 1.0 / diagonal[valid]
+    return LinearOperator(sparse.shape, matvec=lambda values: inv_diagonal * values)
 
 
 def _gpu_substep_count(

@@ -1494,8 +1494,8 @@ def _raise_if_empty_graph(nodes: list[dict], leaves: list, args: argparse.Namesp
     ]
     if args.max_leaf_cells is not None:
         guidance.append(
-            "The max_leaf_cells cap can also stop refinement while cells are still unresolved; increase "
-            "--max-leaf-cells or use a coarser min/max cell-size range if needed."
+            "The max_leaf_cells cap limits optional adaptive refinement; mandatory occupied-cell "
+            "subdivision still runs until max_cell_size_mm, max_depth, or min_cell_size_mm stops it."
         )
     guidance.append("Check octree_diagnostics.json for surface-hit, bbox-only, and depth counters.")
     raise SystemExit(" ".join(guidance))

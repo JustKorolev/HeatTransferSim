@@ -2292,8 +2292,13 @@ class GraphVisualizerModelTests(unittest.TestCase):
             fast_sparse_simulation_max_substeps=64,
             fast_sparse_simulation_safety_factor=0.5,
             implicit_sparse_simulation_enabled=True,
+            implicit_sparse_simulation_method="tr_bdf2",
             implicit_sparse_simulation_rtol=1.0e-4,
             implicit_sparse_simulation_maxiter=321,
+            implicit_sparse_adaptive_substeps_enabled=True,
+            implicit_sparse_adaptive_target_delta_K=0.25,
+            implicit_sparse_adaptive_max_substeps=3,
+            implicit_sparse_residual_check_enabled=True,
         )
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "simulation_parameters.json"
@@ -2307,8 +2312,13 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(loaded.fast_sparse_simulation_max_substeps, 64)
         self.assertAlmostEqual(loaded.fast_sparse_simulation_safety_factor, 0.5)
         self.assertTrue(loaded.implicit_sparse_simulation_enabled)
+        self.assertEqual(loaded.implicit_sparse_simulation_method, "tr_bdf2")
         self.assertAlmostEqual(loaded.implicit_sparse_simulation_rtol, 1.0e-4)
         self.assertEqual(loaded.implicit_sparse_simulation_maxiter, 321)
+        self.assertTrue(loaded.implicit_sparse_adaptive_substeps_enabled)
+        self.assertAlmostEqual(loaded.implicit_sparse_adaptive_target_delta_K, 0.25)
+        self.assertEqual(loaded.implicit_sparse_adaptive_max_substeps, 3)
+        self.assertTrue(loaded.implicit_sparse_residual_check_enabled)
         self.assertEqual(extras["custom"], "kept")
 
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
@@ -2935,7 +2945,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertIsNone(prepared.Phi_aug)
         self.assertLess(float(prepared.temperatures_K[0]), float(before[0]))
         self.assertIsNotNone(prepared.sparse_implicit_stepper)
+        self.assertEqual(prepared.sparse_implicit_stepper.method, "tr_bdf2")
         self.assertIn("cpu_sparse_implicit_step_ms", prepared.last_step_profile_ms)
+        self.assertIn("cpu_sparse_implicit_residual_norm", prepared.last_step_profile_ms)
         self.assertNotIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
         self.assertIn("model_solve_ms", prepared.last_step_profile_ms)
 
@@ -2965,7 +2977,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertIsNotNone(prepared.sparse_implicit_stepper)
         self.assertIn("cpu_sparse_implicit_step_ms", prepared.last_step_profile_ms)
         self.assertNotIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
-        self.assertAlmostEqual(float(prepared.temperatures_K[0]), 10.0 * 300.0 / 11.0)
+        exact = 300.0 * np.exp(-0.1)
+        backward_euler = 10.0 * 300.0 / 11.0
+        self.assertLess(abs(float(prepared.temperatures_K[0]) - exact), abs(backward_euler - exact))
 
     def test_sparse_implicit_cpu_stepper_keeps_diffusing_small_gradients(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="implicit_small_gradient"))
@@ -2997,9 +3011,44 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertIsNotNone(prepared.sparse_implicit_stepper)
         self.assertIn("cpu_sparse_implicit_step_ms", prepared.last_step_profile_ms)
+        self.assertGreaterEqual(prepared.last_step_profile_ms["cpu_sparse_implicit_iterations"], 0.0)
         self.assertLess(float(prepared.temperatures_K[0]), float(before[0]))
         self.assertGreater(float(prepared.temperatures_K[1]), float(before[1]))
         self.assertGreater(float(np.max(np.abs(prepared.temperatures_K - before))), 1.0e-9)
+
+    def test_sparse_implicit_tr_bdf2_adapts_substeps_and_reports_residual(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="implicit_tr_bdf2_adaptive"))
+        node_count = 513
+        for node_id in range(node_count):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+            node.C_J_K = 1.0
+            node.initial_temperature_K = 10.0
+            model.add_node(node)
+        diagonal = np.full(node_count, 10.0, dtype=float)
+        matrices = {
+            "node_ids": np.arange(node_count, dtype=int),
+            "C": np.ones(node_count, dtype=float),
+            "L": csr_matrix((diagonal, (np.arange(node_count), np.arange(node_count))), shape=(node_count, node_count)),
+            "G_rad": np.zeros(node_count),
+        }
+
+        prepared = prepare_simulation(
+            model,
+            matrices,
+            SimulationParameters(
+                dt_s=1.0,
+                use_ambient_radiation=False,
+                implicit_sparse_adaptive_target_delta_K=1.0,
+                implicit_sparse_adaptive_max_substeps=4,
+            ),
+        )
+        prepared.step_forward()
+
+        self.assertIsNotNone(prepared.sparse_implicit_stepper)
+        self.assertEqual(prepared.sparse_implicit_stepper.last_substeps, 4)
+        self.assertEqual(prepared.last_step_profile_ms["cpu_sparse_implicit_substeps"], 4.0)
+        self.assertGreater(prepared.last_step_profile_ms["cpu_sparse_implicit_predicted_delta_K"], 1.0)
+        self.assertLess(prepared.last_step_profile_ms["cpu_sparse_implicit_relative_residual"], 1.0e-5)
 
     def test_fast_sparse_cpu_stepper_bypasses_expm_multiply_automatically(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="fast_sparse_cpu"))
