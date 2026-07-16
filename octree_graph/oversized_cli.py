@@ -15,7 +15,7 @@ DEFAULT_GRAPH_FOLDER = Path("graphs") / "HISPEC-CRYOSTAT-TEST-v4"
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
-    graph_folder = Path(args.graph_folder)
+    graph_folder = Path(args.graph_folder).resolve()
     graph_path = graph_folder / "graph.json"
     if not graph_path.is_file():
         raise SystemExit(f"graph.json not found: {graph_path}")
@@ -78,6 +78,11 @@ def _print_summary(graph_folder: Path, summary: dict, *, verbose: bool) -> None:
         print("reasons:")
         for reason, count in reason_counts.items():
             print(f"  {reason}: {count}")
+    if int(reason_counts.get("blocked_by_max_leaf_cells_old_code", 0) or 0) > 0:
+        print(
+            "WARNING: this graph contains old max_leaf_cells-blocked voxel warnings. "
+            "It was not produced by the patched max-cell-size enforcement path."
+        )
     if verbose:
         print("largest nodes:")
         for node in summary.get("largest_nodes", []) or []:
