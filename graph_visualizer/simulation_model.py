@@ -6,12 +6,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import csv
 import time
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from scipy.linalg import expm
-from scipy.sparse import bmat, csr_matrix, diags, issparse
-from scipy.sparse.linalg import expm_multiply
+from scipy.sparse import bmat, csr_matrix, diags, eye, issparse
+from scipy.sparse.linalg import LinearOperator, bicgstab, cg, expm_multiply
 
 from .mimo_controller import (
     allocate_thermal_rate_qp,
@@ -65,6 +65,53 @@ class GpuSparseStepper:
 
 
 @dataclass
+class SparseImplicitStepper:
+    system_matrix: Any
+    preconditioner: Any | None
+    dt_s: float
+    rtol: float
+    maxiter: int
+    solver: str
+    capacitance_J_K: np.ndarray | None = None
+    last_info: int = 0
+    last_iterations: int = 0
+
+    def step(self, temperatures_K: np.ndarray, source_K_s: np.ndarray) -> np.ndarray:
+        temperatures = np.asarray(temperatures_K, dtype=float).reshape(-1)
+        source = np.asarray(source_K_s, dtype=float).reshape(-1)
+        if temperatures.shape != source.shape:
+            raise ValueError(f"Source vector length {source.shape} does not match temperatures {temperatures.shape}.")
+        rhs = temperatures + float(self.dt_s) * source
+        if self.capacitance_J_K is not None:
+            rhs = np.asarray(self.capacitance_J_K, dtype=float).reshape(-1) * rhs
+        iterations = 0
+
+        def _count_iteration(_x: np.ndarray) -> None:
+            nonlocal iterations
+            iterations += 1
+
+        solve = cg if self.solver == "cg" else bicgstab
+        result, info = solve(
+            self.system_matrix,
+            rhs,
+            x0=temperatures,
+            rtol=max(0.0, float(self.rtol)),
+            atol=0.0,
+            maxiter=max(1, int(self.maxiter)),
+            M=self.preconditioner,
+            callback=_count_iteration,
+        )
+        self.last_info = int(info)
+        self.last_iterations = int(iterations)
+        if int(info) != 0:
+            raise RuntimeError(f"{self.solver} did not converge; info={int(info)}, iterations={int(iterations)}")
+        result = np.asarray(result, dtype=float).reshape(-1)
+        if result.shape != temperatures.shape or not np.all(np.isfinite(result)):
+            raise RuntimeError(f"{self.solver} returned an invalid temperature vector.")
+        return result
+
+
+@dataclass
 class SimulationState:
     time_s: float
     temperatures_K: np.ndarray
@@ -110,7 +157,11 @@ class PreparedSimulation:
     base_b: np.ndarray | None = None
     radiation_coeff_W_K4: np.ndarray | None = None
     gpu_stepper: Any | None = None
+    sparse_implicit_stepper: SparseImplicitStepper | None = None
     fast_sparse_substeps: int | None = None
+    node_index_by_id: dict[int, int] = field(default_factory=dict)
+    heater_node_ids: tuple[int, ...] = ()
+    cryocooler_node_ids: tuple[int, ...] = ()
     dynamic_heater_inputs: bool = False
     warnings: list[str] = field(default_factory=list)
     controller_integrators: dict[int, float] = field(default_factory=dict)
@@ -287,9 +338,13 @@ class PreparedSimulation:
             zero_start = time.perf_counter()
             zero_power = np.zeros(len(self.node_ids), dtype=float)
             _record_profile_ms(profile, "zero_power_vector_ms", zero_start)
-            if not self._advance_with_gpu_power_vector(zero_power, profile) and not self._advance_with_fast_sparse_power_vector(
+            if (
+                not self._advance_with_gpu_power_vector(zero_power, profile)
+                and not self._advance_with_sparse_implicit_power_vector(zero_power, profile)
+                and not self._advance_with_fast_sparse_power_vector(
                 zero_power,
                 profile,
+                )
             ):
                 expm_start = time.perf_counter()
                 self.z = np.asarray(
@@ -341,8 +396,8 @@ class PreparedSimulation:
         if self.model is None:
             return
         powers = np.zeros(len(self.node_ids), dtype=float)
-        node_index = {int(node_id): row for row, node_id in enumerate(self.node_ids)}
-        for row, node_id in enumerate(self.node_ids):
+        node_index = self.node_index_by_id or {int(node_id): row for row, node_id in enumerate(self.node_ids)}
+        for node_id in self.heater_node_ids:
             node = self.model.nodes[int(node_id)]
             if node.is_heater:
                 _deposit_heater_command_power(
@@ -352,8 +407,13 @@ class PreparedSimulation:
                     int(node_id),
                     max(0.0, float(heater_power_by_node.get(int(node_id), 0.0))),
                 )
+        for node_id in self.cryocooler_node_ids:
+            row = node_index.get(int(node_id))
+            if row is None:
+                continue
+            node = self.model.nodes[int(node_id)]
             if keep_cryocoolers_active and node.has_cryocooler:
-                powers[row] -= _cryocooler_power_for_temperature(float(self.temperatures_K[row]), self.params)
+                powers[int(row)] -= _cryocooler_power_for_temperature(float(self.temperatures_K[int(row)]), self.params)
         self._advance_with_power_vector(powers)
 
     def step_backward(self) -> SimulationState:
@@ -404,6 +464,9 @@ class PreparedSimulation:
                 self.params,
                 include_heater_inputs=self.params.input_mode == "heater_inputs",
                 update_pid_state=True,
+                node_index_by_id=self.node_index_by_id,
+                heater_node_ids=self.heater_node_ids,
+                cryocooler_node_ids=self.cryocooler_node_ids,
             )
             _record_profile_ms(profile, "controller_heater_power_ms", controller_start)
         self._advance_with_power_vector(heater_power, profile)
@@ -412,6 +475,8 @@ class PreparedSimulation:
         if self.inv_C is None or self.A is None or self.base_b is None:
             return
         if self._advance_with_gpu_power_vector(heater_power, profile):
+            return
+        if self._advance_with_sparse_implicit_power_vector(heater_power, profile):
             return
         if self._advance_with_fast_sparse_power_vector(heater_power, profile):
             return
@@ -467,6 +532,46 @@ class PreparedSimulation:
         sync_start = time.perf_counter()
         self.z = np.concatenate([np.asarray(temperatures, dtype=float), np.array([1.0])])
         _record_profile_ms(profile, "state_vector_update_ms", sync_start)
+        return True
+
+    def _advance_with_sparse_implicit_power_vector(
+        self,
+        heater_power: np.ndarray,
+        profile: dict[str, float] | None = None,
+    ) -> bool:
+        if (
+            self.sparse_implicit_stepper is None
+            or self.inv_C is None
+            or self.base_b is None
+        ):
+            return False
+        try:
+            source_start = time.perf_counter()
+            radiation_start = time.perf_counter()
+            radiation_source = self._radiation_source_vector()
+            _record_profile_ms(profile, "radiation_source_ms", radiation_start)
+            temperatures = np.asarray(self.temperatures_K, dtype=float).reshape(-1)
+            powers = np.asarray(heater_power, dtype=float).reshape(-1)
+            if powers.shape != temperatures.shape:
+                raise ValueError(f"Heater power vector length {powers.shape} does not match temperatures {temperatures.shape}.")
+            source = (
+                np.asarray(self.base_b, dtype=float).reshape(-1)
+                + np.asarray(self.inv_C, dtype=float).reshape(-1) * powers
+                + radiation_source
+            )
+            _record_profile_ms(profile, "source_vector_build_ms", source_start)
+            step_start = time.perf_counter()
+            temperatures_next = self.sparse_implicit_stepper.step(temperatures, source)
+            _record_profile_ms(profile, "cpu_sparse_implicit_step_ms", step_start)
+            if profile is not None:
+                profile["cpu_sparse_implicit_iterations"] = float(self.sparse_implicit_stepper.last_iterations)
+            sync_start = time.perf_counter()
+            self.z = np.concatenate([temperatures_next, np.array([1.0])])
+            _record_profile_ms(profile, "state_vector_update_ms", sync_start)
+        except Exception as exc:
+            self.warnings.append(f"Sparse implicit CPU stepping failed; falling back to explicit/exponential stepping: {exc}")
+            self.sparse_implicit_stepper = None
+            return False
         return True
 
     def _advance_with_fast_sparse_power_vector(
@@ -573,13 +678,18 @@ class PreparedSimulation:
             self.params,
             include_heater_inputs=self.params.input_mode == "heater_inputs",
             update_pid_state=False,
+            node_index_by_id=self.node_index_by_id,
+            heater_node_ids=self.heater_node_ids,
+            cryocooler_node_ids=self.cryocooler_node_ids,
         ) if not _mimo_controller_is_active(self.model, self.node_ids, self.params) else self._mimo_controller_power_vector(update_state=False)
-        return {
-            int(node_id): float(power)
-            for node_id, power in zip(self.node_ids, powers)
-            if self.model.nodes[int(node_id)].is_heater
-            or self.model.nodes[int(node_id)].has_cryocooler
-        }
+        node_index = self.node_index_by_id or {int(node_id): row for row, node_id in enumerate(self.node_ids)}
+        role_node_ids = sorted(set(self.heater_node_ids).union(self.cryocooler_node_ids))
+        result: dict[int, float] = {}
+        for node_id in role_node_ids:
+            row = node_index.get(int(node_id))
+            if row is not None:
+                result[int(node_id)] = float(powers[int(row)])
+        return result
 
     def cryocooler_power_by_node(self) -> dict[int, float]:
         if (
@@ -588,20 +698,23 @@ class PreparedSimulation:
         ):
             return {
                 int(node_id): 0.0
-                for node_id in self.node_ids
-                if self.model is not None and self.model.nodes[int(node_id)].has_cryocooler
+                for node_id in self.cryocooler_node_ids
             }
         powers = _cryocooler_power_vector(
             self.model,
             self.node_ids,
             self.temperatures_K,
             self.params,
+            node_index_by_id=self.node_index_by_id,
+            cryocooler_node_ids=self.cryocooler_node_ids,
         )
-        return {
-            int(node_id): float(power)
-            for node_id, power in zip(self.node_ids, powers)
-            if self.model.nodes[int(node_id)].has_cryocooler
-        }
+        node_index = self.node_index_by_id or {int(node_id): row for row, node_id in enumerate(self.node_ids)}
+        result: dict[int, float] = {}
+        for node_id in self.cryocooler_node_ids:
+            row = node_index.get(int(node_id))
+            if row is not None:
+                result[int(node_id)] = float(powers[int(row)])
+        return result
 
     def heater_actuator_power_by_node(self, *, disable_mimo_controller: bool = False) -> dict[int, float]:
         if self.model is None:
@@ -621,6 +734,7 @@ class PreparedSimulation:
                 self.params,
                 include_heater_inputs=self.params.input_mode == "heater_inputs",
                 excluded_modes={"mimo"} if disable_mimo_controller else None,
+                heater_node_ids=self.heater_node_ids,
             )
 
     def _mimo_controller_power_vector(self, update_state: bool) -> np.ndarray:
@@ -635,6 +749,9 @@ class PreparedSimulation:
             include_heater_inputs=True,
             update_pid_state=update_state,
             excluded_modes={"mimo"},
+            node_index_by_id=self.node_index_by_id,
+            heater_node_ids=self.heater_node_ids,
+            cryocooler_node_ids=self.cryocooler_node_ids,
         )
         enabled_heater_ids = _enabled_node_id_set(self.params.enabled_heater_node_ids)
         enabled_sensor_ids = _enabled_node_id_set(self.params.enabled_sensor_node_ids)
@@ -642,7 +759,7 @@ class PreparedSimulation:
         pair_warnings.extend(refresh_sensor_connected_nodes(self.model))
         active_sensor_ids: set[int] = set()
         heater_ids: list[int] = []
-        for node_id in self.node_ids:
+        for node_id in self.heater_node_ids:
             heater_id = int(node_id)
             heater = self.model.nodes[heater_id]
             if (
@@ -686,7 +803,7 @@ class PreparedSimulation:
                 self.controller_last_power_by_heater = {heater_id: 0.0 for heater_id in heater_ids}
             return powers
 
-        node_index = {int(node_id): row for row, node_id in enumerate(self.node_ids)}
+        node_index = self.node_index_by_id or {int(node_id): row for row, node_id in enumerate(self.node_ids)}
         readouts = [
             sensor_readout_temperature_K(self.model, node_index, self.temperatures_K, sensor_id)
             for sensor_id in sensor_ids
@@ -1000,16 +1117,32 @@ class PreparedSimulation:
         node_index: dict[int, int],
     ) -> np.ndarray:
         inv_C = np.asarray(self.inv_C, dtype=float).reshape(-1) if self.inv_C is not None else np.zeros(len(self.node_ids))
-        connected_key = tuple(
-            tuple(int(value) for value in getattr(self.model.nodes[int(sensor_id)], "sensor_connected_node_ids", []))
-            for sensor_id in sensor_ids
-        ) if self.model is not None else tuple()
+        connected_key: tuple[tuple[tuple[int, float], ...], ...]
+        if self.model is None:
+            connected_key = tuple()
+        else:
+            connected_rows: list[tuple[tuple[int, float], ...]] = []
+            for sensor_id in sensor_ids:
+                sensor = self.model.nodes[int(sensor_id)]
+                readout_ids = (
+                    getattr(sensor, "readout_node_ids", [])
+                    or getattr(sensor, "sensor_connected_node_ids", [])
+                    or []
+                )
+                rows_for_sensor: list[tuple[int, float]] = []
+                for node_id in readout_ids:
+                    node_id = int(node_id)
+                    row = node_index.get(node_id)
+                    if row is None:
+                        continue
+                    rows_for_sensor.append((node_id, round(float(inv_C[int(row)]), 12)))
+                connected_rows.append(tuple(rows_for_sensor))
+            connected_key = tuple(connected_rows)
         key = (
             tuple(int(value) for value in sensor_ids),
             tuple(int(value) for value in heater_ids),
             connected_key,
             float(getattr(self.params, "heater_sensor_pair_alpha", 1.0)),
-            tuple(round(float(inv_C[int(row)]), 12) for row in range(len(inv_C))),
         )
         cache = self.controller_dynamic_gain_cache
         if (
@@ -1088,6 +1221,17 @@ def prepare_simulation(
     params: SimulationParameters,
 ) -> PreparedSimulation:
     node_ids = np.asarray(matrices.get("node_ids", model.ordered_node_ids()), dtype=int)
+    node_index_by_id = {int(node_id): row for row, node_id in enumerate(node_ids)}
+    heater_node_ids = tuple(
+        int(node_id)
+        for node_id in sorted((int(value) for value in node_ids))
+        if bool(getattr(model.nodes[int(node_id)], "is_heater", False))
+    )
+    cryocooler_node_ids = tuple(
+        int(node_id)
+        for node_id in sorted((int(value) for value in node_ids))
+        if bool(getattr(model.nodes[int(node_id)], "has_cryocooler", False))
+    )
     n = len(node_ids)
     C = np.asarray(matrices.get("C", [model.nodes[int(node_id)].C_J_K for node_id in node_ids]), dtype=float).reshape(-1)
     raw_L = matrices.get("L")
@@ -1181,6 +1325,13 @@ def prepare_simulation(
         params,
         warnings,
     )
+    sparse_implicit_stepper = _build_sparse_implicit_stepper(
+        A,
+        C,
+        L,
+        params,
+        warnings,
+    )
     fast_sparse_substeps = _build_fast_sparse_substeps(
         A,
         C,
@@ -1202,7 +1353,11 @@ def prepare_simulation(
         base_b=b,
         radiation_coeff_W_K4=radiation_coeff,
         gpu_stepper=gpu_stepper,
+        sparse_implicit_stepper=sparse_implicit_stepper,
         fast_sparse_substeps=fast_sparse_substeps,
+        node_index_by_id=node_index_by_id,
+        heater_node_ids=heater_node_ids,
+        cryocooler_node_ids=cryocooler_node_ids,
         dynamic_heater_inputs=dynamic_heater_inputs,
         warnings=warnings,
     )
@@ -1265,6 +1420,61 @@ def _build_gpu_sparse_stepper(
     return stepper
 
 
+def _build_sparse_implicit_stepper(
+    A: Any,
+    C: np.ndarray,
+    L: Any,
+    params: SimulationParameters,
+    warnings: list[str],
+) -> SparseImplicitStepper | None:
+    if not bool(getattr(params, "implicit_sparse_simulation_enabled", True)):
+        return None
+    if not issparse(A):
+        return None
+    dt = float(params.dt_s)
+    if not np.isfinite(dt) or dt <= 0.0:
+        warnings.append("Sparse implicit CPU stepping unavailable; dt_s must be positive.")
+        return None
+    try:
+        C_values = np.asarray(C, dtype=float).reshape(-1)
+        if C_values.size == 0 or np.any(C_values <= 0.0) or not np.all(np.isfinite(C_values)):
+            warnings.append("Sparse implicit CPU stepping unavailable; capacitance vector is invalid.")
+            return None
+        L_sparse = csr_matrix(L)
+        if _sparse_matrix_is_symmetric(L_sparse):
+            system_matrix = (diags(C_values, format="csr") + dt * L_sparse).tocsr()
+            solver = "cg"
+            capacitance = C_values
+        else:
+            system_matrix = (eye(L_sparse.shape[0], format="csr") - dt * csr_matrix(A)).tocsr()
+            solver = "bicgstab"
+            capacitance = None
+        diagonal = np.asarray(system_matrix.diagonal(), dtype=float).reshape(-1)
+        inv_diagonal = np.zeros_like(diagonal)
+        valid = np.isfinite(diagonal) & (np.abs(diagonal) > 1.0e-30)
+        inv_diagonal[valid] = 1.0 / diagonal[valid]
+        preconditioner = LinearOperator(system_matrix.shape, matvec=lambda values: inv_diagonal * values)
+        rtol = max(0.0, float(getattr(params, "implicit_sparse_simulation_rtol", 1.0e-5)))
+        maxiter = max(1, int(getattr(params, "implicit_sparse_simulation_maxiter", 200)))
+        stepper = SparseImplicitStepper(
+            system_matrix=system_matrix,
+            preconditioner=preconditioner,
+            dt_s=dt,
+            rtol=rtol,
+            maxiter=maxiter,
+            solver=solver,
+            capacitance_J_K=capacitance,
+        )
+    except Exception as exc:
+        warnings.append(f"Sparse implicit CPU stepping unavailable; setup failed: {exc}")
+        return None
+    warnings.append(
+        f"Sparse implicit CPU stepping enabled with {solver} solver "
+        f"(rtol={rtol:g}, maxiter={maxiter})."
+    )
+    return stepper
+
+
 def _build_fast_sparse_substeps(
     A: Any,
     C: np.ndarray,
@@ -1273,6 +1483,8 @@ def _build_fast_sparse_substeps(
     params: SimulationParameters,
     warnings: list[str],
 ) -> int | None:
+    if not bool(getattr(params, "fast_sparse_simulation_enabled", True)):
+        return None
     if not issparse(A):
         return None
     substeps = _explicit_substep_count(
@@ -1295,6 +1507,18 @@ def _build_fast_sparse_substeps(
         return None
     warnings.append(f"Fast sparse CPU stepping enabled with {int(substeps)} explicit substep(s) per simulation step.")
     return int(substeps)
+
+
+def _sparse_matrix_is_symmetric(matrix: Any, tolerance: float = 1.0e-12) -> bool:
+    sparse = csr_matrix(matrix)
+    if sparse.shape[0] != sparse.shape[1]:
+        return False
+    difference = (sparse - sparse.T).tocoo()
+    if difference.nnz == 0:
+        return True
+    matrix_scale = float(np.max(np.abs(sparse.data))) if sparse.nnz else 1.0
+    difference_scale = float(np.max(np.abs(difference.data))) if difference.nnz else 0.0
+    return difference_scale <= max(1.0, matrix_scale) * float(tolerance)
 
 
 def _optional_cupy_modules() -> tuple[Any | None, Any | None, str]:
@@ -1531,19 +1755,33 @@ def _controlled_heater_power_vector(
     update_pid_state: bool = True,
     excluded_modes: set[str] | None = None,
     include_cryocoolers: bool = True,
+    node_index_by_id: dict[int, int] | None = None,
+    heater_node_ids: Sequence[int] | None = None,
+    cryocooler_node_ids: Sequence[int] | None = None,
 ) -> np.ndarray:
     powers = np.zeros(len(node_ids), dtype=float)
     skipped_modes = excluded_modes or set()
-    node_index = {int(node_id): row for row, node_id in enumerate(node_ids)}
-    for row, node_id in enumerate(node_ids):
+    node_index = node_index_by_id or {int(node_id): row for row, node_id in enumerate(node_ids)}
+    cryocooler_ids = cryocooler_node_ids if cryocooler_node_ids is not None else node_ids
+    for node_id in cryocooler_ids:
+        row = node_index.get(int(node_id))
+        if row is None:
+            continue
         node = model.nodes[int(node_id)]
         if include_cryocoolers and node.has_cryocooler:
-            powers[row] -= _cryocooler_power_for_temperature(float(temperatures_K[row]), params)
+            powers[int(row)] -= _cryocooler_power_for_temperature(float(temperatures_K[int(row)]), params)
     if not include_heater_inputs:
         return powers
     enabled_heaters = _enabled_node_id_set(params.enabled_heater_node_ids)
     enabled_sensors = _enabled_node_id_set(params.enabled_sensor_node_ids)
-    for heater_id, heater in sorted(model.nodes.items(), key=lambda item: int(item[0])):
+    heater_items = (
+        ((int(heater_id), model.nodes.get(int(heater_id))) for heater_id in heater_node_ids)
+        if heater_node_ids is not None
+        else sorted(model.nodes.items(), key=lambda item: int(item[0]))
+    )
+    for heater_id, heater in heater_items:
+        if heater is None:
+            continue
         if not heater.is_heater or not _node_id_enabled(enabled_heaters, int(heater_id)):
             continue
         sensor_id = getattr(heater, "assigned_sensor_id", None)
@@ -1578,22 +1816,33 @@ def _controlled_heater_command_by_node(
     params: SimulationParameters,
     include_heater_inputs: bool,
     excluded_modes: set[str] | None = None,
+    heater_node_ids: Sequence[int] | None = None,
 ) -> dict[int, float]:
+    candidate_heater_ids = (
+        tuple(int(node_id) for node_id in heater_node_ids)
+        if heater_node_ids is not None
+        else tuple(int(node_id) for node_id in node_ids if model.nodes[int(node_id)].is_heater)
+    )
     if not include_heater_inputs:
         return {
             int(node_id): 0.0
-            for node_id in node_ids
-            if model.nodes[int(node_id)].is_heater
+            for node_id in candidate_heater_ids
         }
     skipped_modes = excluded_modes or set()
     enabled_heaters = _enabled_node_id_set(params.enabled_heater_node_ids)
     enabled_sensors = _enabled_node_id_set(params.enabled_sensor_node_ids)
     commands = {
         int(node_id): 0.0
-        for node_id in node_ids
-        if model.nodes[int(node_id)].is_heater
+        for node_id in candidate_heater_ids
     }
-    for heater_id, heater in sorted(model.nodes.items(), key=lambda item: int(item[0])):
+    heater_items = (
+        ((int(heater_id), model.nodes.get(int(heater_id))) for heater_id in candidate_heater_ids)
+        if heater_node_ids is not None
+        else sorted(model.nodes.items(), key=lambda item: int(item[0]))
+    )
+    for heater_id, heater in heater_items:
+        if heater is None:
+            continue
         if int(heater_id) not in commands:
             continue
         if not heater.is_heater or not _node_id_enabled(enabled_heaters, int(heater_id)):
@@ -1661,12 +1910,19 @@ def _cryocooler_power_vector(
     node_ids: np.ndarray,
     temperatures_K: np.ndarray,
     params: SimulationParameters,
+    node_index_by_id: dict[int, int] | None = None,
+    cryocooler_node_ids: Sequence[int] | None = None,
 ) -> np.ndarray:
     powers = np.zeros(len(node_ids), dtype=float)
-    for row, node_id in enumerate(node_ids):
+    node_index = node_index_by_id or {int(node_id): row for row, node_id in enumerate(node_ids)}
+    candidate_node_ids = cryocooler_node_ids if cryocooler_node_ids is not None else node_ids
+    for node_id in candidate_node_ids:
+        row = node_index.get(int(node_id))
+        if row is None:
+            continue
         node = model.nodes[int(node_id)]
         if node.has_cryocooler:
-            powers[row] = _cryocooler_power_for_temperature(float(temperatures_K[row]), params)
+            powers[int(row)] = _cryocooler_power_for_temperature(float(temperatures_K[int(row)]), params)
     return powers
 
 

@@ -2257,6 +2257,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
             fast_sparse_simulation_enabled=True,
             fast_sparse_simulation_max_substeps=64,
             fast_sparse_simulation_safety_factor=0.5,
+            implicit_sparse_simulation_enabled=True,
+            implicit_sparse_simulation_rtol=1.0e-4,
+            implicit_sparse_simulation_maxiter=321,
         )
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "simulation_parameters.json"
@@ -2269,6 +2272,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertTrue(loaded.fast_sparse_simulation_enabled)
         self.assertEqual(loaded.fast_sparse_simulation_max_substeps, 64)
         self.assertAlmostEqual(loaded.fast_sparse_simulation_safety_factor, 0.5)
+        self.assertTrue(loaded.implicit_sparse_simulation_enabled)
+        self.assertAlmostEqual(loaded.implicit_sparse_simulation_rtol, 1.0e-4)
+        self.assertEqual(loaded.implicit_sparse_simulation_maxiter, 321)
         self.assertEqual(extras["custom"], "kept")
 
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
@@ -2854,7 +2860,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(node.heater_control.pid.lambda_order, 1.0)
         self.assertAlmostEqual(node.heater_control.pid.mu_order, 1.0)
 
-    def test_large_simulation_uses_fast_sparse_cpu_stepper_by_default(self) -> None:
+    def test_large_simulation_uses_sparse_implicit_cpu_stepper_by_default(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="large_sparse_stepper"))
         node_count = 513
         for node_id in range(node_count):
@@ -2880,9 +2886,38 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertIsNone(prepared.Phi_aug)
         self.assertLess(float(prepared.temperatures_K[0]), float(before[0]))
-        self.assertIn("cpu_fast_sparse_step_ms", prepared.last_step_profile_ms)
+        self.assertIsNotNone(prepared.sparse_implicit_stepper)
+        self.assertIn("cpu_sparse_implicit_step_ms", prepared.last_step_profile_ms)
         self.assertNotIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
         self.assertIn("model_solve_ms", prepared.last_step_profile_ms)
+
+    def test_sparse_implicit_cpu_stepper_bypasses_expm_multiply_automatically(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="implicit_sparse_cpu"))
+        node_count = 513
+        for node_id in range(node_count):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+            node.C_J_K = 10.0
+            node.initial_temperature_K = 300.0
+            model.add_node(node)
+        diagonal = np.ones(node_count, dtype=float)
+        matrices = {
+            "node_ids": np.arange(node_count, dtype=int),
+            "C": np.full(node_count, 10.0),
+            "L": csr_matrix((diagonal, (np.arange(node_count), np.arange(node_count))), shape=(node_count, node_count)),
+            "G_rad": np.zeros(node_count),
+        }
+
+        prepared = prepare_simulation(
+            model,
+            matrices,
+            SimulationParameters(dt_s=1.0, use_ambient_radiation=False),
+        )
+        prepared.step_forward()
+
+        self.assertIsNotNone(prepared.sparse_implicit_stepper)
+        self.assertIn("cpu_sparse_implicit_step_ms", prepared.last_step_profile_ms)
+        self.assertNotIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
+        self.assertAlmostEqual(float(prepared.temperatures_K[0]), 10.0 * 300.0 / 11.0)
 
     def test_fast_sparse_cpu_stepper_bypasses_expm_multiply_automatically(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="fast_sparse_cpu"))
@@ -2906,6 +2941,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
             SimulationParameters(
                 dt_s=1.0,
                 use_ambient_radiation=False,
+                implicit_sparse_simulation_enabled=False,
                 fast_sparse_simulation_safety_factor=1.0,
             ),
         )
@@ -2937,6 +2973,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
             SimulationParameters(
                 dt_s=100.0,
                 use_ambient_radiation=False,
+                implicit_sparse_simulation_enabled=False,
                 fast_sparse_simulation_enabled=True,
                 fast_sparse_simulation_max_substeps=1,
             ),

@@ -49,6 +49,9 @@ class SimulationParameters:
     fast_sparse_simulation_enabled: bool = True
     fast_sparse_simulation_max_substeps: int = 128
     fast_sparse_simulation_safety_factor: float = 0.2
+    implicit_sparse_simulation_enabled: bool = True
+    implicit_sparse_simulation_rtol: float = 1.0e-5
+    implicit_sparse_simulation_maxiter: int = 200
     simulation_history_limit: int = 256
     live_step_profiling_enabled: bool = True
     live_step_profile_threshold_ms: float = 1000.0
