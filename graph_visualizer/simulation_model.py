@@ -72,6 +72,7 @@ class SparseImplicitStepper:
     rtol: float
     maxiter: int
     solver: str
+    state_operator: Any
     capacitance_J_K: np.ndarray | None = None
     last_info: int = 0
     last_iterations: int = 0
@@ -81,9 +82,21 @@ class SparseImplicitStepper:
         source = np.asarray(source_K_s, dtype=float).reshape(-1)
         if temperatures.shape != source.shape:
             raise ValueError(f"Source vector length {source.shape} does not match temperatures {temperatures.shape}.")
-        rhs = temperatures + float(self.dt_s) * source
         if self.capacitance_J_K is not None:
-            rhs = np.asarray(self.capacitance_J_K, dtype=float).reshape(-1) * rhs
+            capacitance = np.asarray(self.capacitance_J_K, dtype=float).reshape(-1)
+            if capacitance.shape != temperatures.shape:
+                raise ValueError(f"Capacitance vector length {capacitance.shape} does not match temperatures {temperatures.shape}.")
+            rhs = float(self.dt_s) * (capacitance * source - np.asarray(self.state_operator @ temperatures, dtype=float).reshape(-1))
+        else:
+            rhs = float(self.dt_s) * (
+                np.asarray(self.state_operator @ temperatures, dtype=float).reshape(-1) + source
+            )
+        if not np.all(np.isfinite(rhs)):
+            raise RuntimeError(f"{self.solver} received an invalid implicit update right-hand side.")
+        if np.linalg.norm(rhs) <= 0.0:
+            return temperatures.copy()
+        if self.capacitance_J_K is not None:
+            rhs = np.asarray(rhs, dtype=float).reshape(-1)
         iterations = 0
 
         def _count_iteration(_x: np.ndarray) -> None:
@@ -94,7 +107,7 @@ class SparseImplicitStepper:
         result, info = solve(
             self.system_matrix,
             rhs,
-            x0=temperatures,
+            x0=np.zeros_like(temperatures),
             rtol=max(0.0, float(self.rtol)),
             atol=0.0,
             maxiter=max(1, int(self.maxiter)),
@@ -108,7 +121,7 @@ class SparseImplicitStepper:
         result = np.asarray(result, dtype=float).reshape(-1)
         if result.shape != temperatures.shape or not np.all(np.isfinite(result)):
             raise RuntimeError(f"{self.solver} returned an invalid temperature vector.")
-        return result
+        return temperatures + result
 
 
 @dataclass
@@ -1445,10 +1458,12 @@ def _build_sparse_implicit_stepper(
             system_matrix = (diags(C_values, format="csr") + dt * L_sparse).tocsr()
             solver = "cg"
             capacitance = C_values
+            state_operator = L_sparse
         else:
             system_matrix = (eye(L_sparse.shape[0], format="csr") - dt * csr_matrix(A)).tocsr()
             solver = "bicgstab"
             capacitance = None
+            state_operator = csr_matrix(A)
         diagonal = np.asarray(system_matrix.diagonal(), dtype=float).reshape(-1)
         inv_diagonal = np.zeros_like(diagonal)
         valid = np.isfinite(diagonal) & (np.abs(diagonal) > 1.0e-30)
@@ -1463,6 +1478,7 @@ def _build_sparse_implicit_stepper(
             rtol=rtol,
             maxiter=maxiter,
             solver=solver,
+            state_operator=state_operator,
             capacitance_J_K=capacitance,
         )
     except Exception as exc:

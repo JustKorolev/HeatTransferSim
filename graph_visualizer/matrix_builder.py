@@ -12,6 +12,7 @@ from .models import EdgeMode, ThermalGraphModel
 STEFAN_BOLTZMANN_W_M2K4 = 5.670374419e-8
 DENSE_MATRIX_NODE_LIMIT = 6000
 DENSE_MATRIX_MAX_TOTAL_BYTES = 768 * 1024 * 1024
+DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K = 1.0e4
 
 
 def refresh_auto_edges(model: ThermalGraphModel) -> None:
@@ -46,7 +47,10 @@ def refresh_auto_edges(model: ThermalGraphModel) -> None:
     model.metadata.edge_mode = EdgeMode.AUTO.value
 
 
-def refresh_geometry_edges(model: ThermalGraphModel, default_contact_G_W_K: float = 0.1) -> None:
+def refresh_geometry_edges(
+    model: ThermalGraphModel,
+    contact_interface_conductance_W_m2K: float = DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
+) -> None:
     """Replace edges using physical face contacts from node centers and sizes."""
     model.clear_edges()
     node_ids = model.ordered_node_ids()
@@ -94,7 +98,13 @@ def refresh_geometry_edges(model: ThermalGraphModel, default_contact_G_W_K: floa
                 target = model.nodes[target_id]
                 area_m2 = float(overlap_a * overlap_b * 1.0e-6)
                 distance_m = _center_distance_m(source, target)
-                conductance = _geometry_conductance(source, target, area_m2, distance_m, default_contact_G_W_K)
+                conductance = _geometry_conductance(
+                    source,
+                    target,
+                    area_m2,
+                    distance_m,
+                    contact_interface_conductance_W_m2K,
+                )
                 if conductance <= 0.0:
                     continue
                 model.set_edge(
@@ -221,20 +231,44 @@ def _geometry_conductance(
     node_j: Any,
     area_m2: float,
     distance_m: float,
-    default_contact_G_W_K: float,
+    contact_interface_conductance_W_m2K: float,
 ) -> float:
     same_component = bool(getattr(node_i, "component_name", "")) and (
         getattr(node_i, "component_name", "") == getattr(node_j, "component_name", "")
     )
-    same_material = getattr(node_i, "material", "") == getattr(node_j, "material", "")
-    if same_component or same_material:
-        k_i = max(0.0, float(getattr(node_i, "k_W_mK", 0.0)))
-        k_j = max(0.0, float(getattr(node_j, "k_W_mK", 0.0)))
-        if k_i <= 0.0 or k_j <= 0.0:
+    interface_conductance = None if same_component else float(contact_interface_conductance_W_m2K)
+    return _series_contact_conductance(
+        float(getattr(node_i, "k_W_mK", 0.0)),
+        float(getattr(node_j, "k_W_mK", 0.0)),
+        area_m2,
+        distance_m,
+        interface_conductance_W_m2K=interface_conductance,
+    )
+
+
+def _series_contact_conductance(
+    k_i: float,
+    k_j: float,
+    area_m2: float,
+    distance_m: float,
+    *,
+    interface_conductance_W_m2K: float | None,
+) -> float:
+    if area_m2 <= 0.0 or distance_m <= 0.0 or k_i <= 0.0 or k_j <= 0.0:
+        return 0.0
+    if not all(np.isfinite(value) for value in (area_m2, distance_m, k_i, k_j)):
+        return 0.0
+    half_distance = distance_m * 0.5
+    resistance = half_distance / (k_i * area_m2)
+    resistance += half_distance / (k_j * area_m2)
+    if interface_conductance_W_m2K is not None:
+        h_contact = float(interface_conductance_W_m2K)
+        if h_contact <= 0.0 or not np.isfinite(h_contact):
             return 0.0
-        k_eff = 2.0 / (1.0 / k_i + 1.0 / k_j)
-        return float(k_eff * area_m2 / max(distance_m, 1.0e-12))
-    return float(max(0.0, default_contact_G_W_K))
+        resistance += 1.0 / (h_contact * area_m2)
+    if resistance <= 0.0 or not np.isfinite(resistance):
+        return 0.0
+    return float(1.0 / resistance)
 
 
 def _shared_face_area_and_distance(node_i: Any, node_j: Any) -> tuple[float, float]:

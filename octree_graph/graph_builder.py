@@ -44,6 +44,7 @@ DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS = [
 ]
 DEFAULT_ROLE_GROUP_GAP_MM = 10.0
 DEFAULT_MAX_HEATERS_PER_SENSOR = 1
+DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K = 1.0e4
 
 
 @dataclass
@@ -82,7 +83,7 @@ def build_graph(
     contact_report: ContactReport | None,
     materials: dict[str, Material],
     warnings: list[str],
-    default_contact_G_W_K: float = 0.1,
+    contact_interface_conductance_W_m2K: float = DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
     radiation_reference_temperature_K: float = 293.15,
     contact_detection_distance_mm: float = 0.0,
     component_bounds_mm: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
@@ -156,21 +157,39 @@ def build_graph(
         same_component = node_a["component_name"] == node_b["component_name"]
         if same_component:
             edge_type = "internal_conduction"
-            k_eff = harmonic_mean(material_a.k_W_mK, material_b.k_W_mK)
-            G = k_eff * (area_mm2 * 1.0e-6) / max(distance_mm * 1.0e-3, 1.0e-12)
+            G = contact_conductance_W_K(
+                material_a,
+                material_b,
+                area_mm2,
+                distance_mm,
+                interface_conductance_W_m2K=None,
+            )
             source = "geometry"
             confidence = "high"
         elif node_a["material_name"] == node_b["material_name"]:
             edge_type = "same_material_spatial"
-            k_eff = material_a.k_W_mK
-            G = k_eff * (area_mm2 * 1.0e-6) / max(distance_mm * 1.0e-3, 1.0e-12)
+            G = contact_conductance_W_K(
+                material_a,
+                material_b,
+                area_mm2,
+                distance_mm,
+                interface_conductance_W_m2K=contact_interface_conductance_W_m2K,
+            )
             source = "geometry"
             confidence = "medium"
         else:
             edge_type = "uncertain_contact"
-            G = default_contact_G_W_K
+            G = contact_conductance_W_K(
+                material_a,
+                material_b,
+                area_mm2,
+                distance_mm,
+                interface_conductance_W_m2K=contact_interface_conductance_W_m2K,
+            )
             source = "geometry"
             confidence = "low"
+        if G <= 0.0:
+            continue
         edges.append(
             {
                 "edge_id": f"edge_{edge_index}",
@@ -182,7 +201,7 @@ def build_graph(
                 "distance_m": float(distance_mm * 1.0e-3),
                 "contact_confidence": confidence,
                 "source": source,
-                "warnings": [] if confidence != "low" else ["Inter-part geometry adjacency has not been contact-classified."],
+                "warnings": [] if confidence != "low" else ["Inter-part geometry adjacency uses interface conductance approximation."],
             }
         )
         connected_pairs.add(_cell_pair_key(a, b))
@@ -197,7 +216,7 @@ def build_graph(
             edge_index,
             materials,
             warnings,
-            default_contact_G_W_K,
+            contact_interface_conductance_W_m2K,
             contact_detection_distance_mm,
             connected_node_pairs,
         )
@@ -1083,6 +1102,35 @@ def harmonic_mean(a: float, b: float) -> float:
     return 2.0 / (1.0 / a + 1.0 / b)
 
 
+def contact_conductance_W_K(
+    material_a: Material,
+    material_b: Material,
+    area_mm2: float,
+    distance_mm: float,
+    *,
+    interface_conductance_W_m2K: float | None,
+) -> float:
+    area_m2 = float(area_mm2) * 1.0e-6
+    distance_m = float(distance_mm) * 1.0e-3
+    k_a = float(material_a.k_W_mK)
+    k_b = float(material_b.k_W_mK)
+    if area_m2 <= 0.0 or distance_m <= 0.0 or k_a <= 0.0 or k_b <= 0.0:
+        return 0.0
+    if not all(np.isfinite(value) for value in (area_m2, distance_m, k_a, k_b)):
+        return 0.0
+    half_distance_m = distance_m * 0.5
+    resistance = half_distance_m / (k_a * area_m2)
+    resistance += half_distance_m / (k_b * area_m2)
+    if interface_conductance_W_m2K is not None:
+        h_contact = float(interface_conductance_W_m2K)
+        if h_contact <= 0.0 or not np.isfinite(h_contact):
+            return 0.0
+        resistance += 1.0 / (h_contact * area_m2)
+    if resistance <= 0.0 or not np.isfinite(resistance):
+        return 0.0
+    return float(1.0 / resistance)
+
+
 def _shared_face_area_and_distance(a: OctreeCell, b: OctreeCell) -> tuple[float, float]:
     ca = np.asarray(a.center_mm)
     cb = np.asarray(b.center_mm)
@@ -1118,7 +1166,7 @@ def _add_near_contact_edges(
     edge_index: int,
     materials: dict[str, Material],
     warnings: list[str],
-    default_contact_G_W_K: float,
+    contact_interface_conductance_W_m2K: float,
     max_gap_mm: float,
     connected_node_pairs: set[tuple[int, int]],
 ) -> int:
@@ -1141,18 +1189,36 @@ def _add_near_contact_edges(
         same_material = node_a["material_name"] == node_b["material_name"]
         if same_component:
             edge_type = "near_internal_conduction"
-            k_eff = harmonic_mean(material_a.k_W_mK, material_b.k_W_mK)
-            G = k_eff * (area_mm2 * 1.0e-6) / max(distance_mm * 1.0e-3, 1.0e-12)
+            G = contact_conductance_W_K(
+                material_a,
+                material_b,
+                area_mm2,
+                distance_mm,
+                interface_conductance_W_m2K=None,
+            )
             confidence = "medium"
         elif same_material and area_mm2 > 0.0:
             edge_type = "near_same_material_contact"
-            k_eff = material_a.k_W_mK
-            G = k_eff * (area_mm2 * 1.0e-6) / max(distance_mm * 1.0e-3, 1.0e-12)
+            G = contact_conductance_W_K(
+                material_a,
+                material_b,
+                area_mm2,
+                distance_mm,
+                interface_conductance_W_m2K=contact_interface_conductance_W_m2K,
+            )
             confidence = "medium"
         else:
             edge_type = "near_component_contact"
-            G = default_contact_G_W_K
+            G = contact_conductance_W_K(
+                material_a,
+                material_b,
+                area_mm2,
+                distance_mm,
+                interface_conductance_W_m2K=contact_interface_conductance_W_m2K,
+            )
             confidence = "low"
+        if G <= 0.0:
+            continue
         edges.append(
             {
                 "edge_id": f"edge_{edge_index}",

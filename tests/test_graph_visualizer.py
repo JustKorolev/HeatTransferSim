@@ -39,6 +39,7 @@ from graph_visualizer.mimo_controller import (
     weighted_rms_error,
 )
 from graph_visualizer.matrix_builder import (
+    DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
     build_matrices,
     estimate_conductance,
     exposed_areas_from_geometry_m2,
@@ -78,6 +79,14 @@ from graph_visualizer.two_d_graph_widget import (
     node_connection_counts,
 )
 from graph_visualizer.validation import validate_conductance_matrix, validate_matrices
+
+
+def _expected_contact_g(k_i: float, k_j: float, area_m2: float, distance_m: float) -> float:
+    half_distance = float(distance_m) * 0.5
+    resistance = half_distance / (float(k_i) * float(area_m2))
+    resistance += 1.0 / (DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K * float(area_m2))
+    resistance += half_distance / (float(k_j) * float(area_m2))
+    return 1.0 / resistance
 
 
 class GraphVisualizerModelTests(unittest.TestCase):
@@ -264,7 +273,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertEqual(set(loaded_model.edges), {(1, 2)})
         self.assertAlmostEqual(loaded_model.nodes[1].k_W_mK, 401.0)
-        self.assertAlmostEqual(loaded_matrices["G"][0, 1], 0.401)
+        expected_g = _expected_contact_g(401.0, 401.0, area_m2=1.0e-6, distance_m=1.0e-3)
+        self.assertAlmostEqual(loaded_matrices["G"][0, 1], expected_g)
         self.assertTrue(np.any(np.abs(loaded_matrices["L"]) > 0.0))
 
     def test_octree_load_preserves_consolidated_role_edges(self) -> None:
@@ -541,8 +551,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
             loaded_model, loaded_matrices = load_graph_folder(folder)
 
         self.assertAlmostEqual(loaded_model.nodes[1].k_W_mK, 401.0)
-        self.assertAlmostEqual(loaded_model.edges[(1, 2)].Gij_W_K, 0.401)
-        self.assertAlmostEqual(loaded_matrices["G"][0, 1], 0.401)
+        expected_g = _expected_contact_g(401.0, 401.0, area_m2=1.0e-6, distance_m=1.0e-3)
+        self.assertAlmostEqual(loaded_model.edges[(1, 2)].Gij_W_K, expected_g)
+        self.assertAlmostEqual(loaded_matrices["G"][0, 1], expected_g)
 
     def test_simulation_uses_actual_radiation_term_and_toggle(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="radiation_graph"))
@@ -2955,6 +2966,40 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertIn("cpu_sparse_implicit_step_ms", prepared.last_step_profile_ms)
         self.assertNotIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
         self.assertAlmostEqual(float(prepared.temperatures_K[0]), 10.0 * 300.0 / 11.0)
+
+    def test_sparse_implicit_cpu_stepper_keeps_diffusing_small_gradients(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="implicit_small_gradient"))
+        node_count = 513
+        for node_id in range(node_count):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+            node.C_J_K = 1.0
+            node.initial_temperature_K = 300.0
+            model.add_node(node)
+        model.nodes[0].initial_temperature_K = 300.001
+        conductance = 1.0e-3
+        row = np.array([0, 0, 1, 1], dtype=int)
+        col = np.array([0, 1, 0, 1], dtype=int)
+        data = np.array([conductance, -conductance, -conductance, conductance], dtype=float)
+        matrices = {
+            "node_ids": np.arange(node_count, dtype=int),
+            "C": np.ones(node_count, dtype=float),
+            "L": csr_matrix((data, (row, col)), shape=(node_count, node_count)),
+            "G_rad": np.zeros(node_count),
+        }
+
+        prepared = prepare_simulation(
+            model,
+            matrices,
+            SimulationParameters(dt_s=1.0, use_ambient_radiation=False),
+        )
+        before = prepared.temperatures_K.copy()
+        prepared.step_forward()
+
+        self.assertIsNotNone(prepared.sparse_implicit_stepper)
+        self.assertIn("cpu_sparse_implicit_step_ms", prepared.last_step_profile_ms)
+        self.assertLess(float(prepared.temperatures_K[0]), float(before[0]))
+        self.assertGreater(float(prepared.temperatures_K[1]), float(before[1]))
+        self.assertGreater(float(np.max(np.abs(prepared.temperatures_K - before))), 1.0e-9)
 
     def test_fast_sparse_cpu_stepper_bypasses_expm_multiply_automatically(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="fast_sparse_cpu"))

@@ -31,9 +31,11 @@ from octree_graph.cli import (
 )
 from octree_graph.load_contact_report import ContactReport
 from octree_graph.graph_builder import (
+    DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
     DEFAULT_ROLE_EXCLUDE_NAME_PATTERNS,
     RoleComponent,
     _candidate_cell_pairs,
+    contact_conductance_W_K,
     _exposed_areas_m2,
     build_graph,
     collapse_role_components,
@@ -128,6 +130,79 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         warnings: list[str] = []
         material = resolve_material("Not assigned", self.make_materials(), warnings)
         self.assertEqual(material.name, DEFAULT_ASSIGNED_MATERIAL_NAME)
+
+    def test_inter_component_contact_uses_bulk_plus_interface_resistance(self) -> None:
+        materials = self.make_materials()
+        copper = materials["Copper"]
+        aluminum = materials[DEFAULT_ASSIGNED_MATERIAL_NAME]
+        conductance = contact_conductance_W_K(
+            copper,
+            aluminum,
+            area_mm2=100.0,
+            distance_mm=10.0,
+            interface_conductance_W_m2K=1.0e4,
+        )
+
+        area_m2 = 100.0e-6
+        half_distance_m = 0.010 * 0.5
+        expected = 1.0 / (
+            half_distance_m / (copper.k_W_mK * area_m2)
+            + 1.0 / (1.0e4 * area_m2)
+            + half_distance_m / (aluminum.k_W_mK * area_m2)
+        )
+        self.assertAlmostEqual(conductance, expected)
+
+    def test_graph_build_uncertain_contact_is_not_fixed_fallback_conductance(self) -> None:
+        materials = self.make_materials()
+        leaves = [
+            OctreeCell(
+                cell_id="cell_1",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(0.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"copper_part": 1.0},
+                material_fractions={"Copper": 1.0},
+                dominant_component="copper_part",
+                dominant_material="Copper",
+                confidence="high",
+            ),
+            OctreeCell(
+                cell_id="cell_2",
+                parent_id=None,
+                children_ids=[],
+                level=0,
+                center_mm=(10.0, 0.0, 0.0),
+                size_mm=(10.0, 10.0, 10.0),
+                occupancy={"aluminum_part": 1.0},
+                material_fractions={DEFAULT_ASSIGNED_MATERIAL_NAME: 1.0},
+                dominant_component="aluminum_part",
+                dominant_material=DEFAULT_ASSIGNED_MATERIAL_NAME,
+                confidence="high",
+            ),
+        ]
+
+        result = build_graph(
+            leaves,
+            ContactReport(),
+            materials,
+            warnings=[],
+            contact_interface_conductance_W_m2K=1.0e4,
+        )
+
+        self.assertEqual(len(result.edges), 1)
+        edge = result.edges[0]
+        self.assertEqual(edge["edge_type"], "uncertain_contact")
+        self.assertNotEqual(edge["G_W_K"], 0.1)
+        expected = contact_conductance_W_K(
+            materials["Copper"],
+            materials[DEFAULT_ASSIGNED_MATERIAL_NAME],
+            area_mm2=100.0,
+            distance_mm=10.0,
+            interface_conductance_W_m2K=1.0e4,
+        )
+        self.assertAlmostEqual(edge["G_W_K"], expected)
 
     def test_validate_graph_skips_oversized_dense_symmetry_check(self) -> None:
         nodes = [
@@ -2462,6 +2537,24 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(leaves, [empty_leaf])
         self.assertEqual(graph_result.nodes, [])
         self.assertEqual(build_graph_mock.call_args.kwargs["contact_detection_distance_mm"], 0.0)
+        self.assertEqual(
+            build_graph_mock.call_args.kwargs["contact_interface_conductance_W_m2K"],
+            DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
+        )
+
+    def test_cli_accepts_contact_interface_conductance(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--mesh-dir",
+                "meshes/example",
+                "--graph-name",
+                "graph",
+                "--contact-interface-conductance-W-m2K",
+                "25000",
+            ]
+        )
+
+        self.assertEqual(args.contact_interface_conductance_W_m2K, 25000.0)
 
 
 if __name__ == "__main__":

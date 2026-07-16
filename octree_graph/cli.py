@@ -21,6 +21,7 @@ import numpy as np
 from scipy.sparse import issparse
 
 from .graph_builder import (
+    DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
     DEFAULT_MAX_HEATERS_PER_SENSOR,
     DEFAULT_ROLE_GROUP_GAP_MM,
     build_graph,
@@ -382,6 +383,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Multiplicative growth factor used while expanding role contact tolerance.",
     )
     parser.add_argument("--proximity-contact-distance-mm", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--contact-interface-conductance-W-m2K",
+        dest="contact_interface_conductance_W_m2K",
+        type=float,
+        default=DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
+        help=(
+            "Thermal interface conductance used for inter-component contacts. "
+            "Inter-component edge conductance is computed as 1/(L1/(k1*A) + 1/(h*A) + L2/(k2*A)); "
+            "same-component internal conduction omits the interface term."
+        ),
+    )
     parser.add_argument("--radiation-reference-temperature-K", type=float, default=293.15)
     parser.add_argument(
         "--octree-debug-leaves",
@@ -572,6 +584,13 @@ def _build_graph_with_optional_fallback(
         materials,
         warnings,
         radiation_reference_temperature_K=args.radiation_reference_temperature_K,
+        contact_interface_conductance_W_m2K=float(
+            getattr(
+                args,
+                "contact_interface_conductance_W_m2K",
+                DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
+            )
+        ),
         contact_detection_distance_mm=contact_distance_mm,
         component_bounds_mm=_component_bounds_mm(voxel_scene),
         role_components=getattr(args, "role_components", None),
