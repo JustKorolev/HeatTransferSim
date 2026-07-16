@@ -55,6 +55,8 @@ from graph_visualizer.simulation_parameters import (
     SimulationParameters,
     apply_initial_temperature_parameter_payload,
     initial_temperature_parameter_payload,
+    load_simulation_parameters,
+    save_simulation_parameters,
 )
 from graph_visualizer.sys_id_artifacts import (
     compare_sys_id_gain_matrices,
@@ -1999,6 +2001,76 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         tab.params = SimulationParameters(display_update_interval_ms=1000.0)
         self.assertAlmostEqual(tab._fast_forward_budget_s(), 0.25)
+
+    def test_live_step_profile_reports_slow_update_breakdown(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Timer:
+            def isActive(self) -> bool:
+                return False
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.node_ids = np.array([10, 20], dtype=int)
+                self.time_s = 0.0
+                self.values = np.array([300.0, 301.0], dtype=float)
+                self.last_step_profile_ms: dict[str, float] = {}
+
+            @property
+            def temperatures_K(self) -> np.ndarray:
+                return self.values
+
+            def step_forward(self) -> None:
+                self.time_s += 1.0
+                self.values = self.values + np.array([1.0, 0.5])
+                self.last_step_profile_ms = {
+                    "model_solve_ms": 120.0,
+                    "state_copy_ms": 10.0,
+                    "history_append_ms": 5.0,
+                }
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.prepared = Prepared()
+        tab.params = SimulationParameters(
+            t_final_s=10.0,
+            live_step_profiling_enabled=True,
+            live_step_profile_threshold_ms=0.0,
+        )
+        tab.timer = Timer()
+        tab._simulation_reinitialize_pending = False
+        tab.pause = lambda: None
+        tab.temperature_by_node = {}
+        tab._update_colors = lambda: None
+        tab._refresh_stats = lambda: None
+        tab._refresh_sensor_readouts = lambda: None
+        tab._sync_time_slider_to_history = lambda: None
+        statuses = []
+        tab._status = lambda message, error=False: statuses.append(message)
+
+        tab.step_forward()
+
+        self.assertEqual(tab.prepared.time_s, 1.0)
+        self.assertEqual(tab.temperature_by_node, {10: 301.0, 20: 301.5})
+        self.assertTrue(any("Live step profile" in message for message in statuses))
+        self.assertTrue(any("solve/controller=120.0 ms" in message for message in statuses))
+
+    def test_simulation_parameter_round_trips_live_step_profile_settings(self) -> None:
+        params = SimulationParameters(
+            live_step_profiling_enabled=True,
+            live_step_profile_threshold_ms=12.5,
+        )
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "simulation_parameters.json"
+            save_simulation_parameters(path, params, {"custom": "kept"})
+
+            loaded, extras = load_simulation_parameters(path)
+
+        self.assertTrue(loaded.live_step_profiling_enabled)
+        self.assertAlmostEqual(loaded.live_step_profile_threshold_ms, 12.5)
+        self.assertEqual(extras["custom"], "kept")
 
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(

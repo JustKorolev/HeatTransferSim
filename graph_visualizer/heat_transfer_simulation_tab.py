@@ -236,6 +236,21 @@ class HeatTransferSimulationTab:
             "Use CuPy for large sparse temperature stepping when available. Falls back to CPU if unavailable."
         )
         run_form.addRow(self.inputs["gpu_simulation_enabled"])
+        self.inputs["live_step_profiling_enabled"] = self._checkbox(
+            "Profile live steps", self.params.live_step_profiling_enabled, self._handle_parameter_change
+        )
+        self.inputs["live_step_profiling_enabled"].setToolTip(
+            "Print per-step timing breakdowns for slow live simulation updates."
+        )
+        run_form.addRow(self.inputs["live_step_profiling_enabled"])
+        self._add_double_parameter(
+            run_form,
+            "live_step_profile_threshold_ms",
+            "profile threshold ms",
+            0.0,
+            1.0e9,
+            50.0,
+        )
         self.input_mode = self.QtWidgets.QComboBox()
         self.input_mode.addItems(["zero", "heater_inputs"])
         self.input_mode.setCurrentText(self.params.input_mode)
@@ -739,8 +754,12 @@ class HeatTransferSimulationTab:
         if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
             return
+        profile: dict[str, float] | None = {} if self._live_step_profiling_enabled() else None
+        total_start = time.perf_counter() if profile is not None else 0.0
         previous_temperatures = np.asarray(self.prepared.temperatures_K, dtype=float).copy()
         steps_completed = 0
+        model_profile: dict[str, float] = {}
+        step_loop_start = time.perf_counter() if profile is not None else 0.0
         for _ in range(self._playback_steps_per_tick() if self.timer.isActive() else 1):
             if self.prepared.time_s >= self.params.t_final_s:
                 if self.params.loop_playback:
@@ -749,15 +768,25 @@ class HeatTransferSimulationTab:
                     self.pause()
                     break
             self.prepared.step_forward()
+            if profile is not None:
+                _accumulate_profile_ms(model_profile, getattr(self.prepared, "last_step_profile_ms", None))
             steps_completed += 1
         if steps_completed <= 0:
             return
+        if profile is not None:
+            profile["step_loop_ms"] = (time.perf_counter() - step_loop_start) * 1000.0
+            profile.update(model_profile)
         current_temperatures = np.asarray(self.prepared.temperatures_K, dtype=float)
         if current_temperatures.size and previous_temperatures.size == current_temperatures.size:
             max_delta_K = float(np.max(np.abs(current_temperatures - previous_temperatures)))
         else:
             max_delta_K = 0.0
-        self._after_state_change()
+        if profile is None:
+            self._after_state_change()
+        else:
+            self._after_state_change(profile)
+        if profile is not None:
+            profile["total_ms"] = (time.perf_counter() - total_start) * 1000.0
         if self.timer.isActive():
             status = (
                 f"Playing simulation: t = {self.prepared.time_s:.3g} s, "
@@ -766,6 +795,8 @@ class HeatTransferSimulationTab:
             if max_delta_K <= 1.0e-12:
                 status += " No temperature change is being produced by the current inputs/initial conditions."
             self._status(status)
+        if profile is not None:
+            self._report_live_step_profile(profile, steps_completed, max_delta_K)
 
     def _playback_target_step_interval_ms(self) -> float:
         return 100.0 / max(float(self.params.playback_speed), 1.0e-9)
@@ -837,6 +868,34 @@ class HeatTransferSimulationTab:
     def _fast_forward_budget_s(self) -> float:
         display_interval = max(10.0, float(getattr(self.params, "display_update_interval_ms", 100.0)))
         return max(0.01, min(0.25, display_interval / 1000.0))
+
+    def _live_step_profiling_enabled(self) -> bool:
+        return bool(getattr(self.params, "live_step_profiling_enabled", False))
+
+    def _live_step_profile_threshold_ms(self) -> float:
+        return max(0.0, float(getattr(self.params, "live_step_profile_threshold_ms", 200.0)))
+
+    def _report_live_step_profile(
+        self,
+        profile: dict[str, float],
+        steps_completed: int,
+        max_delta_K: float,
+    ) -> None:
+        total_ms = float(profile.get("total_ms", 0.0))
+        if total_ms < self._live_step_profile_threshold_ms():
+            return
+        fields = {
+            key: round(float(value), 3)
+            for key, value in profile.items()
+            if key.endswith("_ms")
+        }
+        fields.update(
+            steps=int(steps_completed),
+            nodes=0 if self.prepared is None else int(len(self.prepared.node_ids)),
+            max_delta_K=f"{float(max_delta_K):.6g}",
+        )
+        log_event("simulation live step profile", **fields)
+        self._status(_format_live_step_profile(profile, steps_completed, max_delta_K))
 
     def save_current_trajectory(self) -> None:
         if self.prepared is None or self.folder is None:
@@ -1283,16 +1342,26 @@ class HeatTransferSimulationTab:
         self._refresh_stats()
         self._refresh_sensor_readouts()
 
-    def _after_state_change(self) -> None:
+    def _after_state_change(self, profile: dict[str, float] | None = None) -> None:
         assert self.prepared is not None
+        start = time.perf_counter()
         self.temperature_by_node = {
             int(node_id): float(temp)
             for node_id, temp in zip(self.prepared.node_ids, self.prepared.temperatures_K)
         }
+        _record_profile_ms(profile, "temperature_map_ms", start)
+        start = time.perf_counter()
         self._update_colors()
+        _record_profile_ms(profile, "color_update_render_ms", start)
+        start = time.perf_counter()
         self._refresh_stats()
+        _record_profile_ms(profile, "stats_refresh_ms", start)
+        start = time.perf_counter()
         self._refresh_sensor_readouts()
+        _record_profile_ms(profile, "sensor_readouts_ms", start)
+        start = time.perf_counter()
         self._sync_time_slider_to_history()
+        _record_profile_ms(profile, "time_slider_ms", start)
 
     def _reset_time_slider(self) -> None:
         self.time_slider.blockSignals(True)
@@ -1366,6 +1435,8 @@ class HeatTransferSimulationTab:
             gpu_simulation_max_substeps=int(getattr(self.params, "gpu_simulation_max_substeps", 128)),
             gpu_simulation_safety_factor=float(getattr(self.params, "gpu_simulation_safety_factor", 0.2)),
             simulation_history_limit=int(self.inputs["simulation_history_limit"].value()),
+            live_step_profiling_enabled=bool(self.inputs["live_step_profiling_enabled"].isChecked()),
+            live_step_profile_threshold_ms=float(self.inputs["live_step_profile_threshold_ms"].value()),
             browser_simulation_size_warning=int(getattr(self.params, "browser_simulation_size_warning", 1000)),
             display_update_interval_ms=float(getattr(self.params, "display_update_interval_ms", 100.0)),
             mimo_controller_enabled=self._mimo_controller_should_run(),
@@ -1855,6 +1926,59 @@ def _changed_parameter_names(before: SimulationParameters, after: SimulationPara
         if before_value != after_value:
             changed.add(name)
     return changed
+
+
+def _record_profile_ms(profile: dict[str, float] | None, key: str, start: float) -> None:
+    if profile is None:
+        return
+    profile[key] = profile.get(key, 0.0) + (time.perf_counter() - start) * 1000.0
+
+
+def _accumulate_profile_ms(target: dict[str, float], source: Any) -> None:
+    if not isinstance(source, dict):
+        return
+    for key, value in source.items():
+        if not key.endswith("_ms"):
+            continue
+        try:
+            target[key] = target.get(key, 0.0) + float(value)
+        except (TypeError, ValueError):
+            continue
+
+
+def _format_live_step_profile(profile: dict[str, float], steps_completed: int, max_delta_K: float) -> str:
+    labels = {
+        "step_loop_ms": "step loop",
+        "model_solve_ms": "solve/controller",
+        "state_copy_ms": "state copy",
+        "history_append_ms": "history",
+        "temperature_map_ms": "temp map",
+        "color_update_render_ms": "colors/render",
+        "stats_refresh_ms": "stats",
+        "sensor_readouts_ms": "sensors",
+        "time_slider_ms": "slider",
+        "seek_ms": "seek",
+    }
+    total_ms = float(profile.get("total_ms", 0.0))
+    parts = [
+        f"{label}={float(profile[key]):.1f} ms"
+        for key, label in labels.items()
+        if key in profile
+    ]
+    contributors = [
+        (labels.get(key, key[:-3].replace("_", " ")), float(value))
+        for key, value in profile.items()
+        if key.endswith("_ms") and key != "total_ms"
+    ]
+    contributors.sort(key=lambda item: item[1], reverse=True)
+    bottleneck = contributors[0][0] if contributors else "unknown"
+    detail = ", ".join(parts)
+    if detail:
+        detail = " " + detail
+    return (
+        f"Live step profile: total={total_ms:.1f} ms, steps={int(steps_completed)}, "
+        f"max dT={float(max_delta_K):.3e} K, largest={bottleneck}.{detail}"
+    )
 
 
 def _node_uses_mimo_controller(

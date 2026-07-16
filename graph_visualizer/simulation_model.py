@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import csv
+import time
 from typing import Any
 
 import numpy as np
@@ -124,6 +125,7 @@ class PreparedSimulation:
     controller_dynamic_gain_cache: dict[str, Any] = field(default_factory=dict)
     history: list[SimulationState] = field(default_factory=list)
     history_index: int = 0
+    last_step_profile_ms: dict[str, float] = field(default_factory=dict, init=False)
 
     @property
     def time_s(self) -> float:
@@ -268,8 +270,16 @@ class PreparedSimulation:
         self._sync_gpu_state()
 
     def step_forward(self) -> SimulationState:
+        profile: dict[str, float] = {}
+        total_start = time.perf_counter()
         if self.history_index < len(self.history) - 1:
-            return self.seek(self.history_index + 1)
+            seek_start = time.perf_counter()
+            state = self.seek(self.history_index + 1)
+            profile["seek_ms"] = (time.perf_counter() - seek_start) * 1000.0
+            profile["total_ms"] = (time.perf_counter() - total_start) * 1000.0
+            self.last_step_profile_ms = profile
+            return state
+        solve_start = time.perf_counter()
         if self.dynamic_heater_inputs:
             self._step_dynamic_heater_inputs()
         elif self.Phi_aug is None:
@@ -281,6 +291,8 @@ class PreparedSimulation:
                 self.z[-1] = 1.0
         else:
             self.z = self.Phi_aug @ self.z
+        profile["model_solve_ms"] = (time.perf_counter() - solve_start) * 1000.0
+        state_start = time.perf_counter()
         state = SimulationState(
             self.time_s + float(self.params.dt_s),
             self.temperatures_K.copy(),
@@ -293,7 +305,12 @@ class PreparedSimulation:
             dict(self.controller_last_power_by_heater),
             self.controller_mode,
         )
+        profile["state_copy_ms"] = (time.perf_counter() - state_start) * 1000.0
+        history_start = time.perf_counter()
         self._append_history_state(state)
+        profile["history_append_ms"] = (time.perf_counter() - history_start) * 1000.0
+        profile["total_ms"] = (time.perf_counter() - total_start) * 1000.0
+        self.last_step_profile_ms = profile
         return state
 
     def _append_history_state(self, state: SimulationState) -> None:
