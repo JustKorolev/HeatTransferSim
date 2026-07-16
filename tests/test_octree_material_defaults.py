@@ -16,6 +16,7 @@ import octree_graph.matrix_builder as octree_matrix_builder
 from octree_graph.cli import (
     build_parser,
     _build_graph_with_optional_fallback,
+    _filter_ignored_components,
     _log_scene_memory_risk,
     _raise_if_empty_graph,
     _resolve_material_lookup_path,
@@ -701,6 +702,74 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         )
 
         self.assertEqual(args.dense_matrix_node_limit, 0)
+
+    def test_cli_accepts_ignored_component_substrings(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--mesh-dir",
+                "meshes",
+                "--graph-name",
+                "graph",
+                "--ignore-component-substring",
+                "fastener",
+                "--ignored-component-substring",
+                "shim",
+            ]
+        )
+
+        self.assertEqual(args.ignore_component_substring, ["fastener", "shim"])
+
+    def test_ignored_component_substring_filters_scene_before_role_detection(self) -> None:
+        body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        ignored_heater = _mesh_object("debug_SAFE-HEATER_fixture", "Copper", [5.0, -2.0, -2.0], [6.0, 2.0, 2.0])
+        sensor = _mesh_object("temperature_probe_A", "Copper", [-6.0, -1.0, -1.0], [-5.0, 1.0, 1.0])
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[body, ignored_heater, sensor],
+            bounds_mm=(np.array([-6.0, -5.0, -5.0]), np.array([6.0, 5.0, 5.0])),
+            warnings=[],
+        )
+        args = SimpleNamespace(ignore_component_substring=["safe-heater"])
+        warnings: list[str] = []
+
+        filtered = _filter_ignored_components(scene, args, warnings)
+
+        self.assertEqual([obj.name for obj in filtered.objects], ["body_panel", "temperature_probe_A"])
+        self.assertEqual(args.ignored_component_names, ["debug_SAFE-HEATER_fixture"])
+        self.assertIn("Ignored 1 CAD mesh object", warnings[0])
+
+        split_args = SimpleNamespace(
+            no_detect_role_nodes=False,
+            heater_name_pattern=[],
+            heater_name_substring=["safe-heater"],
+            sensor_name_pattern=[],
+            sensor_name_substring=["temperature-probe"],
+            device_exclude_name_pattern=[],
+            no_default_device_excludes=False,
+            role_node_group_gap_mm=10.0,
+        )
+        voxel_scene, role_components = _split_role_components(filtered, split_args, warnings=[])
+
+        self.assertEqual([obj.name for obj in voxel_scene.objects], ["body_panel"])
+        self.assertEqual([component.kind for component in role_components], ["sensor"])
+
+    def test_ignored_component_substring_matches_parent_hierarchy(self) -> None:
+        body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        leaf = _mesh_object("leaf_mesh_node", "Copper", [10.0, 0.0, 0.0], [11.0, 1.0, 1.0])
+        leaf.hierarchy_path = ("Default", "IGNORE_THIS_ASSEMBLY", "leaf_mesh_node")
+        leaf.scene_path = "Default/IGNORE_THIS_ASSEMBLY/leaf_mesh_node"
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[body, leaf],
+            bounds_mm=(np.array([-5.0, -5.0, -5.0]), np.array([11.0, 5.0, 5.0])),
+            warnings=[],
+        )
+        args = SimpleNamespace(ignore_component_substring=["ignore-this-assembly"])
+
+        filtered = _filter_ignored_components(scene, args, warnings=[])
+
+        self.assertEqual([obj.name for obj in filtered.objects], ["body_panel"])
+        self.assertEqual(args.ignored_component_names, ["leaf_mesh_node"])
 
     def test_cli_role_substrings_are_normalized_like_cad_names(self) -> None:
         body = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])

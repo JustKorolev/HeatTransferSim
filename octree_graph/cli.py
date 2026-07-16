@@ -58,6 +58,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         progress.phase("Loading glTF scene")
         gltf_path = _resolve_gltf_path(args)
         scene = load_gltf_scene(gltf_path)
+        scene = _filter_ignored_components(scene, args, warnings)
         _log_scene_memory_risk(scene, args, run_log, warnings)
         progress.phase("Loading materials")
         material_lookup_path = _resolve_material_lookup_path(args.mesh_dir)
@@ -170,6 +171,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-cell-size-mm", type=float, default=5.0)
     parser.add_argument("--max-cell-size-mm", type=float, default=50.0)
     parser.add_argument("--max-depth", type=int, default=8)
+    parser.add_argument(
+        "--ignore-component-substring",
+        "--ignored-component-substring",
+        dest="ignore_component_substring",
+        action="append",
+        default=None,
+        help=(
+            "Case-insensitive CAD component name/path substring to remove before role detection, "
+            "voxelization, and graph building. Repeat to ignore multiple component substrings."
+        ),
+    )
     parser.add_argument("--dominant-fraction-accept", type=float, default=0.95)
     parser.add_argument("--minority-fraction-ignore", type=float, default=0.02)
     parser.add_argument("--material-contrast-refine-threshold", type=float, default=5.0)
@@ -556,6 +568,61 @@ def _scene_with_objects(scene: GltfScene, objects: list) -> GltfScene:
         bounds_mm=bounds if bounds is not None else scene.bounds_mm,
         warnings=list(scene.warnings),
     )
+
+
+def _filter_ignored_components(
+    scene: GltfScene,
+    args: argparse.Namespace,
+    warnings: list[str],
+) -> GltfScene:
+    substrings = [
+        _normalize_component_ignore_text(str(value))
+        for value in (getattr(args, "ignore_component_substring", None) or [])
+        if str(value).strip()
+    ]
+    if not substrings:
+        setattr(args, "ignored_component_names", [])
+        return scene
+    kept = []
+    ignored = []
+    for obj in scene.objects:
+        search_text = _ignored_component_search_text(obj)
+        if any(substring in search_text for substring in substrings):
+            ignored.append(obj)
+        else:
+            kept.append(obj)
+    setattr(args, "ignored_component_names", [str(obj.name) for obj in ignored])
+    if not ignored:
+        warnings.append(
+            "No CAD components matched --ignore-component-substring; "
+            f"configured substring(s): {', '.join(getattr(args, 'ignore_component_substring', []) or [])}."
+        )
+        return scene
+    examples = ", ".join(str(obj.name) for obj in ignored[:8])
+    extra = "" if len(ignored) <= 8 else f", ... and {len(ignored) - 8} more"
+    warnings.append(
+        f"Ignored {len(ignored)} CAD mesh object(s) before role detection and voxelization "
+        f"using --ignore-component-substring: {examples}{extra}."
+    )
+    if not kept:
+        raise ValueError(
+            "All CAD mesh objects were removed by --ignore-component-substring; "
+            "relax the ignored component substring(s)."
+        )
+    return _scene_with_objects(scene, kept)
+
+
+def _ignored_component_search_text(obj: Any) -> str:
+    parts: list[str] = [str(getattr(obj, "name", ""))]
+    scene_path = str(getattr(obj, "scene_path", "") or "")
+    if scene_path:
+        parts.append(scene_path)
+    parts.extend(str(part) for part in (getattr(obj, "hierarchy_path", ()) or ()))
+    return _normalize_component_ignore_text(" ".join(part for part in parts if part))
+
+
+def _normalize_component_ignore_text(value: str) -> str:
+    return str(value).replace("\\", "/").replace("-", "_").replace(" ", "_").lower()
 
 
 def _substring_patterns(values: list[str]) -> list[str]:
