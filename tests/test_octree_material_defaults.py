@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+import json
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from scipy.sparse import issparse
 
 import octree_graph.validation as octree_validation
 import octree_graph.matrix_builder as octree_matrix_builder
+from octree_graph.connectivity_cli import main as connectivity_main
 from octree_graph.cli import (
     BuildCheckpointer,
     _annotate_graph_warning_tags,
@@ -385,6 +387,31 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertIn("disconnected_component", nodes[2]["tags"]["warning_tags"])
         self.assertIn("isolated_node", nodes[2]["tags"]["warning_tags"])
         self.assertEqual(quality["node_warning_tag_counts"]["disconnected_component"], 1)
+
+    def test_standalone_connectivity_cli_updates_existing_graph_folder(self) -> None:
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            graph = {
+                "parameters": {"max_cell_size_mm": 10.0},
+                "graph_nodes": [
+                    {"node_id": 1, "center_mm": [0.0, 0.0, 0.0], "size_mm": [1.0, 1.0, 1.0], "component_name": "main", "material_name": "Copper"},
+                    {"node_id": 2, "center_mm": [1.0, 0.0, 0.0], "size_mm": [1.0, 1.0, 1.0], "component_name": "main", "material_name": "Copper"},
+                    {"node_id": 3, "center_mm": [100.0, 0.0, 0.0], "size_mm": [1.0, 1.0, 1.0], "component_name": "island", "material_name": "Copper"},
+                ],
+                "graph_edges": [{"node_i": 1, "node_j": 2}],
+                "warnings": [],
+                "validation_results": {"errors": [], "warnings": []},
+            }
+            (folder / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+            connectivity_main(["--graph-folder", str(folder)])
+
+            analysis = json.loads((folder / "connectivity_analysis.json").read_text(encoding="utf-8"))
+            updated = json.loads((folder / "graph.json").read_text(encoding="utf-8"))
+            self.assertFalse(analysis["connected"])
+            self.assertEqual(analysis["disconnected_node_ids"], [3])
+            self.assertIn("disconnected_component", updated["graph_nodes"][2]["tags"]["warning_tags"])
+            self.assertTrue((folder / "build_quality.json").is_file())
 
     def test_build_checkpointer_writes_phase_and_completed_graph_files(self) -> None:
         with TemporaryDirectory() as directory:
