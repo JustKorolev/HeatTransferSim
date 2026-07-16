@@ -1872,6 +1872,116 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(color_updates, [True])
         self.assertEqual(tab.prepared.params.color_min_K, 10.0)
 
+    def test_playback_speed_change_does_not_stop_active_simulation_worker(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Spin:
+            def __init__(self, value: float) -> None:
+                self._value = value
+
+            def value(self) -> float:
+                return self._value
+
+        class Timer:
+            def __init__(self, active: bool = True) -> None:
+                self.active = active
+                self.started_with: int | None = None
+
+            def isActive(self) -> bool:
+                return self.active
+
+            def start(self, interval: int) -> None:
+                self.started_with = int(interval)
+
+            def stop(self) -> None:
+                self.active = False
+
+        class Future:
+            def done(self) -> bool:
+                return False
+
+            def cancel(self) -> bool:
+                raise AssertionError("worker cancelled")
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.params = None
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.sys_id_state = None
+        tab.params = SimulationParameters(playback_speed=1.0)
+        tab.inputs = {"playback_speed": Spin(20.0)}
+        tab.prepared = Prepared()
+        tab.timer = Timer(active=True)
+        tab.simulation_future = Future()
+        tab.simulation_cancel_event = None
+        tab._read_params = lambda: (_ for _ in ()).throw(AssertionError("read all params"))
+        tab._save_params_to_folder = lambda: (_ for _ in ()).throw(AssertionError("saved immediately"))
+        tab._refresh_stats = lambda: (_ for _ in ()).throw(AssertionError("refreshed stats"))
+        tab._refresh_sensor_readouts = lambda: (_ for _ in ()).throw(AssertionError("refreshed readouts"))
+        tab._status = lambda message, error=False: (_ for _ in ()).throw(AssertionError(message))
+        saves = []
+        tab._schedule_parameter_save = lambda: saves.append(True)
+
+        tab._handle_parameter_change("playback_speed")
+
+        self.assertTrue(tab.timer.isActive())
+        self.assertEqual(tab.timer.started_with, 10)
+        self.assertAlmostEqual(tab.params.playback_speed, 20.0)
+        self.assertIs(tab.prepared.params, tab.params)
+        self.assertEqual(saves, [True])
+
+    def test_display_parameter_change_does_not_stop_active_simulation_worker(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Spin:
+            def __init__(self, value: float) -> None:
+                self._value = value
+
+            def value(self) -> float:
+                return self._value
+
+        class Future:
+            def done(self) -> bool:
+                return False
+
+            def cancel(self) -> bool:
+                raise AssertionError("worker cancelled")
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.params = None
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.sys_id_state = None
+        tab.params = SimulationParameters(color_min_K=0.0)
+        tab.inputs = {"color_min_K": Spin(12.0)}
+        tab.prepared = Prepared()
+        tab.simulation_future = Future()
+        tab.simulation_cancel_event = None
+        tab._read_params = lambda: (_ for _ in ()).throw(AssertionError("read all params"))
+        tab._save_params_to_folder = lambda: (_ for _ in ()).throw(AssertionError("saved immediately"))
+        tab._refresh_stats = lambda: (_ for _ in ()).throw(AssertionError("refreshed stats"))
+        tab._refresh_sensor_readouts = lambda: (_ for _ in ()).throw(AssertionError("refreshed readouts"))
+        tab._status = lambda message, error=False: (_ for _ in ()).throw(AssertionError(message))
+        color_updates = []
+        saves = []
+        tab._update_colors = lambda: color_updates.append(True)
+        tab._schedule_parameter_save = lambda: saves.append(True)
+
+        tab._handle_parameter_change("color_min_K")
+
+        self.assertAlmostEqual(tab.params.color_min_K, 12.0)
+        self.assertIs(tab.prepared.params, tab.params)
+        self.assertEqual(color_updates, [True])
+        self.assertEqual(saves, [True])
+
     def test_simulation_playback_batches_physics_steps_per_visual_update(self) -> None:
         try:
             from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab

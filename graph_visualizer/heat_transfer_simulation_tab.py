@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 import threading
@@ -68,6 +69,11 @@ _CONTROLLER_PARAMETER_FIELDS = {
     "mimo_integral_abs_max",
     "mimo_freeze_integral_when_saturated",
 }
+_LIGHTWEIGHT_RUNTIME_PARAMETER_FIELDS = {
+    "playback_speed",
+    "loop_playback",
+}
+_NONBLOCKING_PARAMETER_FIELDS = _LIGHTWEIGHT_RUNTIME_PARAMETER_FIELDS | _DISPLAY_PARAMETER_FIELDS
 
 
 class HeatTransferSimulationTab:
@@ -118,6 +124,9 @@ class HeatTransferSimulationTab:
         self.simulation_future: Future[dict[str, Any]] | None = None
         self.simulation_cancel_event: threading.Event | None = None
         self._simulation_worker_mode: str | None = None
+        self.parameter_save_timer = self.QtCore.QTimer(self.widget)
+        self.parameter_save_timer.setSingleShot(True)
+        self.parameter_save_timer.timeout.connect(self._flush_deferred_parameter_save)
         self.sys_id_timer = self.QtCore.QTimer(self.widget)
         self.sys_id_timer.timeout.connect(self._step_sys_id)
         self.sys_id_state: dict[str, Any] | None = None
@@ -233,20 +242,22 @@ class HeatTransferSimulationTab:
             self._add_double_parameter(run_form, name, label, minimum, maximum, step)
         self._add_int_parameter(run_form, "simulation_history_limit", "history limit", 0, 1_000_000, 1)
         self.inputs["loop_playback"] = self._checkbox(
-            "Loop playback", self.params.loop_playback, self._handle_parameter_change
+            "Loop playback", self.params.loop_playback, lambda *_: self._handle_parameter_change("loop_playback")
         )
         run_form.addRow(self.inputs["loop_playback"])
         self.input_mode = self.QtWidgets.QComboBox()
         self.input_mode.addItems(["zero", "heater_inputs"])
         self.input_mode.setCurrentText(self.params.input_mode)
-        self.input_mode.currentTextChanged.connect(self._handle_parameter_change)
+        self.input_mode.currentTextChanged.connect(lambda *_: self._handle_parameter_change("input_mode"))
         run_form.addRow("input mode", self.input_mode)
         form.addRow(run_box)
 
         environment_box, environment_form = self._section("Environment")
         self._add_double_parameter(environment_form, "T_env_K", "ambient T K", 0.0, 1.0e6, 1.0)
         self.inputs["use_ambient_radiation"] = self._checkbox(
-            "Use ambient radiation", self.params.use_ambient_radiation, self._handle_parameter_change
+            "Use ambient radiation",
+            self.params.use_ambient_radiation,
+            lambda *_: self._handle_parameter_change("use_ambient_radiation"),
         )
         environment_form.addRow(self.inputs["use_ambient_radiation"])
         form.addRow(environment_box)
@@ -281,14 +292,16 @@ class HeatTransferSimulationTab:
         self.inputs["mimo_freeze_integral_when_saturated"] = self._checkbox(
             "Freeze integral when saturated",
             self.params.mimo_freeze_integral_when_saturated,
-            self._handle_parameter_change,
+            lambda *_: self._handle_parameter_change("mimo_freeze_integral_when_saturated"),
         )
         mimo_form.addRow(self.inputs["mimo_freeze_integral_when_saturated"])
         form.addRow(mimo_box)
 
         display_box, display_form = self._section("Display")
         self.inputs["autoscale_temperature"] = self._checkbox(
-            "Autoscale temperature", self.params.autoscale_temperature, self._handle_parameter_change
+            "Autoscale temperature",
+            self.params.autoscale_temperature,
+            lambda *_: self._handle_parameter_change("autoscale_temperature"),
         )
         display_form.addRow(self.inputs["autoscale_temperature"])
         self._add_double_parameter(display_form, "color_min_K", "color min K", 0.0, 1.0e6, 1.0)
@@ -734,6 +747,10 @@ class HeatTransferSimulationTab:
     def shutdown(self) -> None:
         self.timer.stop()
         self.fast_forward_timer.stop()
+        parameter_save_timer = getattr(self, "parameter_save_timer", None)
+        if parameter_save_timer is not None:
+            parameter_save_timer.stop()
+            self._flush_deferred_parameter_save()
         self._cancel_simulation_worker()
         executor = getattr(self, "simulation_executor", None)
         if executor is not None:
@@ -1519,17 +1536,31 @@ class HeatTransferSimulationTab:
         self.prepared.seek(value)
         self._after_state_change()
 
-    def _handle_parameter_change(self, *_: Any) -> None:
-        if self._simulation_worker_active():
-            self.pause()
-            self._status("Simulation worker is stopping; parameter changes will apply after the current compute step finishes.")
-            return
+    def _handle_parameter_change(self, changed_field: str | None = None, *_: Any) -> None:
         if self.sys_id_state is not None:
             self.cancel_sys_id("Simulation parameter changed while sys ID was running; run cancelled.")
             return
         previous_params = self.params
-        self.params = self._read_params()
+        if isinstance(changed_field, str) and changed_field:
+            self.params = self._params_with_widget_value(changed_field)
+        else:
+            self.params = self._read_params()
         changed = _changed_parameter_names(previous_params, self.params)
+        if not changed:
+            return
+        if self._simulation_worker_active() and not changed <= _NONBLOCKING_PARAMETER_FIELDS:
+            self.params = previous_params
+            self.pause()
+            self._status(
+                "Simulation worker is stopping; parameter changes will apply after the current compute step finishes."
+            )
+            return
+        if changed <= _LIGHTWEIGHT_RUNTIME_PARAMETER_FIELDS:
+            self._apply_lightweight_runtime_parameter_change(changed)
+            return
+        if changed <= _DISPLAY_PARAMETER_FIELDS:
+            self._apply_display_parameter_change()
+            return
         self._save_params_to_folder()
         if self.prepared is not None:
             self.prepared.params = self.params
@@ -1548,6 +1579,48 @@ class HeatTransferSimulationTab:
                     self.timer.start(self._playback_timer_interval_ms())
                 self._refresh_stats()
                 self._refresh_sensor_readouts()
+
+    def _apply_lightweight_runtime_parameter_change(self, changed: set[str]) -> None:
+        if self.prepared is not None:
+            self.prepared.params = self.params
+        if "playback_speed" in changed and self.timer.isActive():
+            self.timer.start(self._playback_timer_interval_ms())
+        self._schedule_parameter_save()
+
+    def _apply_display_parameter_change(self) -> None:
+        if self.prepared is not None:
+            self.prepared.params = self.params
+        self._update_colors()
+        self._schedule_parameter_save()
+
+    def _params_with_widget_value(self, name: str) -> SimulationParameters:
+        if name == "input_mode":
+            return replace(self.params, input_mode=self.input_mode.currentText())
+        widget = self.inputs.get(name)
+        if widget is None or not hasattr(self.params, name):
+            return self._read_params()
+        if hasattr(widget, "isChecked"):
+            value = bool(widget.isChecked())
+        elif hasattr(widget, "value"):
+            value = widget.value()
+            current = getattr(self.params, name)
+            if isinstance(current, int) and not isinstance(current, bool):
+                value = int(value)
+            else:
+                value = float(value)
+        else:
+            return self._read_params()
+        return replace(self.params, **{name: value})
+
+    def _schedule_parameter_save(self) -> None:
+        timer = getattr(self, "parameter_save_timer", None)
+        if timer is not None:
+            timer.start(500)
+            return
+        self._save_params_to_folder()
+
+    def _flush_deferred_parameter_save(self) -> None:
+        self._save_params_to_folder()
 
     def _read_params(self) -> SimulationParameters:
         return SimulationParameters(
@@ -2008,7 +2081,7 @@ class HeatTransferSimulationTab:
         step: float,
     ) -> None:
         widget = self._double_spin(minimum, maximum, getattr(self.params, name), step)
-        widget.valueChanged.connect(self._handle_parameter_change)
+        widget.valueChanged.connect(lambda *_args, field=name: self._handle_parameter_change(field))
         self.inputs[name] = widget
         form.addRow(label, widget)
 
@@ -2022,7 +2095,7 @@ class HeatTransferSimulationTab:
         step: int,
     ) -> None:
         widget = self._int_spin(minimum, maximum, int(getattr(self.params, name)), step)
-        widget.valueChanged.connect(self._handle_parameter_change)
+        widget.valueChanged.connect(lambda *_args, field=name: self._handle_parameter_change(field))
         self.inputs[name] = widget
         form.addRow(label, widget)
 
