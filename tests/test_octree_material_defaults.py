@@ -49,6 +49,7 @@ from octree_graph.octree import (
     CellClassification,
     OctreeDiagnostics,
     OctreeParams,
+    _adjacent_balance_refinement_targets,
     _mesh_contains_point,
     _mesh_triangles,
     _needs_gap_preservation_refinement,
@@ -2033,6 +2034,57 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertTrue(solid)
         self.assertLessEqual(max(max(leaf.size_mm) for leaf in solid), 2.0)
         self.assertEqual(warnings, [])
+
+    def test_adjacent_balance_targets_coarse_leaf_next_to_fine_leaf(self) -> None:
+        fine = OctreeCell(
+            cell_id="fine",
+            parent_id=None,
+            children_ids=[],
+            level=3,
+            center_mm=(0.0, 0.0, 0.0),
+            size_mm=(1.0, 1.0, 1.0),
+            occupancy={"fine_part": 1.0},
+            material_fractions={"Copper": 1.0},
+            dominant_component="fine_part",
+            dominant_material="Copper",
+            confidence="high",
+        )
+        coarse = OctreeCell(
+            cell_id="coarse",
+            parent_id=None,
+            children_ids=[],
+            level=1,
+            center_mm=(2.5, 0.0, 0.0),
+            size_mm=(4.0, 4.0, 4.0),
+            occupancy={"coarse_part": 1.0},
+            material_fractions={"Copper": 1.0},
+            dominant_component="coarse_part",
+            dominant_material="Copper",
+            confidence="high",
+        )
+        far = OctreeCell(
+            cell_id="far",
+            parent_id=None,
+            children_ids=[],
+            level=1,
+            center_mm=(20.0, 0.0, 0.0),
+            size_mm=(8.0, 8.0, 8.0),
+            occupancy={"far_part": 1.0},
+            material_fractions={"Copper": 1.0},
+            dominant_component="far_part",
+            dominant_material="Copper",
+            confidence="high",
+        )
+        params = OctreeParams(
+            max_cell_size_mm=2.0,
+            min_cell_size_mm=0.5,
+            max_depth=5,
+            max_adjacent_leaf_size_ratio=2.0,
+        )
+
+        targets = _adjacent_balance_refinement_targets([fine, coarse, far], params)
+
+        self.assertEqual(targets, {"coarse"})
 
     def test_crowded_component_refinement_subdivides_dense_empty_regions(self) -> None:
         materials = self.make_materials()

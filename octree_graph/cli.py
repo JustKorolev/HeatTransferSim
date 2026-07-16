@@ -105,6 +105,9 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         role_refine_distance_mm=args.role_refine_distance_mm,
         role_refine_max_depth=args.role_refine_max_depth,
         contains_backend=args.contains_backend,
+        balance_adjacent_leaf_sizes=args.balance_adjacent_leaf_sizes,
+        max_adjacent_leaf_size_ratio=args.max_adjacent_leaf_size_ratio,
+        balance_refine_passes=args.balance_refine_passes,
     )
     leaves, graph_result, diagnostics = _build_graph_with_optional_fallback(
         scene,
@@ -276,6 +279,30 @@ def build_parser() -> argparse.ArgumentParser:
             "Refine cells whose local triangle candidate count reaches this threshold. "
             "Use 0 to disable triangle-density refinement."
         ),
+    )
+    parser.add_argument(
+        "--balance-adjacent-leaf-sizes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After adaptive voxelization, spend remaining leaf budget splitting coarse occupied leaves "
+            "that directly touch much finer occupied leaves."
+        ),
+    )
+    parser.add_argument(
+        "--max-adjacent-leaf-size-ratio",
+        type=float,
+        default=4.0,
+        help=(
+            "Adjacent occupied leaves with a max-size ratio above this value trigger balancing refinement "
+            "of the coarser leaf when budget allows."
+        ),
+    )
+    parser.add_argument(
+        "--balance-refine-passes",
+        type=int,
+        default=2,
+        help="Maximum post-octree adjacent-size balancing passes.",
     )
     parser.add_argument(
         "--role-refine-distance-mm",

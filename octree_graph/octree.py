@@ -61,6 +61,9 @@ class OctreeParams:
     role_refine_distance_mm: float = 0.0
     role_refine_max_depth: int | None = None
     contains_backend: str = "ray"
+    balance_adjacent_leaf_sizes: bool = True
+    max_adjacent_leaf_size_ratio: float = 4.0
+    balance_refine_passes: int = 2
 
 
 @dataclass
@@ -618,6 +621,18 @@ def build_octree(
                     None,
                 )
                 handle_classified_cell(work_item, classification, remaining_batch_items=0)
+    leaves = _balance_adjacent_leaf_sizes(
+        leaves,
+        scene,
+        triangle_indices,
+        contact_report,
+        materials,
+        params,
+        warnings,
+        diagnostics,
+        next_counter=counter,
+    )
+    _mark_final_oversized_leaves(leaves, params, warnings)
     if progress_callback is not None and diagnostics is not None:
         progress_callback(
             {
@@ -633,6 +648,199 @@ def build_octree(
             }
         )
     return leaves
+
+
+def _balance_adjacent_leaf_sizes(
+    leaves: list[OctreeCell],
+    scene: GltfScene,
+    triangle_indices: dict[int, "TriangleSpatialIndex"],
+    contact_report: ContactReport,
+    materials: dict[str, Material],
+    params: OctreeParams,
+    warnings: list[str],
+    diagnostics: OctreeDiagnostics | None,
+    *,
+    next_counter: int,
+) -> list[OctreeCell]:
+    if not bool(getattr(params, "balance_adjacent_leaf_sizes", True)):
+        return leaves
+    max_passes = max(0, int(getattr(params, "balance_refine_passes", 0)))
+    if max_passes <= 0:
+        return leaves
+    counter = int(next_counter)
+    current = list(leaves)
+    for _pass_index in range(max_passes):
+        if params.max_leaf_cells is not None and len(current) + 7 > int(params.max_leaf_cells):
+            break
+        targets = _adjacent_balance_refinement_targets(current, params)
+        if not targets:
+            break
+        refined_any = False
+        projected_leaf_count = len(current)
+        updated: list[OctreeCell] = []
+        for leaf in current:
+            if leaf.cell_id not in targets:
+                updated.append(leaf)
+                continue
+            if params.max_leaf_cells is not None and projected_leaf_count + 7 > int(params.max_leaf_cells):
+                updated.append(leaf)
+                continue
+            if leaf.is_empty or int(leaf.level) >= int(params.max_depth) or max(leaf.size_mm) <= float(params.min_cell_size_mm):
+                updated.append(leaf)
+                continue
+            center_mm = np.asarray(leaf.center_mm, dtype=float)
+            size_mm = np.asarray(leaf.size_mm, dtype=float)
+            child_size = size_mm * 0.5
+            quarter = size_mm * 0.25
+            child_leaves: list[OctreeCell] = []
+            for signs in product((-1.0, 1.0), repeat=3):
+                child_id = f"cell_{counter}"
+                counter += 1
+                child_center = center_mm + quarter * np.asarray(signs, dtype=float)
+                classification = _classify_cell(
+                    scene.objects,
+                    triangle_indices,
+                    child_center,
+                    child_size,
+                    contact_report,
+                    params,
+                    set(materials),
+                    None,
+                )
+                if diagnostics is not None:
+                    diagnostics.cells_tested += 1
+                    diagnostics.max_depth_reached = max(diagnostics.max_depth_reached, int(leaf.level) + 1)
+                    diagnostics.triangle_candidate_tests += int(classification.triangle_candidate_tests)
+                    diagnostics.triangle_intersection_tests += int(classification.triangle_intersection_tests)
+                    _record_leaf_diagnostics(
+                        diagnostics,
+                        child_id,
+                        child_size,
+                        int(leaf.level) + 1,
+                        classification,
+                    )
+                child_leaves.append(
+                    OctreeCell(
+                        cell_id=child_id,
+                        parent_id=leaf.cell_id,
+                        children_ids=[],
+                        level=int(leaf.level) + 1,
+                        center_mm=tuple(float(v) for v in child_center),
+                        size_mm=tuple(float(v) for v in child_size),
+                        occupancy=classification.occupancy,
+                        material_fractions=classification.material_fractions,
+                        dominant_component=classification.dominant_component,
+                        dominant_material=classification.dominant_material,
+                        confidence=_classification_confidence(classification, params),
+                        warnings=list(classification.warnings),
+                    )
+                )
+            if diagnostics is not None:
+                diagnostics.cells_subdivided += 1
+                diagnostics.cells_refined_by_reason["adjacent_size_balance"] = (
+                    diagnostics.cells_refined_by_reason.get("adjacent_size_balance", 0) + 1
+                )
+            updated.extend(child_leaves)
+            projected_leaf_count += 7
+            refined_any = True
+        current = updated
+        if not refined_any:
+            break
+    return current
+
+
+def _adjacent_balance_refinement_targets(leaves: list[OctreeCell], params: OctreeParams) -> set[str]:
+    solid = [leaf for leaf in leaves if not leaf.is_empty]
+    if len(solid) < 2:
+        return set()
+    ratio_threshold = max(1.0, float(getattr(params, "max_adjacent_leaf_size_ratio", 4.0)))
+    bucket_size = max(float(params.max_cell_size_mm), float(params.min_cell_size_mm), 1.0e-6)
+    buckets: dict[tuple[int, int, int], list[OctreeCell]] = {}
+    for leaf in solid:
+        for key in _leaf_bucket_keys(leaf, bucket_size, padding_mm=1.0e-6):
+            buckets.setdefault(key, []).append(leaf)
+    targets: set[str] = set()
+    seen: set[tuple[str, str]] = set()
+    for leaf in solid:
+        for key in _leaf_bucket_keys(leaf, bucket_size, padding_mm=1.0e-6):
+            for other in buckets.get(key, []):
+                if other.cell_id == leaf.cell_id:
+                    continue
+                pair_key = tuple(sorted((leaf.cell_id, other.cell_id)))
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+                if not _leaves_touch_or_overlap(leaf, other, tolerance_mm=1.0e-6):
+                    continue
+                leaf_size = float(max(leaf.size_mm))
+                other_size = float(max(other.size_mm))
+                smaller = max(min(leaf_size, other_size), 1.0e-9)
+                larger = max(leaf_size, other_size)
+                if larger / smaller <= ratio_threshold:
+                    continue
+                coarse = leaf if leaf_size >= other_size else other
+                if (
+                    int(coarse.level) < int(params.max_depth)
+                    and float(max(coarse.size_mm)) > float(params.min_cell_size_mm)
+                ):
+                    targets.add(coarse.cell_id)
+    return targets
+
+
+def _leaf_bucket_keys(leaf: OctreeCell, bucket_size_mm: float, padding_mm: float = 0.0):
+    mins, maxs = _leaf_bounds_mm(leaf)
+    mins = mins - float(padding_mm)
+    maxs = maxs + float(padding_mm)
+    low = np.floor(mins / bucket_size_mm).astype(int)
+    high = np.floor(maxs / bucket_size_mm).astype(int)
+    for ix in range(int(low[0]), int(high[0]) + 1):
+        for iy in range(int(low[1]), int(high[1]) + 1):
+            for iz in range(int(low[2]), int(high[2]) + 1):
+                yield (ix, iy, iz)
+
+
+def _leaf_bounds_mm(leaf: OctreeCell) -> tuple[np.ndarray, np.ndarray]:
+    center = np.asarray(leaf.center_mm, dtype=float)
+    half = np.asarray(leaf.size_mm, dtype=float) * 0.5
+    return center - half, center + half
+
+
+def _leaves_touch_or_overlap(a: OctreeCell, b: OctreeCell, tolerance_mm: float = 0.0) -> bool:
+    a_min, a_max = _leaf_bounds_mm(a)
+    b_min, b_max = _leaf_bounds_mm(b)
+    return bool(
+        np.all(a_min <= b_max + float(tolerance_mm))
+        and np.all(b_min <= a_max + float(tolerance_mm))
+    )
+
+
+def _mark_final_oversized_leaves(
+    leaves: list[OctreeCell],
+    params: OctreeParams,
+    warnings: list[str],
+) -> None:
+    oversized = [
+        leaf
+        for leaf in leaves
+        if not leaf.is_empty and float(max(leaf.size_mm)) > float(params.max_cell_size_mm)
+    ]
+    if not oversized:
+        return
+    summary = (
+        "Some occupied cells exceed max_cell_size_mm because refinement limits were reached. "
+        "Inspect cell warnings or increase --max-leaf-cells/--max-depth, decrease "
+        "--min-cell-size-mm, or increase --max-cell-size-mm."
+    )
+    if summary not in warnings:
+        warnings.append(summary)
+    for leaf in oversized:
+        leaf.confidence = "low"
+        warning = (
+            "Accepted occupied cell above max_cell_size_mm because refinement was blocked "
+            "by max_leaf_cells, max_depth, or min_cell_size_mm."
+        )
+        if warning not in leaf.warnings:
+            leaf.warnings.append(warning)
 
 
 def _resolve_voxel_worker_count(params: OctreeParams) -> int:
