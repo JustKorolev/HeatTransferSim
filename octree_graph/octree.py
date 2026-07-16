@@ -336,15 +336,22 @@ def build_octree(
     deferred_discretionary: list[tuple[_CellWorkItem, CellClassification]] = []
     counter = 1
     push_counter = 0
+    queued_max_size_candidates = 0
 
     def push_cell(work_item: _CellWorkItem, priority: float = 0.0) -> None:
-        nonlocal push_counter
+        nonlocal push_counter, queued_max_size_candidates
         heap_priority = -float(priority) if bool(getattr(params, "adaptive_refine_priority", True)) else 0.0
         heapq.heappush(queue, (heap_priority, push_counter, work_item))
         push_counter += 1
+        if _is_max_size_candidate(work_item, params):
+            queued_max_size_candidates += 1
 
     def pop_cell() -> _CellWorkItem:
-        return heapq.heappop(queue)[2]
+        nonlocal queued_max_size_candidates
+        work_item = heapq.heappop(queue)[2]
+        if _is_max_size_candidate(work_item, params):
+            queued_max_size_candidates = max(0, queued_max_size_candidates - 1)
+        return work_item
 
     max_cell_budget_warning_emitted = False
 
@@ -402,7 +409,6 @@ def build_octree(
             diagnostics.triangle_candidate_tests += int(classification.triangle_candidate_tests)
             diagnostics.triangle_intersection_tests += int(classification.triangle_intersection_tests)
         if progress_callback is not None and diagnostics is not None:
-            pending_max_size_candidates_for_progress = _pending_max_size_candidate_count(queue, params)
             progress_callback(
                 {
                     "phase": "octree",
@@ -410,7 +416,7 @@ def build_octree(
                     "cells_subdivided": diagnostics.cells_subdivided,
                     "leaves": len(leaves),
                     "queue": len(queue) + int(remaining_batch_items),
-                    "max_size_queue": pending_max_size_candidates_for_progress + int(remaining_mandatory_candidates),
+                    "max_size_queue": queued_max_size_candidates + int(remaining_mandatory_candidates),
                     "max_leaf_cells": params.max_leaf_cells,
                     "max_depth_reached": diagnostics.max_depth_reached,
                     "voxel_workers": worker_count,
@@ -456,9 +462,7 @@ def build_octree(
         )
         classification.refinement_score = refinement_score
         classification.refinement_reasons = tuple(refinement_reasons)
-        pending_max_size_candidates = _pending_max_size_candidate_count(queue, params) + int(
-            remaining_mandatory_candidates
-        )
+        pending_max_size_candidates = queued_max_size_candidates + int(remaining_mandatory_candidates)
         effective_queue_len = len(queue) + int(remaining_batch_items)
         budget_allows_children = (
             params.max_leaf_cells is None
@@ -559,7 +563,7 @@ def build_octree(
 
     if worker_count <= 1:
         while queue or deferred_discretionary:
-            if deferred_discretionary and _pending_max_size_candidate_count(queue, params) <= 0:
+            if deferred_discretionary and queued_max_size_candidates <= 0:
                 work_item, classification = deferred_discretionary.pop()
                 handle_classified_cell(
                     work_item,
@@ -592,7 +596,7 @@ def build_octree(
                 initargs=(worker_objects, contact_report, params, set(materials)),
             ) as executor:
                 while queue or deferred_discretionary:
-                    if deferred_discretionary and _pending_max_size_candidate_count(queue, params) <= 0:
+                    if deferred_discretionary and queued_max_size_candidates <= 0:
                         work_item, classification = deferred_discretionary.pop()
                         handle_classified_cell(
                             work_item,
@@ -606,6 +610,7 @@ def build_octree(
                     batch: list[_CellWorkItem] = []
                     while queue and len(batch) < batch_size:
                         batch.append(pop_cell())
+                    remaining_mandatory_by_index = _remaining_max_size_candidates_by_index(batch, params)
                     classifications = list(
                         executor.map(
                             _classify_cell_work_item,
@@ -619,9 +624,7 @@ def build_octree(
                             work_item,
                             classification,
                             remaining_batch_items=len(remaining_batch),
-                            remaining_mandatory_candidates=sum(
-                                1 for item in remaining_batch if _is_max_size_candidate(item, params)
-                            ),
+                            remaining_mandatory_candidates=remaining_mandatory_by_index[index],
                         )
         except Exception as exc:
             warnings.append(
@@ -629,6 +632,7 @@ def build_octree(
                 f"for the remaining cells. Worker error: {type(exc).__name__}: {exc}"
             )
             worker_count = 1
+            remaining_mandatory_by_index = _remaining_max_size_candidates_by_index(batch, params)
             for index, work_item in enumerate(batch):
                 remaining_batch = batch[index + 1 :]
                 classification = _classify_cell(
@@ -645,12 +649,10 @@ def build_octree(
                     work_item,
                     classification,
                     remaining_batch_items=len(remaining_batch),
-                    remaining_mandatory_candidates=sum(
-                        1 for item in remaining_batch if _is_max_size_candidate(item, params)
-                    ),
+                    remaining_mandatory_candidates=remaining_mandatory_by_index[index],
                 )
             while queue or deferred_discretionary:
-                if deferred_discretionary and _pending_max_size_candidate_count(queue, params) <= 0:
+                if deferred_discretionary and queued_max_size_candidates <= 0:
                     work_item, classification = deferred_discretionary.pop()
                     handle_classified_cell(
                         work_item,
@@ -699,11 +701,17 @@ def _resolve_voxel_worker_count(params: OctreeParams) -> int:
     return max(1, requested)
 
 
-def _pending_max_size_candidate_count(
-    queue: list[tuple[float, int, _CellWorkItem]],
+def _remaining_max_size_candidates_by_index(
+    batch: list[_CellWorkItem],
     params: OctreeParams,
-) -> int:
-    return sum(1 for _priority, _counter, item in queue if _is_max_size_candidate(item, params))
+) -> list[int]:
+    remaining_by_index = [0] * len(batch)
+    remaining = 0
+    for index in range(len(batch) - 1, -1, -1):
+        remaining_by_index[index] = remaining
+        if _is_max_size_candidate(batch[index], params):
+            remaining += 1
+    return remaining_by_index
 
 
 def _is_max_size_candidate(item: _CellWorkItem, params: OctreeParams) -> bool:
