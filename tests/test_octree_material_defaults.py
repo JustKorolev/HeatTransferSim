@@ -17,6 +17,7 @@ from octree_graph.cli import (
     BuildCheckpointer,
     _annotate_graph_warning_tags,
     _build_quality_report,
+    _graph_connectivity_analysis,
     build_parser,
     _build_graph_with_optional_fallback,
     _filter_ignored_components,
@@ -357,6 +358,33 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertNotIn("warning_tags", nodes[0])
         self.assertEqual(quality["node_warning_tag_counts"]["oversized_cell"], 1)
         self.assertLess(quality["quality_score"], 100)
+
+    def test_connectivity_analysis_tags_nodes_outside_largest_component(self) -> None:
+        args = SimpleNamespace(max_cell_size_mm=10.0)
+        nodes = [
+            {"node_id": 1, "center_mm": [0.0, 0.0, 0.0], "size_mm": [1.0, 1.0, 1.0], "component_name": "main", "material_name": "Copper"},
+            {"node_id": 2, "center_mm": [1.0, 0.0, 0.0], "size_mm": [1.0, 1.0, 1.0], "component_name": "main", "material_name": "Copper"},
+            {"node_id": 3, "center_mm": [100.0, 0.0, 0.0], "size_mm": [1.0, 1.0, 1.0], "component_name": "island", "material_name": "Copper"},
+        ]
+        edges = [{"node_i": 1, "node_j": 2}]
+
+        analysis = _graph_connectivity_analysis(nodes, edges)
+        _annotate_graph_warning_tags(nodes, edges, args, analysis)
+        graph = {
+            "graph_nodes": nodes,
+            "graph_edges": edges,
+            "warnings": [],
+            "validation_results": {"errors": [], "warnings": []},
+            "connectivity_analysis": analysis,
+        }
+        quality = _build_quality_report(graph, args)
+
+        self.assertFalse(analysis["connected"])
+        self.assertEqual(analysis["component_count"], 2)
+        self.assertEqual(analysis["disconnected_node_ids"], [3])
+        self.assertIn("disconnected_component", nodes[2]["tags"]["warning_tags"])
+        self.assertIn("isolated_node", nodes[2]["tags"]["warning_tags"])
+        self.assertEqual(quality["node_warning_tag_counts"]["disconnected_component"], 1)
 
     def test_build_checkpointer_writes_phase_and_completed_graph_files(self) -> None:
         with TemporaryDirectory() as directory:

@@ -122,7 +122,8 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         checkpointer=checkpointer,
     )
     _raise_if_empty_graph(graph_result.nodes, leaves, args)
-    _annotate_graph_warning_tags(graph_result.nodes, graph_result.edges, args)
+    connectivity_analysis = _graph_connectivity_analysis(graph_result.nodes, graph_result.edges)
+    _annotate_graph_warning_tags(graph_result.nodes, graph_result.edges, args, connectivity_analysis)
     progress.phase("Building matrices")
     matrices = build_matrices(
         graph_result.nodes,
@@ -155,6 +156,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         "warnings": graph_result.warnings,
         "heater_sensor_tags": {},
         "validation_results": {},
+        "connectivity_analysis": connectivity_analysis,
     }
     graph["diagnostics"] = _diagnostics_payload(scene, leaves, graph_result, diagnostics, args)
     progress.phase("Validating graph")
@@ -1161,11 +1163,12 @@ def _mesh_diagnostics(scene) -> dict:
 def _graph_diagnostics(nodes: list[dict], edges: list[dict]) -> dict:
     heaters = [node for node in nodes if bool(node.get("is_heater"))]
     sensors = [node for node in nodes if bool(node.get("is_sensor"))]
+    connectivity = _graph_connectivity_analysis(nodes, edges)
     return {
         "node_count_before_pruning": len(nodes),
         "node_count_after_pruning": len(nodes),
         "edge_count": len(edges),
-        "connected_components": _connected_component_count(nodes, edges),
+        "connected_components": int(connectivity.get("component_count", 0)),
         "heater_count": len(heaters),
         "sensor_count": len(sensors),
         "paired_heater_count": sum(1 for node in heaters if node.get("assigned_sensor_id") is not None),
@@ -1175,7 +1178,12 @@ def _graph_diagnostics(nodes: list[dict], edges: list[dict]) -> dict:
     }
 
 
-def _annotate_graph_warning_tags(nodes: list[dict], edges: list[dict], args: argparse.Namespace) -> None:
+def _annotate_graph_warning_tags(
+    nodes: list[dict],
+    edges: list[dict],
+    args: argparse.Namespace,
+    connectivity_analysis: dict | None = None,
+) -> None:
     degree: Counter[int] = Counter()
     for edge in edges:
         try:
@@ -1183,14 +1191,23 @@ def _annotate_graph_warning_tags(nodes: list[dict], edges: list[dict], args: arg
             degree[int(edge["node_j"])] += 1
         except (KeyError, TypeError, ValueError):
             continue
+    disconnected_ids = {
+        int(node_id)
+        for node_id in (connectivity_analysis or {}).get("disconnected_node_ids", []) or []
+    }
     for node in nodes:
-        tags = _warning_tags_for_node(node, degree, args)
+        tags = _warning_tags_for_node(node, degree, args, disconnected_ids)
         node.setdefault("tags", {})
         if isinstance(node["tags"], dict):
             node["tags"]["warning_tags"] = tags
 
 
-def _warning_tags_for_node(node: dict, degree: Counter[int], args: argparse.Namespace) -> list[str]:
+def _warning_tags_for_node(
+    node: dict,
+    degree: Counter[int],
+    args: argparse.Namespace,
+    disconnected_ids: set[int] | None = None,
+) -> list[str]:
     tags: list[str] = []
     node_id = int(node.get("node_id", -1))
     size = node.get("size_mm") or []
@@ -1205,6 +1222,8 @@ def _warning_tags_for_node(node: dict, degree: Counter[int], args: argparse.Name
         tags.append("node_warning")
     if degree.get(node_id, 0) <= 0:
         tags.append("isolated_node")
+    if disconnected_ids and node_id in disconnected_ids:
+        tags.append("disconnected_component")
     if bool(node.get("is_heater")):
         if not bool(node.get("heater_valid", True)) or not bool(node.get("heater_attached", True)):
             tags.append("invalid_heater")
@@ -1238,6 +1257,7 @@ def _build_quality_report(graph: dict, args: argparse.Namespace) -> dict:
     score -= min(25, tag_counts.get("oversized_cell", 0) * 2)
     score -= min(20, tag_counts.get("low_confidence", 0))
     score -= min(15, tag_counts.get("isolated_node", 0) * 2)
+    score -= min(25, tag_counts.get("disconnected_component", 0) * 2)
     score -= min(15, (tag_counts.get("unpaired_heater", 0) + tag_counts.get("unpaired_sensor", 0)) * 2)
     score -= min(10, validation_warnings)
     score = max(0, int(score))
@@ -1328,6 +1348,100 @@ def _connected_component_count(nodes: list[dict], edges: list[dict]) -> int:
     return len({find(node_id) for node_id in node_ids})
 
 
+def _graph_connectivity_analysis(nodes: list[dict], edges: list[dict]) -> dict:
+    node_ids = sorted(_safe_node_id(node) for node in nodes if _safe_node_id(node) is not None)
+    if not node_ids:
+        return {
+            "connected": True,
+            "component_count": 0,
+            "largest_component_id": None,
+            "largest_component_size": 0,
+            "disconnected_node_ids": [],
+            "components": [],
+        }
+    adjacency: dict[int, set[int]] = {node_id: set() for node_id in node_ids}
+    valid_edge_count = 0
+    for edge in edges:
+        try:
+            a = int(edge["node_i"])
+            b = int(edge["node_j"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if a not in adjacency or b not in adjacency:
+            continue
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+        valid_edge_count += 1
+    nodes_by_id = {int(node["node_id"]): node for node in nodes if _safe_node_id(node) is not None}
+    seen: set[int] = set()
+    raw_components: list[list[int]] = []
+    for node_id in node_ids:
+        if node_id in seen:
+            continue
+        stack = [node_id]
+        seen.add(node_id)
+        component: list[int] = []
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in sorted(adjacency[current]):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        raw_components.append(sorted(component))
+    raw_components.sort(key=lambda ids: (-len(ids), ids[0] if ids else -1))
+    largest = raw_components[0] if raw_components else []
+    largest_id = 0 if raw_components else None
+    disconnected_ids = [node_id for component in raw_components[1:] for node_id in component]
+    components = [
+        _connectivity_component_summary(index, component, nodes_by_id)
+        for index, component in enumerate(raw_components)
+    ]
+    return {
+        "connected": len(raw_components) <= 1,
+        "component_count": len(raw_components),
+        "largest_component_id": largest_id,
+        "largest_component_size": len(largest),
+        "disconnected_node_ids": disconnected_ids,
+        "node_count": len(node_ids),
+        "edge_count": valid_edge_count,
+        "components": components,
+    }
+
+
+def _connectivity_component_summary(component_id: int, node_ids: list[int], nodes_by_id: dict[int, dict]) -> dict:
+    component_nodes = [nodes_by_id[node_id] for node_id in node_ids if node_id in nodes_by_id]
+    centers = [
+        np.asarray(node.get("center_mm"), dtype=float)
+        for node in component_nodes
+        if isinstance(node.get("center_mm"), (list, tuple)) and len(node.get("center_mm")) == 3
+    ]
+    bounds: dict[str, Any] | None = None
+    if centers:
+        stacked = np.vstack(centers)
+        bounds = {"min": np.min(stacked, axis=0).tolist(), "max": np.max(stacked, axis=0).tolist()}
+    components = Counter(str(node.get("component_name", "") or "?") for node in component_nodes)
+    materials = Counter(str(node.get("material_name", "") or "?") for node in component_nodes)
+    return {
+        "component_id": int(component_id),
+        "node_count": len(node_ids),
+        "node_ids_sample": node_ids[:50],
+        "node_ids_truncated": len(node_ids) > 50,
+        "heater_count": sum(1 for node in component_nodes if bool(node.get("is_heater"))),
+        "sensor_count": sum(1 for node in component_nodes if bool(node.get("is_sensor"))),
+        "bounds_center_mm": bounds,
+        "top_components": components.most_common(10),
+        "top_materials": materials.most_common(10),
+    }
+
+
+def _safe_node_id(node: dict) -> int | None:
+    try:
+        return int(node["node_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _configured_contact_detection_distance(args: argparse.Namespace) -> float | None:
     if args.contact_detection_distance_mm is not None:
         return float(args.contact_detection_distance_mm)
@@ -1378,6 +1492,7 @@ def _write_outputs(
     _atomic_write_json(output / "graph.json", graph, indent=2)
     _atomic_write_json(output / "octree_diagnostics.json", graph.get("diagnostics", {}), indent=2)
     _atomic_write_json(output / "build_quality.json", graph.get("build_quality", {}), indent=2)
+    _atomic_write_json(output / "connectivity_analysis.json", graph.get("connectivity_analysis", {}), indent=2)
     _write_csv(output / "nodes.csv", graph["graph_nodes"])
     _write_csv(output / "edges.csv", graph["graph_edges"])
     _atomic_write_json(output / "params.json", graph["parameters"], indent=2)
