@@ -1,0 +1,70 @@
+[2026-07-15T22:51:08+00:00] 
+[2026-07-15T22:51:08+00:00] Starting octree graph conversion
+[2026-07-15T22:51:08+00:00] Phase: Loading glTF scene
+[2026-07-15T22:51:08+00:00] Exiting: Expected --mesh-dir to be a directory, got meshes\HISPEC-CRYOSTAT-MEDIUM.
+[2026-07-15T22:51:08+00:00] Conversion process closing
+[2026-07-15T22:52:41+00:00] 
+[2026-07-15T22:52:41+00:00] Starting octree graph conversion
+[2026-07-15T22:52:41+00:00] Phase: Loading glTF scene
+[2026-07-15T22:52:59+00:00] Scene memory estimate: objects=9394, triangles=32431449, triangle_bytes=2.2 GiB, estimated_worker_payload=3.6 GiB, requested_workers=3, resolved_workers=3, available_memory=1.6 GiB
+[2026-07-15T22:52:59+00:00] Disabled multiprocessing because the estimated copied triangle/index payload (10.9 GiB across 3 workers) is too large for available memory (1.6 GiB). Using --voxel-workers 1.
+[2026-07-15T22:52:59+00:00] Phase: Loading materials
+[2026-07-15T22:52:59+00:00] Phase: Voxelizing octree
+[2026-07-15T22:54:57+00:00] Voxelizing octree [############################] active=100.0% tested=1 leaves=0/60000 queue=0 subdivided=0 depth=0
+[2026-07-15T22:55:07+00:00] Voxelizing octree [####------------------------] active= 15.9% tested=93 leaves=19/60000 queue=492 subdivided=73 depth=3
+[2026-07-15T22:55:17+00:00] Voxelizing octree [####------------------------] active= 15.4% tested=328 leaves=61/60000 queue=1801 subdivided=266 depth=6
+[2026-07-15T22:55:27+00:00] Voxelizing octree [####------------------------] active= 14.7% tested=558 leaves=84/60000 queue=3227 subdivided=473 depth=7
+[2026-07-15T22:55:37+00:00] Voxelizing octree [####------------------------] active= 15.3% tested=691 leaves=125/60000 queue=3830 subdivided=565 depth=8
+[2026-07-15T22:55:48+00:00] Voxelizing octree [#####-----------------------] active= 16.1% tested=955 leaves=213/60000 queue=4974 subdivided=741 depth=8
+[2026-07-15T22:55:58+00:00] Voxelizing octree [#####-----------------------] active= 17.6% tested=1413 leaves=410/60000 queue=6604 subdivided=1002 depth=9
+[2026-07-15T22:56:08+00:00] Voxelizing octree [#####-----------------------] active= 18.2% tested=1688 leaves=529/60000 queue=7577 subdivided=1158 depth=9
+[2026-07-15T22:56:18+00:00] Voxelizing octree [#####-----------------------] active= 18.0% tested=2045 leaves=621/60000 queue=9340 subdivided=1423 depth=9
+[2026-07-15T22:56:28+00:00] Voxelizing octree [#####-----------------------] active= 18.4% tested=2686 leaves=856/60000 queue=11947 subdivided=1829 depth=9
+[2026-07-15T22:56:38+00:00] Voxelizing octree [#####-----------------------] active= 18.2% tested=3524 leaves=1102/60000 queue=15845 subdivided=2421 depth=9
+[2026-07-15T22:56:48+00:00] Voxelizing octree [#####-----------------------] active= 18.2% tested=3939 leaves=1234/60000 queue=17694 subdivided=2704 depth=9
+[2026-07-15T22:56:58+00:00] Voxelizing octree [#####-----------------------] active= 17.9% tested=5166 leaves=1565/60000 queue=23635 subdivided=3600 depth=9
+[2026-07-15T22:57:08+00:00] Voxelizing octree [#####-----------------------] active= 18.0% tested=6583 leaves=2003/60000 queue=30050 subdivided=4579 depth=9
+[2026-07-15T22:57:18+00:00] Voxelizing octree [#####-----------------------] active= 18.2% tested=8012 leaves=2522/60000 queue=35901 subdivided=5489 depth=9
+[2026-07-15T22:57:28+00:00] Voxelizing octree [#####-----------------------] active= 18.7% tested=9714 leaves=3219/60000 queue=42239 subdivided=6494 depth=9
+[2026-07-15T22:57:38+00:00] Voxelizing octree [#####-----------------------] active= 19.0% tested=11605 leaves=3979/60000 queue=49396 subdivided=7625 depth=9
+[2026-07-15T22:57:48+00:00] Voxelizing octree [#####-----------------------] active= 19.5% tested=13428 leaves=4816/60000 queue=55461 subdivided=8611 depth=9
+[2026-07-15T22:57:59+00:00] Voxelizing octree [######----------------------] active= 21.4% tested=15222 leaves=6316/60000 queue=56019 subdivided=8905 depth=9
+[2026-07-15T22:58:09+00:00] Voxelizing octree [#######---------------------] active= 23.6% tested=17244 leaves=8104/60000 queue=55869 subdivided=9139 depth=9
+[2026-07-15T22:58:19+00:00] Voxelizing octree [#######---------------------] active= 25.6% tested=19147 leaves=9787/60000 queue=55726 subdivided=9359 depth=9
+[2026-07-15T22:58:29+00:00] Voxelizing octree [########--------------------] active= 27.3% tested=20852 leaves=11299/60000 queue=55565 subdivided=9552 depth=9
+[2026-07-15T22:58:39+00:00] Voxelizing octree [########--------------------] active= 29.2% tested=22942 leaves=13134/60000 queue=55515 subdivided=9807 depth=9
+[2026-07-15T22:58:49+00:00] Voxelizing octree [#########-------------------] active= 31.4% tested=25307 leaves=15240/60000 queue=55222 subdivided=10066 depth=9
+[2026-07-15T22:58:59+00:00] Voxelizing octree [#########-------------------] active= 33.4% tested=27689 leaves=17321/60000 queue=55248 subdivided=10367 depth=9
+[2026-07-15T22:59:09+00:00] Voxelizing octree [##########------------------] active= 35.6% tested=30130 leaves=19539/60000 queue=54591 subdivided=10590 depth=9
+[2026-07-15T22:59:19+00:00] Voxelizing octree [###########-----------------] active= 38.4% tested=32717 leaves=22075/60000 queue=52412 subdivided=10641 depth=9
+[2026-07-15T22:59:29+00:00] Voxelizing octree [###########-----------------] active= 41.0% tested=35083 leaves=24394/60000 queue=50422 subdivided=10688 depth=9
+[2026-07-15T22:59:40+00:00] Voxelizing octree [############----------------] active= 42.8% tested=37504 leaves=26551/60000 queue=50113 subdivided=10952 depth=9
+[2026-07-15T22:59:50+00:00] Voxelizing octree [#############---------------] active= 45.6% tested=40073 leaves=29096/60000 queue=47736 subdivided=10976 depth=9
+[2026-07-15T23:00:00+00:00] Voxelizing octree [#############---------------] active= 47.2% tested=42494 leaves=31245/60000 queue=47491 subdivided=11248 depth=9
+[2026-07-15T23:00:10+00:00] Voxelizing octree [##############--------------] active= 49.9% tested=45040 leaves=33761/60000 queue=45185 subdivided=11278 depth=9
+[2026-07-15T23:00:20+00:00] Voxelizing octree [###############-------------] active= 52.3% tested=47227 leaves=35948/60000 queue=42998 subdivided=11278 depth=9
+[2026-07-15T23:00:30+00:00] Voxelizing octree [###############-------------] active= 53.4% tested=48222 leaves=36943/60000 queue=42003 subdivided=11278 depth=9
+[2026-07-15T23:00:40+00:00] Voxelizing octree [###############-------------] active= 54.7% tested=49389 leaves=38109/60000 queue=40844 subdivided=11279 depth=9
+[2026-07-15T23:00:50+00:00] Voxelizing octree [################------------] active= 57.4% tested=51829 leaves=40545/60000 queue=38436 subdivided=11283 depth=9
+[2026-07-15T23:01:01+00:00] Voxelizing octree [#################-----------] active= 60.0% tested=54350 leaves=43034/60000 queue=36171 subdivided=11315 depth=9
+[2026-07-15T23:01:11+00:00] Voxelizing octree [#################-----------] active= 61.9% tested=56793 leaves=45327/60000 queue=34928 subdivided=11465 depth=9
+[2026-07-15T23:01:21+00:00] Voxelizing octree [##################----------] active= 64.6% tested=59275 leaves=47809/60000 queue=32446 subdivided=11465 depth=9
+[2026-07-15T23:01:31+00:00] Voxelizing octree [###################---------] active= 67.3% tested=61723 leaves=50257/60000 queue=29998 subdivided=11465 depth=9
+[2026-07-15T23:01:41+00:00] Voxelizing octree [####################--------] active= 70.1% tested=64329 leaves=52863/60000 queue=27392 subdivided=11465 depth=9
+[2026-07-15T23:01:51+00:00] Voxelizing octree [####################--------] active= 73.1% tested=67011 leaves=55545/60000 queue=24710 subdivided=11465 depth=9
+[2026-07-15T23:02:02+00:00] Voxelizing octree [#####################-------] active= 75.6% tested=69356 leaves=57890/60000 queue=22365 subdivided=11465 depth=9
+[2026-07-15T23:02:12+00:00] Voxelizing octree [######################------] active= 78.6% tested=72076 leaves=60610/60000 queue=19645 subdivided=11465 depth=9
+[2026-07-15T23:02:22+00:00] Voxelizing octree [#######################-----] active= 81.7% tested=74921 leaves=63455/60000 queue=16800 subdivided=11465 depth=9
+[2026-07-15T23:02:32+00:00] Voxelizing octree [########################----] active= 84.7% tested=77681 leaves=66215/60000 queue=14040 subdivided=11465 depth=9
+[2026-07-15T23:02:42+00:00] Voxelizing octree [#########################---] active= 87.7% tested=80433 leaves=68967/60000 queue=11288 subdivided=11465 depth=9
+[2026-07-15T23:02:52+00:00] Voxelizing octree [#########################---] active= 90.7% tested=83156 leaves=71690/60000 queue=8565 subdivided=11465 depth=9
+[2026-07-15T23:03:02+00:00] Voxelizing octree [##########################--] active= 93.7% tested=85952 leaves=74486/60000 queue=5769 subdivided=11465 depth=9
+[2026-07-15T23:03:12+00:00] Voxelizing octree [###########################-] active= 96.6% tested=88569 leaves=77103/60000 queue=3152 subdivided=11465 depth=9
+[2026-07-15T23:03:23+00:00] Voxelizing octree [############################] active= 99.7% tested=91405 leaves=79939/60000 queue=316 subdivided=11465 depth=9
+[2026-07-15T23:03:24+00:00] Voxelizing octree [############################] active=100.0% tested=91721 leaves=80256/60000 queue=0 subdivided=11465 depth=9
+[2026-07-15T23:03:24+00:00] Phase: Building thermal graph
+[2026-07-15T23:03:27+00:00] Phase: Building matrices
+[2026-07-15T23:03:27+00:00] Phase: Validating graph
+[2026-07-15T23:03:27+00:00] Phase: Writing outputs
+[2026-07-15T23:03:29+00:00] Completed graph with 3194 nodes and 952 edges.
+[2026-07-15T23:03:29+00:00] Conversion process closing

@@ -344,6 +344,8 @@ def build_octree(
     def pop_cell() -> _CellWorkItem:
         return heapq.heappop(queue)[2]
 
+    max_cell_budget_warning_emitted = False
+
     push_cell(
         _CellWorkItem("cell_0", tuple(float(v) for v in root[0]), tuple(float(v) for v in root[1]), 0, None),
         priority=0.0,
@@ -385,9 +387,10 @@ def build_octree(
         classification: CellClassification,
         remaining_batch_items: int,
     ) -> None:
-        nonlocal counter
+        nonlocal counter, max_cell_budget_warning_emitted
         center_mm = np.asarray(work_item.center_mm, dtype=float)
         size_mm = np.asarray(work_item.size_mm, dtype=float)
+        max_size_mm = float(max(size_mm))
         level = int(work_item.level)
         if diagnostics is not None:
             diagnostics.cells_tested += 1
@@ -454,14 +457,10 @@ def build_octree(
         )
         if diagnostics is not None and params.max_leaf_cells is not None and not budget_allows_children:
             diagnostics.max_leaf_cells_reached = True
-        can_subdivide = (
-            level < params.max_depth
-            and float(max(size_mm)) > params.min_cell_size_mm
-            and budget_allows_children
-        )
-        should_subdivide = can_subdivide and (
-            (classification.occupied and float(max(size_mm)) > params.max_cell_size_mm)
-            or mixed_parts
+        above_max_cell_size = classification.occupied and max_size_mm > params.max_cell_size_mm
+        can_subdivide = level < params.max_depth and max_size_mm > params.min_cell_size_mm
+        discretionary_refinement = (
+            mixed_parts
             or mixed_materials
             or high_contrast
             or crowded_component_refinement
@@ -469,14 +468,23 @@ def build_octree(
             or multi_surface_refinement
             or surface_complexity_refinement
             or gap_preservation_refinement
-            or (needs_surface_refinement and float(max(size_mm)) > params.min_cell_size_mm)
+            or (needs_surface_refinement and max_size_mm > params.min_cell_size_mm)
             or (
                 classification.occupied
                 and 0.0 < dominant_fraction < params.dominant_fraction_accept
-                and float(max(size_mm)) > params.min_cell_size_mm
+                and max_size_mm > params.min_cell_size_mm
             )
         )
+        should_subdivide = can_subdivide and (
+            above_max_cell_size or (budget_allows_children and discretionary_refinement)
+        )
         if should_subdivide:
+            if above_max_cell_size and not budget_allows_children and not max_cell_budget_warning_emitted:
+                warnings.append(
+                    "Exceeded max_leaf_cells to honor max_cell_size_mm for occupied cells; "
+                    "increase --max-leaf-cells if this graph is larger than expected."
+                )
+                max_cell_budget_warning_emitted = True
             if diagnostics is not None:
                 diagnostics.cells_subdivided += 1
                 for reason in refinement_reasons:
@@ -499,10 +507,10 @@ def build_octree(
             return
 
         confidence = _classification_confidence(classification, params)
-        if classification.occupied and float(max(size_mm)) > params.max_cell_size_mm:
+        if above_max_cell_size:
             classification.warnings.append(
                 "Accepted occupied cell above max_cell_size_mm because refinement was blocked "
-                "by max_depth or max_leaf_cells."
+                "by max_depth or min_cell_size_mm."
             )
             confidence = "low"
         if classification.bbox_only_hit and params.bbox_fallback:

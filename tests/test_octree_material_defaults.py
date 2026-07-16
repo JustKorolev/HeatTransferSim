@@ -1795,6 +1795,53 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertIn("AABB overlap", " ".join(leaves[0].warnings))
         self.assertEqual(diagnostics.cells_subdivided, 0)
 
+    def test_occupied_cells_honor_max_cell_size_despite_leaf_budget(self) -> None:
+        materials = self.make_materials()
+        triangle = np.array(
+            [
+                [[-3.0, -3.0, 0.0], [3.0, -3.0, 0.0], [0.0, 3.0, 0.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(
+            vertices=triangle.reshape(-1, 3),
+            faces=np.array([[0, 1, 2]]),
+            triangles=triangle,
+            is_watertight=False,
+        )
+        obj = MeshObject(
+            name="panel",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangle.reshape(-1, 3),
+            bounds_mm=(np.array([-3.0, -3.0, 0.0]), np.array([3.0, 3.0, 0.0])),
+            watertight=False,
+        )
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[obj],
+            bounds_mm=(np.array([-4.0, -4.0, -4.0]), np.array([4.0, 4.0, 4.0])),
+            warnings=[],
+        )
+        params = OctreeParams(
+            min_cell_size_mm=1.0,
+            max_cell_size_mm=2.0,
+            max_leaf_cells=1,
+            max_depth=4,
+            samples_per_cell=4,
+        )
+        warnings: list[str] = []
+        diagnostics = OctreeDiagnostics()
+
+        leaves = build_octree(scene, ContactReport(), materials, params, warnings=warnings, diagnostics=diagnostics)
+
+        solid = [leaf for leaf in leaves if not leaf.is_empty]
+        self.assertGreater(len(leaves), 1)
+        self.assertTrue(solid)
+        self.assertLessEqual(max(max(leaf.size_mm) for leaf in solid), 2.0)
+        self.assertTrue(diagnostics.max_leaf_cells_reached)
+        self.assertIn("Exceeded max_leaf_cells to honor max_cell_size_mm", " ".join(warnings))
+
     def test_crowded_component_refinement_subdivides_dense_empty_regions(self) -> None:
         materials = self.make_materials()
         left = _mesh_object("small_part_left", "Copper", [-5.0, -1.0, -1.0], [-3.0, 1.0, 1.0])

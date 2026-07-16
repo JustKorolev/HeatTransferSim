@@ -36,6 +36,36 @@ from .sys_id_artifacts import (
 
 
 QT_SLIDER_MAXIMUM = 2_147_483_647
+_REINITIALIZE_PARAMETER_FIELDS = {
+    "dt_s",
+    "use_ambient_radiation",
+    "T_env_K",
+    "input_mode",
+    "gpu_simulation_enabled",
+}
+_DISPLAY_PARAMETER_FIELDS = {
+    "autoscale_temperature",
+    "color_min_K",
+    "color_max_K",
+}
+_CONTROLLER_PARAMETER_FIELDS = {
+    "Kp_cooler",
+    "P_cooler_max",
+    "T_cooler_setpoint",
+    "mimo_controller_enabled",
+    "mimo_hold_threshold_K",
+    "mimo_coarse_threshold_K",
+    "mimo_default_heater_max_power_W",
+    "mimo_lambda_u",
+    "mimo_rho_du",
+    "mimo_heater_slew_rate_W_per_s",
+    "mimo_v_cmd_abs_max_K_per_s",
+    "heater_sensor_pair_alpha",
+    "drift_lpf_tau_s",
+    "derivative_dt_floor_s",
+    "mimo_integral_abs_max",
+    "mimo_freeze_integral_when_saturated",
+}
 
 
 class HeatTransferSimulationTab:
@@ -74,6 +104,7 @@ class HeatTransferSimulationTab:
         self._known_sensor_node_ids: set[int] = set()
         self._enabled_io_initialized = False
         self._syncing_enabled_io_table = False
+        self._simulation_reinitialize_pending = False
         self.widget = self.QtWidgets.QWidget(parent)
         self.timer = self.QtCore.QTimer(self.widget)
         self.timer.timeout.connect(self.step_forward)
@@ -597,6 +628,7 @@ class HeatTransferSimulationTab:
         self._refresh_sys_id_matrix_list()
         self._sync_component_options()
         self._reset_to_model_initial_temperatures()
+        self._simulation_reinitialize_pending = False
         self._draw_current(reset_camera=True)
         self._refresh_sensor_readouts()
         self._status("Using current editor graph.")
@@ -621,6 +653,7 @@ class HeatTransferSimulationTab:
             self._refresh_sys_id_matrix_list()
             self._sync_component_options()
             self._reset_to_model_initial_temperatures()
+            self._simulation_reinitialize_pending = False
             log_event("simulation load_selected_graph before draw")
             self._draw_current(reset_camera=True)
             log_event("simulation load_selected_graph after draw")
@@ -648,11 +681,12 @@ class HeatTransferSimulationTab:
             self._draw_current(reset_camera=False)
             self._refresh_stats()
             self._set_warnings(self.prepared.warnings)
+            self._simulation_reinitialize_pending = False
         except Exception as exc:
             self._status(str(exc), True)
 
     def play(self) -> None:
-        if self.prepared is None:
+        if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
         if self.prepared is None:
             self.pause()
@@ -685,7 +719,7 @@ class HeatTransferSimulationTab:
             pass
 
     def reset(self) -> None:
-        if self.prepared is None:
+        if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
             return
         self.timer.stop()
@@ -694,7 +728,7 @@ class HeatTransferSimulationTab:
         self._status("Simulation reset to initial temperatures.")
 
     def step_forward(self) -> None:
-        if self.prepared is None:
+        if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
             return
         if self.prepared.time_s >= self.params.t_final_s:
@@ -719,6 +753,9 @@ class HeatTransferSimulationTab:
 
     def step_backward(self) -> None:
         if self.prepared is None:
+            return
+        if self._simulation_reinitialize_pending:
+            self.initialize_simulation()
             return
         self.prepared.step_backward()
         self._after_state_change()
@@ -1209,10 +1246,28 @@ class HeatTransferSimulationTab:
         if self.sys_id_state is not None:
             self.cancel_sys_id("Simulation parameter changed while sys ID was running; run cancelled.")
             return
+        previous_params = self.params
         self.params = self._read_params()
+        changed = _changed_parameter_names(previous_params, self.params)
         self._save_params_to_folder()
         if self.prepared is not None:
-            self.initialize_simulation()
+            self.prepared.params = self.params
+            if changed & _CONTROLLER_PARAMETER_FIELDS:
+                self.prepared.mark_controller_stale()
+                self.prepared.reset_controller_integrators()
+            if changed & _REINITIALIZE_PARAMETER_FIELDS:
+                self._simulation_reinitialize_pending = True
+                if self.timer.isActive():
+                    self.pause()
+                self._status("Simulation parameters saved. Reinitialize, play, or step to apply matrix/stepper changes.")
+            elif changed & _DISPLAY_PARAMETER_FIELDS:
+                self._update_colors()
+            else:
+                if "playback_speed" in changed and self.timer.isActive():
+                    interval = max(10, int(100.0 / max(float(self.params.playback_speed), 1.0e-9)))
+                    self.timer.start(interval)
+                self._refresh_stats()
+                self._refresh_sensor_readouts()
 
     def _read_params(self) -> SimulationParameters:
         return SimulationParameters(
@@ -1703,6 +1758,21 @@ class HeatTransferSimulationTab:
         widget.setSingleStep(step)
         widget.setValue(float(value))
         return widget
+
+
+def _changed_parameter_names(before: SimulationParameters, after: SimulationParameters) -> set[str]:
+    changed: set[str] = set()
+    before_values = vars(before)
+    after_values = vars(after)
+    for name, after_value in after_values.items():
+        before_value = before_values.get(name)
+        if isinstance(before_value, (list, tuple)) or isinstance(after_value, (list, tuple)):
+            if tuple(before_value or ()) != tuple(after_value or ()):
+                changed.add(name)
+            continue
+        if before_value != after_value:
+            changed.add(name)
+    return changed
 
 
 def _node_uses_mimo_controller(

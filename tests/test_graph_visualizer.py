@@ -1778,6 +1778,97 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(sync_calls, [True])
         self.assertEqual(tab.viewer.render_count, 1)
 
+    def test_simulation_parameter_change_defers_reinitialize_without_redraw(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Timer:
+            def __init__(self) -> None:
+                self.active = True
+
+            def isActive(self) -> bool:
+                return self.active
+
+            def stop(self) -> None:
+                self.active = False
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.params = None
+                self.marked = False
+                self.reset = False
+
+            def mark_controller_stale(self) -> None:
+                self.marked = True
+
+            def reset_controller_integrators(self) -> None:
+                self.reset = True
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.sys_id_state = None
+        tab.params = SimulationParameters(dt_s=1.0)
+        tab.prepared = Prepared()
+        tab.timer = Timer()
+        tab._simulation_reinitialize_pending = False
+        tab._read_params = lambda: SimulationParameters(dt_s=2.0)
+        tab._save_params_to_folder = lambda: None
+        tab.initialize_simulation = lambda: (_ for _ in ()).throw(AssertionError("initialized immediately"))
+        tab._draw_current = lambda reset_camera=False: (_ for _ in ()).throw(AssertionError("redrew voxels"))
+        tab._update_colors = lambda: (_ for _ in ()).throw(AssertionError("updated colors"))
+        statuses = []
+        tab._status = lambda message, error=False: statuses.append(message)
+        tab.pause = lambda: tab.timer.stop()
+
+        tab._handle_parameter_change()
+
+        self.assertTrue(tab._simulation_reinitialize_pending)
+        self.assertFalse(tab.timer.isActive())
+        self.assertEqual(tab.prepared.params.dt_s, 2.0)
+        self.assertTrue(any("Reinitialize" in message for message in statuses))
+
+    def test_simulation_display_parameter_change_updates_colors_only(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Timer:
+            def isActive(self) -> bool:
+                return False
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.params = None
+
+            def mark_controller_stale(self) -> None:
+                raise AssertionError("controller marked stale")
+
+            def reset_controller_integrators(self) -> None:
+                raise AssertionError("controller reset")
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.sys_id_state = None
+        tab.params = SimulationParameters(color_min_K=0.0)
+        tab.prepared = Prepared()
+        tab.timer = Timer()
+        tab._simulation_reinitialize_pending = False
+        tab._read_params = lambda: SimulationParameters(color_min_K=10.0)
+        tab._save_params_to_folder = lambda: None
+        tab.initialize_simulation = lambda: (_ for _ in ()).throw(AssertionError("initialized immediately"))
+        tab._draw_current = lambda reset_camera=False: (_ for _ in ()).throw(AssertionError("redrew voxels"))
+        color_updates = []
+        tab._update_colors = lambda: color_updates.append(True)
+        tab._refresh_stats = lambda: (_ for _ in ()).throw(AssertionError("refreshed stats"))
+        tab._refresh_sensor_readouts = lambda: (_ for _ in ()).throw(AssertionError("refreshed readouts"))
+
+        tab._handle_parameter_change()
+
+        self.assertFalse(tab._simulation_reinitialize_pending)
+        self.assertEqual(color_updates, [True])
+        self.assertEqual(tab.prepared.params.color_min_K, 10.0)
+
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(
             {
