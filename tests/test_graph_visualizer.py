@@ -15,6 +15,11 @@ from scipy.sparse import csr_matrix, issparse
 import graph_visualizer.graph_io as graph_io
 import graph_visualizer.matrix_builder as gv_matrix_builder
 import graph_visualizer.validation as graph_validation
+from graph_visualizer.connectivity import (
+    analyze_model_connectivity,
+    connectivity_component_color,
+    connectivity_component_for_node,
+)
 from graph_visualizer.draw_tools import (
     clone_node_for_extrusion,
     compute_face_normal,
@@ -86,6 +91,24 @@ class GraphVisualizerModelTests(unittest.TestCase):
         model.add_node(node_7)
         refresh_auto_edges(model)
         return model
+
+    def test_model_connectivity_analysis_identifies_disconnected_groups(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="connectivity_groups"))
+        for node_id, coord in ((1, (0, 0, 0)), (2, (1, 0, 0)), (3, (10, 0, 0)), (4, (11, 0, 0))):
+            model.add_node(NodeProperties.with_material(node_id, coord, material="aluminum"))
+        model.set_edge(1, 2, 1.0)
+        model.set_edge(3, 4, 1.0)
+
+        analysis = analyze_model_connectivity(model)
+
+        self.assertFalse(analysis["connected"])
+        self.assertEqual(analysis["component_count"], 2)
+        self.assertEqual(analysis["largest_component_size"], 2)
+        self.assertEqual(connectivity_component_for_node(analysis, 1), 0)
+        self.assertEqual(connectivity_component_for_node(analysis, 3), 1)
+        self.assertEqual(set(analysis["disconnected_node_ids"]), {3, 4})
+        self.assertEqual(connectivity_component_color(0), "#64748b")
+        self.assertNotEqual(connectivity_component_color(1), "#64748b")
 
     def test_validation_skips_oversized_dense_symmetry_check(self) -> None:
         matrices = {

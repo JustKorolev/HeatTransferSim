@@ -11,6 +11,11 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from .connectivity import (
+    analyze_model_connectivity,
+    connectivity_component_color,
+    connectivity_component_for_node,
+)
 from .draw_tools import (
     clone_node_for_extrusion,
     compute_face_normal,
@@ -168,9 +173,12 @@ class GraphVisualizerApp:
             toggles.addWidget(widget)
         toggles.addWidget(self.QtWidgets.QLabel("Color"))
         self.color_mode_combo = self.QtWidgets.QComboBox()
-        self.color_mode_combo.addItems(["Material", "Warnings"])
+        self.color_mode_combo.addItems(["Material", "Warnings", "Connectivity"])
         self.color_mode_combo.currentTextChanged.connect(self._handle_color_mode_changed)
         toggles.addWidget(self.color_mode_combo)
+        connectivity_button = self.QtWidgets.QPushButton("Analyze Connectivity")
+        connectivity_button.clicked.connect(self.analyze_connectivity)
+        toggles.addWidget(connectivity_button)
         toggles.addWidget(self.QtWidgets.QLabel("Opacity"))
         self.opacity_slider = self._view_slider(5, 100, 34, self._handle_view_control_changed)
         toggles.addWidget(self.opacity_slider)
@@ -1747,6 +1755,7 @@ class GraphVisualizerApp:
             f"initial T: {node.initial_temperature_K:.3f} K / {node.initial_temperature_K - 273.15:.3f} C\n"
             f"exposed: {node.is_exposed}, G_rad: {node.G_rad_W_K:.6g} W/K\n"
             f"role: {self._node_role_text(node)}, cryocooler: {node.has_cryocooler}\n"
+            f"connectivity: {self._node_connectivity_text(node.node_id)}\n"
             f"incident conductive edges: {len(incident)}\n"
             f"warnings: {', '.join(_node_warning_reasons(node)[:3]) or 'none'}"
         )
@@ -1779,13 +1788,47 @@ class GraphVisualizerApp:
     def _handle_visual_toggle(self, *_: Any) -> None:
         self._refresh_all(reset_camera=False)
 
+    def analyze_connectivity(self) -> None:
+        if not self.model.nodes:
+            self._set_status("No graph nodes are loaded.", error=True)
+            return
+        analysis = analyze_model_connectivity(self.model)
+        self.model.octree_graph_data = dict(self.model.octree_graph_data or {})
+        self.model.octree_graph_data["connectivity_analysis"] = analysis
+        self.model.octree_graph_data["connectivity_analyzed_at"] = datetime.now().isoformat(timespec="seconds")
+        self._mark_dirty()
+        if hasattr(self, "color_mode_combo"):
+            self.color_mode_combo.setCurrentText("Connectivity")
+        if hasattr(self, "viewer"):
+            self.viewer.update_node_colors(self._effective_node_colors())
+        self._refresh_details()
+        disconnected = len(analysis.get("disconnected_node_ids", []) or [])
+        self._set_status(
+            "Connectivity analysis: "
+            f"connected={bool(analysis.get('connected', True))}, "
+            f"groups={int(analysis.get('component_count', 0))}, "
+            f"largest={int(analysis.get('largest_component_size', 0))}, "
+            f"disconnected_nodes={disconnected}."
+        )
+
     def _node_color_overrides(self) -> dict[int, str] | None:
-        if not hasattr(self, "color_mode_combo") or self.color_mode_combo.currentText() != "Warnings":
+        if not hasattr(self, "color_mode_combo"):
             return None
-        return {
-            int(node_id): _warning_color_for_node(node)
-            for node_id, node in self.model.nodes.items()
-        }
+        mode = self.color_mode_combo.currentText()
+        if mode == "Warnings":
+            return {
+                int(node_id): _warning_color_for_node(node)
+                for node_id, node in self.model.nodes.items()
+            }
+        if mode == "Connectivity":
+            analysis = self._current_connectivity_analysis()
+            return {
+                int(node_id): connectivity_component_color(
+                    connectivity_component_for_node(analysis, int(node_id))
+                )
+                for node_id in self.model.nodes
+            }
+        return None
 
     def _effective_node_colors(self) -> dict[int, str]:
         overrides = self._node_color_overrides()
@@ -1796,6 +1839,10 @@ class GraphVisualizerApp:
     def _handle_color_mode_changed(self, *_: Any) -> None:
         if hasattr(self, "viewer"):
             self.viewer.update_node_colors(self._effective_node_colors())
+        if hasattr(self, "color_mode_combo") and self.color_mode_combo.currentText() == "Connectivity":
+            analysis = self._current_connectivity_analysis()
+            if not isinstance(analysis, dict) or not analysis.get("node_component_ids"):
+                self._set_status("Run Analyze Connectivity to compute component groups.", error=True)
 
     def _handle_view_control_changed(self, *_: Any) -> None:
         self._sync_view_controls_to_viewer()
@@ -1821,6 +1868,20 @@ class GraphVisualizerApp:
                 self.show_sensors.isChecked(),
                 self.show_coolers.isChecked(),
             )
+
+    def _current_connectivity_analysis(self) -> dict[str, Any] | None:
+        data = self.model.octree_graph_data if isinstance(self.model.octree_graph_data, dict) else {}
+        analysis = data.get("connectivity_analysis")
+        return analysis if isinstance(analysis, dict) else None
+
+    def _node_connectivity_text(self, node_id: int) -> str:
+        analysis = self._current_connectivity_analysis()
+        component_id = connectivity_component_for_node(analysis, int(node_id))
+        if component_id is None:
+            return "not analyzed"
+        if component_id == 0:
+            return "main group"
+        return f"disconnected group {component_id}"
 
     def apply_component_initial_temperature(self) -> None:
         if not hasattr(self, "component_temp_combo"):
