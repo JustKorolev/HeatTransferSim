@@ -703,6 +703,30 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual(args.dense_matrix_node_limit, 0)
 
+    def test_cli_accepts_max_cell_size_budget_overflow_opt_in(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--mesh-dir",
+                "meshes",
+                "--graph-name",
+                "graph",
+            ]
+        )
+
+        self.assertTrue(args.allow_max_cell_size_budget_overflow)
+
+        args = build_parser().parse_args(
+            [
+                "--mesh-dir",
+                "meshes",
+                "--graph-name",
+                "graph",
+                "--no-allow-max-cell-size-budget-overflow",
+            ]
+        )
+
+        self.assertFalse(args.allow_max_cell_size_budget_overflow)
+
     def test_cli_accepts_ignored_component_substrings(self) -> None:
         args = build_parser().parse_args(
             [
@@ -1864,7 +1888,51 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertIn("AABB overlap", " ".join(leaves[0].warnings))
         self.assertEqual(diagnostics.cells_subdivided, 0)
 
-    def test_occupied_cells_honor_max_cell_size_despite_leaf_budget(self) -> None:
+    def test_occupied_cells_fail_fast_when_max_size_cannot_fit_leaf_budget(self) -> None:
+        materials = self.make_materials()
+        triangle = np.array(
+            [
+                [[-3.0, -3.0, 0.0], [3.0, -3.0, 0.0], [0.0, 3.0, 0.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(
+            vertices=triangle.reshape(-1, 3),
+            faces=np.array([[0, 1, 2]]),
+            triangles=triangle,
+            is_watertight=False,
+        )
+        obj = MeshObject(
+            name="panel",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangle.reshape(-1, 3),
+            bounds_mm=(np.array([-3.0, -3.0, 0.0]), np.array([3.0, 3.0, 0.0])),
+            watertight=False,
+        )
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[obj],
+            bounds_mm=(np.array([-4.0, -4.0, -4.0]), np.array([4.0, 4.0, 4.0])),
+            warnings=[],
+        )
+        params = OctreeParams(
+            min_cell_size_mm=1.0,
+            max_cell_size_mm=2.0,
+            max_leaf_cells=1,
+            allow_max_cell_size_budget_overflow=False,
+            max_depth=4,
+            samples_per_cell=4,
+        )
+        warnings: list[str] = []
+        diagnostics = OctreeDiagnostics()
+
+        with self.assertRaisesRegex(RuntimeError, "max_leaf_cells is too low to satisfy max_cell_size_mm"):
+            build_octree(scene, ContactReport(), materials, params, warnings=warnings, diagnostics=diagnostics)
+
+        self.assertTrue(diagnostics.max_leaf_cells_reached)
+
+    def test_occupied_cells_honor_max_cell_size_despite_leaf_budget_by_default(self) -> None:
         materials = self.make_materials()
         triangle = np.array(
             [

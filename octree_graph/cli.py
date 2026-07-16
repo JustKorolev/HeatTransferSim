@@ -80,6 +80,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         contact_refine_distance_mm=args.contact_refine_distance_mm,
         boundary_refine=args.boundary_refine,
         max_leaf_cells=args.max_leaf_cells,
+        allow_max_cell_size_budget_overflow=args.allow_max_cell_size_budget_overflow,
         samples_per_cell=args.samples_per_cell,
         min_solid_fraction=args.min_solid_fraction,
         bbox_fallback=args.bbox_fallback,
@@ -188,6 +189,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--contact-refine-distance-mm", type=float, default=10.0)
     parser.add_argument("--boundary-refine", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-leaf-cells", type=int, default=None)
+    parser.add_argument(
+        "--allow-max-cell-size-budget-overflow",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Allow occupied-cell max_cell_size_mm enforcement to exceed --max-leaf-cells. "
+            "This is enabled by default so max cell size defines the baseline occupied CAD grid. "
+            "Use --no-allow-max-cell-size-budget-overflow to make --max-leaf-cells a hard total cap."
+        ),
+    )
     parser.add_argument("--samples-per-cell", type=int, default=9)
     parser.add_argument("--min-solid-fraction", type=float, default=0.12)
     parser.add_argument(
@@ -865,6 +876,7 @@ class ConsoleProgress:
         cells = int(event.get("cells_tested", 0))
         leaves = int(event.get("leaves", 0))
         queue = int(event.get("queue", 0))
+        max_size_queue = int(event.get("max_size_queue", 0))
         subdivided = int(event.get("cells_subdivided", 0))
         depth = int(event.get("max_depth_reached", 0))
         workers = int(event.get("voxel_workers", 1))
@@ -882,6 +894,8 @@ class ConsoleProgress:
             f"Voxelizing octree [{bar}] active={ratio * 100:5.1f}% "
             f"tested={cells} {leaf_text} queue={queue} subdivided={subdivided} depth={depth}"
         )
+        if max_size_queue > 0:
+            line += f" max-size-pending={max_size_queue}"
         if workers > 1:
             line += f" workers={workers}"
         if self._logger is not None and (event.get("done") or now - self._last_log >= 10.0):
