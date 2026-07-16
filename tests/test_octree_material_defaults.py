@@ -351,9 +351,10 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         }
         quality = _build_quality_report(graph, args)
 
-        self.assertIn("oversized_cell", nodes[0]["warning_tags"])
-        self.assertIn("unpaired_heater", nodes[0]["warning_tags"])
-        self.assertIn("invalid_sensor", nodes[1]["warning_tags"])
+        self.assertIn("oversized_cell", nodes[0]["tags"]["warning_tags"])
+        self.assertIn("unpaired_heater", nodes[0]["tags"]["warning_tags"])
+        self.assertIn("invalid_sensor", nodes[1]["tags"]["warning_tags"])
+        self.assertNotIn("warning_tags", nodes[0])
         self.assertEqual(quality["node_warning_tag_counts"]["oversized_cell"], 1)
         self.assertLess(quality["quality_score"], 100)
 

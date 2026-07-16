@@ -1188,7 +1188,6 @@ def _annotate_graph_warning_tags(nodes: list[dict], edges: list[dict], args: arg
         node.setdefault("tags", {})
         if isinstance(node["tags"], dict):
             node["tags"]["warning_tags"] = tags
-        node["warning_tags"] = tags
 
 
 def _warning_tags_for_node(node: dict, degree: Counter[int], args: argparse.Namespace) -> list[str]:
@@ -1229,7 +1228,7 @@ def _build_quality_report(graph: dict, args: argparse.Namespace) -> dict:
     validation = graph.get("validation_results", {}) or {}
     tag_counts: Counter[str] = Counter()
     for node in nodes:
-        for tag in node.get("warning_tags", []) or []:
+        for tag in _node_warning_tags(node):
             tag_counts[str(tag)] += 1
     warning_count = len(graph.get("warnings", []) or [])
     validation_errors = len(validation.get("errors", []) or [])
@@ -1251,7 +1250,7 @@ def _build_quality_report(graph: dict, args: argparse.Namespace) -> dict:
                 "material_name": node.get("material_name", ""),
                 "max_size_mm": _max_node_size_mm(node),
                 "confidence": node.get("confidence", ""),
-                "warning_tags": list(node.get("warning_tags", []) or []),
+                "warning_tags": _node_warning_tags(node),
             }
             for node in nodes
         ),
@@ -1273,6 +1272,12 @@ def _build_quality_report(graph: dict, args: argparse.Namespace) -> dict:
         "largest_nodes": largest_nodes,
         "blocking_issues": list(validation.get("errors", []) or []),
     }
+
+
+def _node_warning_tags(node: dict) -> list[str]:
+    tags = node.get("tags", {}) if isinstance(node.get("tags"), dict) else {}
+    values = tags.get("warning_tags", node.get("warning_tags", []))
+    return [str(value) for value in (values or [])]
 
 
 def _max_node_size_mm(node: dict) -> float:

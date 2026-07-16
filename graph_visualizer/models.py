@@ -248,6 +248,7 @@ class NodeProperties:
         is_heater_value = copied.pop("is_heater", None)
         is_sensor_value = copied.pop("is_sensor", None)
         tags = copied.pop("tags", {}) or {}
+        copied.pop("warning_tags", None)
         coord_value = copied.pop("coord", None)
         if coord_value is None and center_mm is not None:
             coord_value = [round(float(v)) for v in center_mm]

@@ -2326,6 +2326,20 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(node.heater.heater_id, 310)
         self.assertEqual(node.sensor.sensor_id, 311)
 
+    def test_octree_node_load_ignores_warning_tags_metadata(self) -> None:
+        node = NodeProperties.from_dict(
+            {
+                "node_id": 32,
+                "coord": [32, 0, 0],
+                "material_name": "Copper",
+                "warning_tags": ["oversized_cell"],
+                "tags": {"warning_tags": ["low_confidence"]},
+            }
+        )
+
+        self.assertEqual(node.node_id, 32)
+        self.assertEqual(node.material, "Copper")
+
     def test_octree_graph_load_applies_top_level_heater_sensor_tags(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(
             {
