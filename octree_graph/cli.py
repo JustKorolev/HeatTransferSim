@@ -700,7 +700,7 @@ def _log_scene_memory_risk(scene: GltfScene, args: argparse.Namespace, run_log: 
     if worker_count <= 1 or available_bytes is None:
         return
     estimated_parallel_bytes = estimated_per_worker_bytes * worker_count
-    if estimated_parallel_bytes <= available_bytes * 0.35:
+    if estimated_parallel_bytes <= available_bytes * 0.7:
         return
     message = (
         "Disabled multiprocessing because the estimated copied triangle/index payload "
