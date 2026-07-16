@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from collections import Counter
 import csv
 from datetime import datetime, timezone
@@ -145,7 +146,11 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     if material_lookup_path:
         input_files["material_lookup"] = str(Path(material_lookup_path))
     graph = {
-        "metadata": {"graph_name": args.graph_name, "app_version": "octree_graph 0.1"},
+        "metadata": {
+            "graph_name": args.graph_name,
+            "app_version": "octree_graph 0.1",
+            "builder_source": _builder_source_payload(),
+        },
         "input_files": input_files,
         "parameters": _parameters_payload(args),
         "materials_used": {name: material.to_dict() for name, material in materials.items()},
@@ -164,6 +169,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     errors, validation_warnings = validate_graph(graph, matrices)
     graph["validation_results"] = {"errors": errors, "warnings": validation_warnings}
     graph["build_quality"] = _build_quality_report(graph, args)
+    graph["oversized_node_summary"] = _oversized_node_summary(graph_result.nodes, args)
     progress.phase("Writing outputs")
     _write_outputs(output, graph, matrices, materials, warnings)
     _atomic_write_text(
@@ -183,6 +189,16 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     )
     progress.done()
     run_log.log(f"Completed graph with {len(graph_result.nodes)} nodes and {len(graph_result.edges)} edges.")
+    oversized_summary = graph.get("oversized_node_summary", {})
+    if int(oversized_summary.get("total_oversized_nodes", 0) or 0) > 0:
+        run_log.log(f"Oversized node summary: {json.dumps(oversized_summary, sort_keys=True)}")
+        print(
+            "Oversized node summary: "
+            f"{oversized_summary.get('total_oversized_nodes')} nodes above max_cell_size_mm "
+            f"({oversized_summary.get('voxel_oversized_nodes')} voxel, "
+            f"{oversized_summary.get('marker_oversized_nodes')} marker); "
+            f"largest={oversized_summary.get('largest_size_mm')} mm"
+        )
     print(f"Wrote octree graph with {len(graph_result.nodes)} nodes and {len(graph_result.edges)} edges to {output}")
     _print_role_summary(graph_result.nodes)
 
@@ -1197,6 +1213,100 @@ def _graph_diagnostics(nodes: list[dict], edges: list[dict]) -> dict:
     }
 
 
+def _builder_source_payload() -> dict[str, Any]:
+    source = Path(__file__).resolve()
+    try:
+        source_bytes = source.read_bytes()
+        digest = hashlib.sha256(source_bytes).hexdigest()[:16]
+    except OSError:
+        digest = ""
+    try:
+        mtime = datetime.fromtimestamp(source.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        mtime = ""
+    octree_source = Path(build_octree.__code__.co_filename).resolve()
+    try:
+        octree_bytes = octree_source.read_bytes()
+        octree_digest = hashlib.sha256(octree_bytes).hexdigest()[:16]
+    except OSError:
+        octree_digest = ""
+    try:
+        octree_mtime = datetime.fromtimestamp(octree_source.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        octree_mtime = ""
+    return {
+        "cli_path": str(source),
+        "cli_sha256_16": digest,
+        "cli_mtime_utc": mtime,
+        "octree_path": str(octree_source),
+        "octree_sha256_16": octree_digest,
+        "octree_mtime_utc": octree_mtime,
+    }
+
+
+def _oversized_node_summary(nodes: list[dict], args: argparse.Namespace) -> dict[str, Any]:
+    limit = float(getattr(args, "max_cell_size_mm", 0.0) or 0.0)
+    if limit <= 0.0:
+        return {
+            "max_cell_size_mm": limit,
+            "total_oversized_nodes": 0,
+            "voxel_oversized_nodes": 0,
+            "marker_oversized_nodes": 0,
+            "largest_size_mm": 0.0,
+            "reason_counts": {},
+            "largest_nodes": [],
+        }
+    oversized: list[dict[str, Any]] = []
+    reason_counts: Counter[str] = Counter()
+    for node in nodes:
+        size = node.get("size_mm") or []
+        try:
+            max_size = max(float(value) for value in size)
+        except (TypeError, ValueError):
+            continue
+        if max_size <= limit:
+            continue
+        warnings_text = " ".join(str(value) for value in (node.get("warnings") or []))
+        level = int(node.get("level", 0) or 0)
+        if "Blocked by max_leaf_cells" in warnings_text:
+            reason = "blocked_by_max_leaf_cells_old_code"
+        elif "max_leaf_cells was exceeded to enforce max_cell_size_mm" in warnings_text:
+            reason = "max_leaf_cells_overridden"
+        elif "max_depth or min_cell_size_mm" in warnings_text:
+            reason = "blocked_by_max_depth_or_min_cell_size"
+        elif "marker-only graph node" in warnings_text or level < 0:
+            reason = "marker_node"
+        elif node.get("warnings"):
+            reason = "node_warning"
+        else:
+            reason = "unknown"
+        reason_counts[reason] += 1
+        oversized.append(
+            {
+                "node_id": int(node.get("node_id", -1)),
+                "component_name": node.get("component_name"),
+                "level": level,
+                "max_size_mm": float(max_size),
+                "reason": reason,
+            }
+        )
+    oversized.sort(key=lambda item: float(item["max_size_mm"]), reverse=True)
+    marker_count = sum(
+        1
+        for item in oversized
+        if int(item.get("level", 0)) < 0 or item.get("reason") == "marker_node"
+    )
+    return {
+        "max_cell_size_mm": limit,
+        "total_oversized_nodes": len(oversized),
+        "voxel_oversized_nodes": len(oversized) - marker_count,
+        "marker_oversized_nodes": marker_count,
+        "largest_size_mm": float(oversized[0]["max_size_mm"]) if oversized else 0.0,
+        "reason_counts": dict(sorted(reason_counts.items())),
+        "largest_nodes": oversized[:20],
+    }
+
+
 def _annotate_graph_warning_tags(
     nodes: list[dict],
     edges: list[dict],
@@ -1512,6 +1622,7 @@ def _write_outputs(
     _atomic_write_json(output / "octree_diagnostics.json", graph.get("diagnostics", {}), indent=2)
     _atomic_write_json(output / "build_quality.json", graph.get("build_quality", {}), indent=2)
     _atomic_write_json(output / "connectivity_analysis.json", graph.get("connectivity_analysis", {}), indent=2)
+    _atomic_write_json(output / "oversized_node_summary.json", graph.get("oversized_node_summary", {}), indent=2)
     _write_csv(output / "nodes.csv", graph["graph_nodes"])
     _write_csv(output / "edges.csv", graph["graph_edges"])
     _atomic_write_json(output / "params.json", graph["parameters"], indent=2)

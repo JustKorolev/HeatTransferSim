@@ -24,6 +24,7 @@ from octree_graph.cli import (
     _build_graph_with_optional_fallback,
     _filter_ignored_components,
     _log_scene_memory_risk,
+    _oversized_node_summary,
     _raise_if_empty_graph,
     _resolve_material_lookup_path,
     _split_role_components,
@@ -43,6 +44,7 @@ from octree_graph.graph_builder import (
 from octree_graph.load_gltf import GltfScene, MeshObject
 from octree_graph.load_contact_report import load_contact_report
 from octree_graph.matrix_builder import build_matrices as build_octree_matrices
+from octree_graph.oversized_cli import main as oversized_main
 from octree_graph.materials import (
     DEFAULT_ASSIGNED_MATERIAL_NAME,
     Material,
@@ -435,6 +437,66 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertNotIn("warning_tags", nodes[0])
         self.assertEqual(quality["node_warning_tag_counts"]["oversized_cell"], 1)
         self.assertLess(quality["quality_score"], 100)
+
+    def test_oversized_node_summary_distinguishes_old_leaf_budget_warnings(self) -> None:
+        args = SimpleNamespace(max_cell_size_mm=4.0)
+        nodes = [
+            {
+                "node_id": 1,
+                "component_name": "coarse_part",
+                "level": 3,
+                "size_mm": [12.0, 12.0, 12.0],
+                "warnings": ["Cannot satisfy max_cell_size_mm. Blocked by max_leaf_cells at cell_1."],
+            },
+            {
+                "node_id": 2,
+                "component_name": "sensor_marker",
+                "level": -1,
+                "size_mm": [20.0, 1.0, 1.0],
+                "warnings": ["CAD sensor component represented as a marker-only graph node."],
+            },
+            {
+                "node_id": 3,
+                "component_name": "small_part",
+                "level": 8,
+                "size_mm": [2.0, 2.0, 2.0],
+                "warnings": [],
+            },
+        ]
+
+        summary = _oversized_node_summary(nodes, args)
+
+        self.assertEqual(summary["total_oversized_nodes"], 2)
+        self.assertEqual(summary["voxel_oversized_nodes"], 1)
+        self.assertEqual(summary["marker_oversized_nodes"], 1)
+        self.assertEqual(summary["reason_counts"]["blocked_by_max_leaf_cells_old_code"], 1)
+        self.assertEqual(summary["reason_counts"]["marker_node"], 1)
+
+    def test_standalone_oversized_node_cli_writes_summary(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            graph = {
+                "parameters": {"max_cell_size_mm": 4.0},
+                "graph_nodes": [
+                    {
+                        "node_id": 1,
+                        "component_name": "coarse_part",
+                        "level": 3,
+                        "size_mm": [12.0, 12.0, 12.0],
+                        "warnings": ["Cannot satisfy max_cell_size_mm. Blocked by max_leaf_cells at cell_1."],
+                    }
+                ],
+            }
+            (folder / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+
+            oversized_main([str(folder), "--no-write"])
+            self.assertFalse((folder / "oversized_node_summary.json").exists())
+
+            oversized_main([str(folder)])
+
+            summary = json.loads((folder / "oversized_node_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["total_oversized_nodes"], 1)
+        self.assertEqual(summary["reason_counts"]["blocked_by_max_leaf_cells_old_code"], 1)
 
     def test_connectivity_analysis_tags_nodes_outside_largest_component(self) -> None:
         args = SimpleNamespace(max_cell_size_mm=10.0)
