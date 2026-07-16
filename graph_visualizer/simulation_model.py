@@ -281,16 +281,23 @@ class PreparedSimulation:
             return state
         solve_start = time.perf_counter()
         if self.dynamic_heater_inputs:
-            self._step_dynamic_heater_inputs()
+            self._step_dynamic_heater_inputs(profile)
         elif self.Phi_aug is None:
-            if not self._advance_with_gpu_power_vector(np.zeros(len(self.node_ids), dtype=float)):
+            zero_start = time.perf_counter()
+            zero_power = np.zeros(len(self.node_ids), dtype=float)
+            _record_profile_ms(profile, "zero_power_vector_ms", zero_start)
+            if not self._advance_with_gpu_power_vector(zero_power, profile):
+                expm_start = time.perf_counter()
                 self.z = np.asarray(
                     expm_multiply(self.A_aug * float(self.params.dt_s), self.z),
                     dtype=float,
                 )
                 self.z[-1] = 1.0
+                _record_profile_ms(profile, "cpu_expm_multiply_ms", expm_start)
         else:
+            matvec_start = time.perf_counter()
             self.z = self.Phi_aug @ self.z
+            _record_profile_ms(profile, "dense_phi_matvec_ms", matvec_start)
         profile["model_solve_ms"] = (time.perf_counter() - solve_start) * 1000.0
         state_start = time.perf_counter()
         state = SimulationState(
@@ -373,12 +380,18 @@ class PreparedSimulation:
         if self.gpu_stepper is not None and hasattr(self.gpu_stepper, "set_state"):
             self.gpu_stepper.set_state(self.temperatures_K)
 
-    def _step_dynamic_heater_inputs(self) -> None:
+    def _step_dynamic_heater_inputs(self, profile: dict[str, float] | None = None) -> None:
         if self.model is None or self.inv_C is None or self.A is None or self.base_b is None:
             return
-        if _mimo_controller_is_active(self.model, self.node_ids, self.params):
+        mode_start = time.perf_counter()
+        use_mimo = _mimo_controller_is_active(self.model, self.node_ids, self.params)
+        _record_profile_ms(profile, "controller_mode_check_ms", mode_start)
+        if use_mimo:
+            controller_start = time.perf_counter()
             heater_power = self._mimo_controller_power_vector(update_state=True)
+            _record_profile_ms(profile, "controller_mimo_ms", controller_start)
         else:
+            controller_start = time.perf_counter()
             heater_power = _controlled_heater_power_vector(
                 self.model,
                 self.node_ids,
@@ -388,19 +401,26 @@ class PreparedSimulation:
                 include_heater_inputs=self.params.input_mode == "heater_inputs",
                 update_pid_state=True,
             )
-        self._advance_with_power_vector(heater_power)
+            _record_profile_ms(profile, "controller_heater_power_ms", controller_start)
+        self._advance_with_power_vector(heater_power, profile)
 
-    def _advance_with_power_vector(self, heater_power: np.ndarray) -> None:
+    def _advance_with_power_vector(self, heater_power: np.ndarray, profile: dict[str, float] | None = None) -> None:
         if self.inv_C is None or self.A is None or self.base_b is None:
             return
-        if self._advance_with_gpu_power_vector(heater_power):
+        if self._advance_with_gpu_power_vector(heater_power, profile):
             return
+        source_start = time.perf_counter()
+        radiation_start = time.perf_counter()
+        radiation_source = self._radiation_source_vector()
+        _record_profile_ms(profile, "radiation_source_ms", radiation_start)
         b = (
             np.asarray(self.base_b, dtype=float)
             + np.asarray(self.inv_C, dtype=float) * np.asarray(heater_power, dtype=float)
-            + self._radiation_source_vector()
+            + radiation_source
         )
+        _record_profile_ms(profile, "source_vector_build_ms", source_start)
         if self.Phi_aug is None:
+            build_start = time.perf_counter()
             A_aug = bmat(
                 [
                     [self.A, csr_matrix(b.reshape(-1, 1))],
@@ -408,24 +428,39 @@ class PreparedSimulation:
                 ],
                 format="csr",
             )
+            _record_profile_ms(profile, "affine_matrix_build_ms", build_start)
+            expm_start = time.perf_counter()
             self.z = np.asarray(expm_multiply(A_aug * float(self.params.dt_s), self.z), dtype=float)
+            _record_profile_ms(profile, "cpu_expm_multiply_ms", expm_start)
         else:
+            build_start = time.perf_counter()
             A_aug = np.zeros((len(self.node_ids) + 1, len(self.node_ids) + 1), dtype=float)
             A_aug[: len(self.node_ids), : len(self.node_ids)] = self.A
             A_aug[: len(self.node_ids), len(self.node_ids)] = b
+            _record_profile_ms(profile, "dense_affine_matrix_build_ms", build_start)
+            expm_start = time.perf_counter()
             self.z = expm(A_aug * float(self.params.dt_s)) @ self.z
+            _record_profile_ms(profile, "dense_expm_matvec_ms", expm_start)
         self.z[-1] = 1.0
 
-    def _advance_with_gpu_power_vector(self, heater_power: np.ndarray) -> bool:
+    def _advance_with_gpu_power_vector(
+        self,
+        heater_power: np.ndarray,
+        profile: dict[str, float] | None = None,
+    ) -> bool:
         if self.gpu_stepper is None:
             return False
         try:
+            gpu_start = time.perf_counter()
             temperatures = self.gpu_stepper.step(self.temperatures_K, heater_power)
+            _record_profile_ms(profile, "gpu_step_ms", gpu_start)
         except Exception as exc:
             self.warnings.append(f"GPU simulation step failed; falling back to CPU stepping: {exc}")
             self.gpu_stepper = None
             return False
+        sync_start = time.perf_counter()
         self.z = np.concatenate([np.asarray(temperatures, dtype=float), np.array([1.0])])
+        _record_profile_ms(profile, "state_vector_update_ms", sync_start)
         return True
 
     def _radiation_source_vector(self, temperatures_K: np.ndarray | None = None) -> np.ndarray:
@@ -1182,6 +1217,12 @@ def _optional_cupy_modules() -> tuple[Any | None, Any | None, str]:
     except Exception as exc:
         return None, None, str(exc)
     return cp, cupyx_sparse, ""
+
+
+def _record_profile_ms(profile: dict[str, float] | None, key: str, start: float) -> None:
+    if profile is None:
+        return
+    profile[key] = profile.get(key, 0.0) + (time.perf_counter() - start) * 1000.0
 
 
 def _gpu_substep_count(

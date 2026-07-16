@@ -2681,6 +2681,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertIsNone(prepared.Phi_aug)
         self.assertLess(float(prepared.temperatures_K[0]), float(before[0]))
+        self.assertIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
+        self.assertIn("model_solve_ms", prepared.last_step_profile_ms)
 
     def test_gpu_simulation_request_falls_back_when_cupy_unavailable(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="gpu_unavailable"))
@@ -2745,6 +2747,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertEqual(fake_stepper.calls, 1)
         self.assertAlmostEqual(float(prepared.temperatures_K[0]), 308.0)
+        self.assertIn("gpu_step_ms", prepared.last_step_profile_ms)
+        self.assertIn("state_vector_update_ms", prepared.last_step_profile_ms)
 
     def test_gpu_sparse_stepper_keeps_temperature_state_on_device(self) -> None:
         from graph_visualizer.simulation_model import GpuSparseStepper
