@@ -54,6 +54,7 @@ from .role_pairing import (
     recompute_heater_sensor_pairing,
     refresh_sensor_connected_nodes,
 )
+from .role_warnings import role_warning_reasons
 from .tooltip_formatters import format_node_tooltip
 from .two_d_graph_widget import TwoDGraphWidget
 from .validation import raise_if_errors, validate_model
@@ -165,6 +166,11 @@ class GraphVisualizerApp:
             self.show_coolers,
         ):
             toggles.addWidget(widget)
+        toggles.addWidget(self.QtWidgets.QLabel("Color"))
+        self.color_mode_combo = self.QtWidgets.QComboBox()
+        self.color_mode_combo.addItems(["Material", "Warnings"])
+        self.color_mode_combo.currentTextChanged.connect(self._handle_color_mode_changed)
+        toggles.addWidget(self.color_mode_combo)
         toggles.addWidget(self.QtWidgets.QLabel("Opacity"))
         self.opacity_slider = self._view_slider(5, 100, 34, self._handle_view_control_changed)
         toggles.addWidget(self.opacity_slider)
@@ -1629,7 +1635,12 @@ class GraphVisualizerApp:
         self.viewer.selected_node_id = self.selected_node_id
         self.viewer.selected_node_ids = set(self.selected_node_ids)
         log_event("editor refresh_all before viewer.draw")
-        self.viewer.draw(self.model, reset_camera=reset_camera, visible_node_ids=visible_node_ids)
+        self.viewer.draw(
+            self.model,
+            reset_camera=reset_camera,
+            visible_node_ids=visible_node_ids,
+            node_colors=self._node_color_overrides(),
+        )
         log_event("editor refresh_all after viewer.draw")
         self.two_d_view.selected_node_ids = set(self.selected_node_ids)
         self.two_d_view.set_model(
@@ -1736,7 +1747,8 @@ class GraphVisualizerApp:
             f"initial T: {node.initial_temperature_K:.3f} K / {node.initial_temperature_K - 273.15:.3f} C\n"
             f"exposed: {node.is_exposed}, G_rad: {node.G_rad_W_K:.6g} W/K\n"
             f"role: {self._node_role_text(node)}, cryocooler: {node.has_cryocooler}\n"
-            f"incident conductive edges: {len(incident)}"
+            f"incident conductive edges: {len(incident)}\n"
+            f"warnings: {', '.join(_node_warning_reasons(node)[:3]) or 'none'}"
         )
 
     def _sync_node_role_label(self, node: NodeProperties) -> None:
@@ -1766,6 +1778,24 @@ class GraphVisualizerApp:
 
     def _handle_visual_toggle(self, *_: Any) -> None:
         self._refresh_all(reset_camera=False)
+
+    def _node_color_overrides(self) -> dict[int, str] | None:
+        if not hasattr(self, "color_mode_combo") or self.color_mode_combo.currentText() != "Warnings":
+            return None
+        return {
+            int(node_id): _warning_color_for_node(node)
+            for node_id, node in self.model.nodes.items()
+        }
+
+    def _effective_node_colors(self) -> dict[int, str]:
+        overrides = self._node_color_overrides()
+        if overrides is not None:
+            return overrides
+        return {}
+
+    def _handle_color_mode_changed(self, *_: Any) -> None:
+        if hasattr(self, "viewer"):
+            self.viewer.update_node_colors(self._effective_node_colors())
 
     def _handle_view_control_changed(self, *_: Any) -> None:
         self._sync_view_controls_to_viewer()
@@ -2062,3 +2092,48 @@ class GraphVisualizerApp:
                     Path(tmp_name).unlink(missing_ok=True)
                 except OSError:
                     pass
+
+
+def _warning_color_for_node(node: NodeProperties) -> str:
+    reasons = _node_warning_reasons(node)
+    if not reasons:
+        return "#94a3b8"
+    primary = reasons[0]
+    if primary in {"oversized_cell", "low_confidence"}:
+        return "#ef4444"
+    if primary in {"unpaired_heater", "unpaired_sensor", "invalid_heater", "invalid_sensor"}:
+        return "#f97316"
+    if primary == "unknown_material":
+        return "#a855f7"
+    return "#facc15"
+
+
+def _node_warning_reasons(node: NodeProperties) -> list[str]:
+    reasons: list[str] = []
+    warnings_text = " ".join(str(value).lower() for value in getattr(node, "warnings", []) or [])
+    if "above max_cell_size_mm" in warnings_text or "cannot satisfy max_cell_size_mm" in warnings_text:
+        reasons.append("oversized_cell")
+    if str(getattr(node, "confidence", "high") or "high").lower() != "high":
+        reasons.append("low_confidence")
+    if str(getattr(node, "material", "") or "").strip().lower() in {"", "unknown", "unknown material", "unassigned"}:
+        reasons.append("unknown_material")
+    role_reasons = role_warning_reasons(node)
+    for reason in role_reasons:
+        text = reason.lower()
+        if "heater" in text and "assigned sensor" in text:
+            reasons.append("unpaired_heater")
+        elif "sensor" in text and ("assigned heater" in text or "readout" in text or "connected body" in text):
+            reasons.append("unpaired_sensor")
+        elif "heater" in text:
+            reasons.append("invalid_heater")
+        elif "sensor" in text:
+            reasons.append("invalid_sensor")
+        else:
+            reasons.append("role_warning")
+    if getattr(node, "warnings", None) and not reasons:
+        reasons.append("node_warning")
+    deduped: list[str] = []
+    for reason in reasons:
+        if reason not in deduped:
+            deduped.append(reason)
+    return deduped

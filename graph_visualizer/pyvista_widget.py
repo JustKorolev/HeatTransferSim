@@ -365,14 +365,26 @@ class GraphPyVistaWidget:
 
     def update_node_colors(self, node_colors: dict[int, str]) -> None:
         """Update visible node actor colors without rebuilding geometry."""
+        self._last_node_colors = dict(node_colors or {})
+        if self._batched_actor is not None and self._batched_mesh is not None:
+            try:
+                if "cell_rgb" in self._batched_mesh.cell_data and "node_id" in self._batched_mesh.cell_data:
+                    node_ids = np.asarray(self._batched_mesh.cell_data["node_id"], dtype=int)
+                    colors = np.asarray(
+                        [self._display_rgb_for_node(int(node_id)) for node_id in node_ids],
+                        dtype=np.uint8,
+                    )
+                    self._update_actor_cell_rgb(self._batched_actor, self._batched_mesh, colors)
+            except Exception:
+                pass
         for node_id, actor in self._node_actors.items():
             if node_id == self.selected_node_id or node_id in self.selected_node_ids:
                 continue
-            color = node_colors.get(node_id)
-            if color is None:
-                continue
             try:
-                actor.prop.color = color
+                rgb = self._display_rgb_for_node(int(node_id))
+                prop = actor.GetProperty()
+                prop.SetColor(float(rgb[0]) / 255.0, float(rgb[1]) / 255.0, float(rgb[2]) / 255.0)
+                prop.Modified()
                 actor.GetProperty().Modified()
             except Exception:
                 pass

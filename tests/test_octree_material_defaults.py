@@ -14,6 +14,9 @@ from scipy.sparse import issparse
 import octree_graph.validation as octree_validation
 import octree_graph.matrix_builder as octree_matrix_builder
 from octree_graph.cli import (
+    BuildCheckpointer,
+    _annotate_graph_warning_tags,
+    _build_quality_report,
     build_parser,
     _build_graph_with_optional_fallback,
     _filter_ignored_components,
@@ -309,6 +312,79 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(args.voxel_workers, 1)
         self.assertIn("Disabled multiprocessing", warnings[0])
         self.assertTrue(any("Scene memory estimate" in message for message in logger.messages))
+
+    def test_build_quality_counts_warning_tags(self) -> None:
+        args = SimpleNamespace(max_cell_size_mm=4.0)
+        nodes = [
+            {
+                "node_id": 1,
+                "size_mm": [8.0, 4.0, 4.0],
+                "confidence": "low",
+                "warnings": ["Accepted occupied cell above max_cell_size_mm."],
+                "is_heater": True,
+                "heater_valid": True,
+                "assigned_sensor_id": None,
+                "component_name": "heater",
+                "material_name": "Copper",
+            },
+            {
+                "node_id": 2,
+                "size_mm": [2.0, 2.0, 2.0],
+                "confidence": "high",
+                "warnings": [],
+                "is_sensor": True,
+                "sensor_valid": False,
+                "assigned_heater_ids": [],
+                "component_name": "sensor",
+                "material_name": "Copper",
+            },
+        ]
+        edges = [{"node_i": 1, "node_j": 2}]
+
+        _annotate_graph_warning_tags(nodes, edges, args)
+        graph = {
+            "graph_nodes": nodes,
+            "graph_edges": edges,
+            "warnings": ["top-level warning"],
+            "validation_results": {"errors": [], "warnings": []},
+        }
+        quality = _build_quality_report(graph, args)
+
+        self.assertIn("oversized_cell", nodes[0]["warning_tags"])
+        self.assertIn("unpaired_heater", nodes[0]["warning_tags"])
+        self.assertIn("invalid_sensor", nodes[1]["warning_tags"])
+        self.assertEqual(quality["node_warning_tag_counts"]["oversized_cell"], 1)
+        self.assertLess(quality["quality_score"], 100)
+
+    def test_build_checkpointer_writes_phase_and_completed_graph_files(self) -> None:
+        with TemporaryDirectory() as directory:
+            args = SimpleNamespace(checkpoint_build=True, checkpoint_interval_s=1.0)
+            checkpointer = BuildCheckpointer(Path(directory), args)
+            diagnostics = OctreeDiagnostics()
+            leaves = [
+                OctreeCell(
+                    cell_id="cell_1",
+                    parent_id=None,
+                    children_ids=[],
+                    level=0,
+                    center_mm=(0.0, 0.0, 0.0),
+                    size_mm=(1.0, 1.0, 1.0),
+                    occupancy={"body": 1.0},
+                    material_fractions={"Copper": 1.0},
+                    dominant_component="body",
+                    dominant_material="Copper",
+                    confidence="high",
+                )
+            ]
+
+            checkpointer.phase("started", {"graph_name": "demo"})
+            checkpointer.octree_complete(leaves, diagnostics)
+            checkpointer.graph_complete(SimpleNamespace(nodes=[{"node_id": 1}], edges=[], warnings=[]))
+
+            folder = Path(directory) / "build_checkpoints"
+            self.assertTrue((folder / "latest.json").is_file())
+            self.assertTrue((folder / "octree_leaves_complete.json").is_file())
+            self.assertTrue((folder / "graph_complete.json").is_file())
 
     def test_graph_build_accepts_no_contact_report(self) -> None:
         materials = self.make_materials()

@@ -30,7 +30,7 @@ from .load_contact_report import load_contact_report
 from .load_gltf import GltfScene, load_gltf_scene
 from .materials import load_material_table
 from .matrix_builder import DENSE_MATRIX_NODE_LIMIT, build_matrices
-from .octree import OctreeDiagnostics, OctreeParams, build_octree
+from .octree import OctreeCell, OctreeDiagnostics, OctreeParams, build_octree
 from .validation import format_validation_report, validate_graph
 
 
@@ -54,6 +54,9 @@ def main(argv: list[str] | None = None) -> None:
 
 def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_log: "RunLogger") -> None:
     warnings: list[str] = []
+    output = Path(args.output_root) / args.graph_name
+    checkpointer = BuildCheckpointer(output, args)
+    checkpointer.phase("started", {"graph_name": args.graph_name})
     try:
         progress.phase("Loading glTF scene")
         gltf_path = _resolve_gltf_path(args)
@@ -69,6 +72,14 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     warnings.extend(scene.warnings)
     warnings.extend(contact_report.warnings)
     warnings.extend(material_warnings)
+    checkpointer.phase(
+        "inputs_loaded",
+        {
+            "objects": len(getattr(scene, "objects", [])),
+            "warnings": len(warnings),
+            "materials": len(materials),
+        },
+    )
     voxel_scene, role_components = _split_role_components(scene, args, warnings)
     params = OctreeParams(
         min_cell_size_mm=args.min_cell_size_mm,
@@ -105,15 +116,23 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         warnings,
         include_diagnostics=True,
         progress=progress,
+        checkpointer=checkpointer,
     )
     _raise_if_empty_graph(graph_result.nodes, leaves, args)
+    _annotate_graph_warning_tags(graph_result.nodes, graph_result.edges, args)
     progress.phase("Building matrices")
     matrices = build_matrices(
         graph_result.nodes,
         graph_result.edges,
         dense_node_limit=args.dense_matrix_node_limit,
     )
-    output = Path(args.output_root) / args.graph_name
+    checkpointer.phase(
+        "matrices_built",
+        {
+            "matrix_keys": sorted(str(key) for key in matrices),
+            "sparse_keys": sorted(str(key) for key, value in matrices.items() if issparse(value)),
+        },
+    )
     input_files = {
         "gltf": str(gltf_path),
         "materials": str(Path(args.materials)),
@@ -138,6 +157,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     progress.phase("Validating graph")
     errors, validation_warnings = validate_graph(graph, matrices)
     graph["validation_results"] = {"errors": errors, "warnings": validation_warnings}
+    graph["build_quality"] = _build_quality_report(graph, args)
     progress.phase("Writing outputs")
     _write_outputs(output, graph, matrices, materials, warnings)
     _atomic_write_text(
@@ -146,6 +166,15 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     )
     if errors:
         raise SystemExit(f"Graph written with validation errors; see {output / 'validation_report.txt'}")
+    checkpointer.phase(
+        "completed",
+        {
+            "nodes": len(graph_result.nodes),
+            "edges": len(graph_result.edges),
+            "quality_grade": graph.get("build_quality", {}).get("quality_grade"),
+            "quality_score": graph.get("build_quality", {}).get("quality_score"),
+        },
+    )
     progress.done()
     run_log.log(f"Completed graph with {len(graph_result.nodes)} nodes and {len(graph_result.edges)} edges.")
     print(f"Wrote octree graph with {len(graph_result.nodes)} nodes and {len(graph_result.edges)} edges to {output}")
@@ -158,6 +187,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--materials", default="materials.json")
     parser.add_argument("--graph-name", required=True)
     parser.add_argument("--output-root", default="graphs")
+    parser.add_argument(
+        "--checkpoint-build",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Write restart/debug checkpoints under build_checkpoints while generating the graph. "
+            "Enabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-interval-s",
+        type=float,
+        default=30.0,
+        help="Minimum seconds between octree progress checkpoint writes.",
+    )
     parser.add_argument(
         "--dense-matrix-node-limit",
         type=int,
@@ -462,6 +506,7 @@ def _build_graph_with_optional_fallback(
     warnings: list[str],
     include_diagnostics: bool = False,
     progress: "ConsoleProgress | None" = None,
+    checkpointer: "BuildCheckpointer | None" = None,
 ):
     if args.bbox_fallback:
         warnings.append(
@@ -471,6 +516,13 @@ def _build_graph_with_optional_fallback(
     diagnostics = OctreeDiagnostics(debug_leaves=bool(getattr(args, "octree_debug_leaves", False)))
     if progress is not None:
         progress.phase("Voxelizing octree")
+
+    def octree_progress(event: dict) -> None:
+        if progress is not None:
+            progress.octree(event)
+        if checkpointer is not None:
+            checkpointer.octree_progress(event)
+
     leaves = build_octree(
         voxel_scene,
         contact_report,
@@ -478,8 +530,10 @@ def _build_graph_with_optional_fallback(
         params,
         warnings,
         diagnostics=diagnostics,
-        progress_callback=progress.octree if progress is not None else None,
+        progress_callback=octree_progress if progress is not None or checkpointer is not None else None,
     )
+    if checkpointer is not None:
+        checkpointer.octree_complete(leaves, diagnostics)
     contact_distance_mm = _resolve_contact_detection_distance(args, params)
     if progress is not None:
         progress.phase("Building thermal graph")
@@ -498,6 +552,8 @@ def _build_graph_with_optional_fallback(
         max_heater_sensor_pair_distance_mm=float(getattr(args, "max_heater_sensor_pair_distance_mm", 25.0)),
         max_heaters_per_sensor=int(getattr(args, "max_heaters_per_sensor", DEFAULT_MAX_HEATERS_PER_SENSOR)),
     )
+    if checkpointer is not None:
+        checkpointer.graph_complete(graph_result)
     return (leaves, graph_result, diagnostics) if include_diagnostics else (leaves, graph_result)
 
 
@@ -792,6 +848,114 @@ def _role_refine_component_names(role_components: list) -> tuple[str, ...]:
     return tuple(sorted({obj.name for component in role_components for obj in component.objects}))
 
 
+class BuildCheckpointer:
+    """Write compact restart/debug checkpoints at safe build boundaries."""
+
+    def __init__(self, output: Path, args: argparse.Namespace) -> None:
+        self.enabled = bool(getattr(args, "checkpoint_build", True))
+        self.output = Path(output)
+        self.folder = self.output / "build_checkpoints"
+        self.interval_s = max(1.0, float(getattr(args, "checkpoint_interval_s", 30.0)))
+        self._last_octree_write = 0.0
+
+    def phase(self, phase: str, payload: dict[str, Any] | None = None) -> None:
+        if not self.enabled:
+            return
+        data = {
+            "phase": str(phase),
+            "timestamp_utc": _utc_timestamp(),
+            "payload": _json_safe(payload or {}),
+        }
+        _atomic_write_json(self.folder / "latest.json", data, indent=2)
+        _atomic_write_json(self.folder / f"{_safe_checkpoint_name(phase)}.json", data, indent=2)
+
+    def octree_progress(self, event: dict) -> None:
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if not bool(event.get("done")) and now - self._last_octree_write < self.interval_s:
+            return
+        self._last_octree_write = now
+        self.phase(
+            "octree_progress",
+            {
+                "cells_tested": int(event.get("cells_tested", 0)),
+                "cells_subdivided": int(event.get("cells_subdivided", 0)),
+                "leaves": int(event.get("leaves", 0)),
+                "queue": int(event.get("queue", 0)),
+                "max_leaf_cells": event.get("max_leaf_cells"),
+                "max_depth_reached": int(event.get("max_depth_reached", 0)),
+                "voxel_workers": int(event.get("voxel_workers", 1)),
+                "done": bool(event.get("done", False)),
+            },
+        )
+
+    def octree_complete(self, leaves: list[OctreeCell], diagnostics: OctreeDiagnostics) -> None:
+        if not self.enabled:
+            return
+        self.phase(
+            "octree_complete",
+            {
+                "total_leaves": len(leaves),
+                "solid_leaves": sum(1 for cell in leaves if not cell.is_empty),
+                "empty_leaves": sum(1 for cell in leaves if cell.is_empty),
+            },
+        )
+        _atomic_write_json(
+            self.folder / "octree_leaves_complete.json",
+            {
+                "phase": "octree_complete",
+                "timestamp_utc": _utc_timestamp(),
+                "diagnostics": diagnostics.to_dict(),
+                "octree_cells": [cell.__dict__ for cell in leaves],
+            },
+        )
+
+    def graph_complete(self, graph_result: Any) -> None:
+        if not self.enabled:
+            return
+        nodes = list(getattr(graph_result, "nodes", []) or [])
+        edges = list(getattr(graph_result, "edges", []) or [])
+        warnings = list(getattr(graph_result, "warnings", []) or [])
+        self.phase(
+            "graph_complete",
+            {"nodes": len(nodes), "edges": len(edges), "warnings": len(warnings)},
+        )
+        _atomic_write_json(
+            self.folder / "graph_complete.json",
+            {
+                "phase": "graph_complete",
+                "timestamp_utc": _utc_timestamp(),
+                "graph_nodes": nodes,
+                "graph_edges": edges,
+                "warnings": warnings,
+            },
+        )
+
+
+def _safe_checkpoint_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip())
+    return cleaned.strip("._") or "checkpoint"
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 class RunLogger:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -984,6 +1148,113 @@ def _graph_diagnostics(nodes: list[dict], edges: list[dict]) -> dict:
     }
 
 
+def _annotate_graph_warning_tags(nodes: list[dict], edges: list[dict], args: argparse.Namespace) -> None:
+    degree: Counter[int] = Counter()
+    for edge in edges:
+        try:
+            degree[int(edge["node_i"])] += 1
+            degree[int(edge["node_j"])] += 1
+        except (KeyError, TypeError, ValueError):
+            continue
+    for node in nodes:
+        tags = _warning_tags_for_node(node, degree, args)
+        node.setdefault("tags", {})
+        if isinstance(node["tags"], dict):
+            node["tags"]["warning_tags"] = tags
+        node["warning_tags"] = tags
+
+
+def _warning_tags_for_node(node: dict, degree: Counter[int], args: argparse.Namespace) -> list[str]:
+    tags: list[str] = []
+    node_id = int(node.get("node_id", -1))
+    size = node.get("size_mm") or []
+    try:
+        if max(float(value) for value in size) > float(args.max_cell_size_mm):
+            tags.append("oversized_cell")
+    except (TypeError, ValueError):
+        pass
+    if str(node.get("confidence", "high") or "high").lower() != "high":
+        tags.append("low_confidence")
+    if node.get("warnings"):
+        tags.append("node_warning")
+    if degree.get(node_id, 0) <= 0:
+        tags.append("isolated_node")
+    if bool(node.get("is_heater")):
+        if not bool(node.get("heater_valid", True)) or not bool(node.get("heater_attached", True)):
+            tags.append("invalid_heater")
+        if node.get("assigned_sensor_id") is None:
+            tags.append("unpaired_heater")
+    if bool(node.get("is_sensor")):
+        if not bool(node.get("sensor_valid", True)):
+            tags.append("invalid_sensor")
+        if not (node.get("assigned_heater_ids") or node.get("assigned_heater_id") is not None):
+            tags.append("unpaired_sensor")
+    deduped: list[str] = []
+    for tag in tags:
+        if tag not in deduped:
+            deduped.append(tag)
+    return deduped
+
+
+def _build_quality_report(graph: dict, args: argparse.Namespace) -> dict:
+    nodes = list(graph.get("graph_nodes", []) or [])
+    edges = list(graph.get("graph_edges", []) or [])
+    validation = graph.get("validation_results", {}) or {}
+    tag_counts: Counter[str] = Counter()
+    for node in nodes:
+        for tag in node.get("warning_tags", []) or []:
+            tag_counts[str(tag)] += 1
+    warning_count = len(graph.get("warnings", []) or [])
+    validation_errors = len(validation.get("errors", []) or [])
+    validation_warnings = len(validation.get("warnings", []) or [])
+    score = 100
+    score -= min(40, validation_errors * 20)
+    score -= min(25, tag_counts.get("oversized_cell", 0) * 2)
+    score -= min(20, tag_counts.get("low_confidence", 0))
+    score -= min(15, tag_counts.get("isolated_node", 0) * 2)
+    score -= min(15, (tag_counts.get("unpaired_heater", 0) + tag_counts.get("unpaired_sensor", 0)) * 2)
+    score -= min(10, validation_warnings)
+    score = max(0, int(score))
+    grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D"
+    largest_nodes = sorted(
+        (
+            {
+                "node_id": int(node.get("node_id", -1)),
+                "component_name": node.get("component_name", ""),
+                "material_name": node.get("material_name", ""),
+                "max_size_mm": _max_node_size_mm(node),
+                "confidence": node.get("confidence", ""),
+                "warning_tags": list(node.get("warning_tags", []) or []),
+            }
+            for node in nodes
+        ),
+        key=lambda item: float(item["max_size_mm"]),
+        reverse=True,
+    )[:20]
+    return {
+        "quality_score": score,
+        "quality_grade": grade,
+        "summary": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "warning_count": warning_count,
+            "validation_error_count": validation_errors,
+            "validation_warning_count": validation_warnings,
+            "requested_max_cell_size_mm": float(args.max_cell_size_mm),
+        },
+        "node_warning_tag_counts": dict(sorted(tag_counts.items())),
+        "largest_nodes": largest_nodes,
+        "blocking_issues": list(validation.get("errors", []) or []),
+    }
+
+
+def _max_node_size_mm(node: dict) -> float:
+    try:
+        return max(float(value) for value in (node.get("size_mm") or []))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _print_role_summary(nodes: list[dict]) -> None:
     heaters = [node for node in nodes if bool(node.get("is_heater"))]
     sensors = [node for node in nodes if bool(node.get("is_sensor"))]
@@ -1074,6 +1345,7 @@ def _write_outputs(
 ) -> None:
     _atomic_write_json(output / "graph.json", graph, indent=2)
     _atomic_write_json(output / "octree_diagnostics.json", graph.get("diagnostics", {}), indent=2)
+    _atomic_write_json(output / "build_quality.json", graph.get("build_quality", {}), indent=2)
     _write_csv(output / "nodes.csv", graph["graph_nodes"])
     _write_csv(output / "edges.csv", graph["graph_edges"])
     _atomic_write_json(output / "params.json", graph["parameters"], indent=2)
