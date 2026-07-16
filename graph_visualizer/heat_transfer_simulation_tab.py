@@ -692,8 +692,7 @@ class HeatTransferSimulationTab:
             self.pause()
             self._status("Simulation did not initialize; playback was not started.", True)
             return
-        interval = max(10, int(100.0 / max(float(self.params.playback_speed), 1.0e-9)))
-        self.timer.start(interval)
+        self.timer.start(self._playback_timer_interval_ms())
         self.step_forward()
 
     def _refresh_matrices_for_run(self) -> None:
@@ -731,14 +730,19 @@ class HeatTransferSimulationTab:
         if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
             return
-        if self.prepared.time_s >= self.params.t_final_s:
-            if self.params.loop_playback:
-                self.prepared.reset()
-            else:
-                self.pause()
-                return
         previous_temperatures = np.asarray(self.prepared.temperatures_K, dtype=float).copy()
-        self.prepared.step_forward()
+        steps_completed = 0
+        for _ in range(self._playback_steps_per_tick() if self.timer.isActive() else 1):
+            if self.prepared.time_s >= self.params.t_final_s:
+                if self.params.loop_playback:
+                    self.prepared.reset()
+                else:
+                    self.pause()
+                    break
+            self.prepared.step_forward()
+            steps_completed += 1
+        if steps_completed <= 0:
+            return
         current_temperatures = np.asarray(self.prepared.temperatures_K, dtype=float)
         if current_temperatures.size and previous_temperatures.size == current_temperatures.size:
             max_delta_K = float(np.max(np.abs(current_temperatures - previous_temperatures)))
@@ -746,10 +750,26 @@ class HeatTransferSimulationTab:
             max_delta_K = 0.0
         self._after_state_change()
         if self.timer.isActive():
-            status = f"Playing simulation: t = {self.prepared.time_s:.3g} s, max dT/step = {max_delta_K:.3e} K."
+            status = (
+                f"Playing simulation: t = {self.prepared.time_s:.3g} s, "
+                f"steps/update = {steps_completed}, max dT/update = {max_delta_K:.3e} K."
+            )
             if max_delta_K <= 1.0e-12:
                 status += " No temperature change is being produced by the current inputs/initial conditions."
             self._status(status)
+
+    def _playback_target_step_interval_ms(self) -> float:
+        return 100.0 / max(float(self.params.playback_speed), 1.0e-9)
+
+    def _playback_timer_interval_ms(self) -> int:
+        target_step_interval = self._playback_target_step_interval_ms()
+        display_interval = max(10.0, float(getattr(self.params, "display_update_interval_ms", 100.0)))
+        return max(10, int(round(max(target_step_interval, display_interval))))
+
+    def _playback_steps_per_tick(self) -> int:
+        interval = float(self._playback_timer_interval_ms())
+        target_step_interval = max(1.0e-9, self._playback_target_step_interval_ms())
+        return max(1, int(round(interval / target_step_interval)))
 
     def step_backward(self) -> None:
         if self.prepared is None:
@@ -1264,8 +1284,7 @@ class HeatTransferSimulationTab:
                 self._update_colors()
             else:
                 if "playback_speed" in changed and self.timer.isActive():
-                    interval = max(10, int(100.0 / max(float(self.params.playback_speed), 1.0e-9)))
-                    self.timer.start(interval)
+                    self.timer.start(self._playback_timer_interval_ms())
                 self._refresh_stats()
                 self._refresh_sensor_readouts()
 
@@ -1284,8 +1303,13 @@ class HeatTransferSimulationTab:
             color_min_K=float(self.inputs["color_min_K"].value()),
             color_max_K=float(self.inputs["color_max_K"].value()),
             loop_playback=bool(self.inputs["loop_playback"].isChecked()),
+            save_trajectory=bool(getattr(self.params, "save_trajectory", False)),
             gpu_simulation_enabled=bool(self.inputs["gpu_simulation_enabled"].isChecked()),
+            gpu_simulation_max_substeps=int(getattr(self.params, "gpu_simulation_max_substeps", 128)),
+            gpu_simulation_safety_factor=float(getattr(self.params, "gpu_simulation_safety_factor", 0.2)),
             simulation_history_limit=int(self.inputs["simulation_history_limit"].value()),
+            browser_simulation_size_warning=int(getattr(self.params, "browser_simulation_size_warning", 1000)),
+            display_update_interval_ms=float(getattr(self.params, "display_update_interval_ms", 100.0)),
             mimo_controller_enabled=self._mimo_controller_should_run(),
             mimo_hold_threshold_K=float(self.inputs["mimo_hold_threshold_K"].value()),
             mimo_coarse_threshold_K=float(self.inputs["mimo_coarse_threshold_K"].value()),

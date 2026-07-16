@@ -1869,6 +1869,71 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(color_updates, [True])
         self.assertEqual(tab.prepared.params.color_min_K, 10.0)
 
+    def test_simulation_playback_batches_physics_steps_per_visual_update(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Timer:
+            def isActive(self) -> bool:
+                return True
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.time_s = 0.0
+                self.values = np.array([300.0], dtype=float)
+                self.calls = 0
+
+            @property
+            def temperatures_K(self) -> np.ndarray:
+                return self.values
+
+            def step_forward(self) -> None:
+                self.calls += 1
+                self.time_s += 1.0
+                self.values = self.values + 1.0
+
+            def reset(self) -> None:
+                self.time_s = 0.0
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.prepared = Prepared()
+        tab.params = SimulationParameters(
+            dt_s=1.0,
+            t_final_s=100.0,
+            playback_speed=10.0,
+            display_update_interval_ms=100.0,
+        )
+        tab.timer = Timer()
+        tab._simulation_reinitialize_pending = False
+        tab._after_state_change = lambda: None
+        statuses = []
+        tab._status = lambda message, error=False: statuses.append(message)
+        tab.pause = lambda: None
+
+        self.assertEqual(tab._playback_timer_interval_ms(), 100)
+        self.assertEqual(tab._playback_steps_per_tick(), 10)
+
+        tab.step_forward()
+
+        self.assertEqual(tab.prepared.calls, 10)
+        self.assertAlmostEqual(tab.prepared.time_s, 10.0)
+        self.assertAlmostEqual(float(tab.prepared.temperatures_K[0]), 310.0)
+        self.assertTrue(any("steps/update = 10" in message for message in statuses))
+
+    def test_slow_playback_keeps_single_step_interval(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.params = SimulationParameters(playback_speed=0.25, display_update_interval_ms=100.0)
+
+        self.assertEqual(tab._playback_timer_interval_ms(), 400)
+        self.assertEqual(tab._playback_steps_per_tick(), 1)
+
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(
             {
@@ -2542,6 +2607,39 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertEqual(fake_stepper.calls, 1)
         self.assertAlmostEqual(float(prepared.temperatures_K[0]), 308.0)
+
+    def test_gpu_sparse_stepper_keeps_temperature_state_on_device(self) -> None:
+        from graph_visualizer.simulation_model import GpuSparseStepper
+
+        class FakeCp:
+            def __init__(self) -> None:
+                self.asarray_calls = 0
+
+            def asarray(self, value):
+                self.asarray_calls += 1
+                return np.asarray(value, dtype=float)
+
+            def asnumpy(self, value):
+                return np.asarray(value, dtype=float)
+
+        cp = FakeCp()
+        stepper = GpuSparseStepper(
+            cp=cp,
+            A_gpu=np.zeros((2, 2), dtype=float),
+            inv_C_gpu=np.ones(2, dtype=float),
+            base_b_gpu=np.zeros(2, dtype=float),
+            radiation_coeff_gpu=np.zeros(2, dtype=float),
+            use_ambient_radiation=False,
+            ambient_K=293.15,
+            dt_s=1.0,
+            substeps=1,
+        )
+
+        stepper.step(np.array([300.0, 301.0]), np.zeros(2))
+        stepper.step(np.array([999.0, 999.0]), np.zeros(2))
+
+        self.assertEqual(cp.asarray_calls, 3)
+        np.testing.assert_allclose(stepper.step(np.array([999.0, 999.0]), np.zeros(2)), np.array([300.0, 301.0]))
 
     def test_simulation_history_seek_preserves_computed_future(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="history_cursor"))

@@ -39,10 +39,16 @@ class GpuSparseStepper:
     ambient_K: float
     dt_s: float
     substeps: int
+    temperatures_gpu: Any | None = None
+
+    def set_state(self, temperatures_K: np.ndarray) -> None:
+        self.temperatures_gpu = self.cp.asarray(np.asarray(temperatures_K, dtype=float).reshape(-1))
 
     def step(self, temperatures_K: np.ndarray, heater_power: np.ndarray) -> np.ndarray:
         cp = self.cp
-        temperatures = cp.asarray(np.asarray(temperatures_K, dtype=float).reshape(-1))
+        if self.temperatures_gpu is None:
+            self.set_state(temperatures_K)
+        temperatures = self.temperatures_gpu
         powers = cp.asarray(np.asarray(heater_power, dtype=float).reshape(-1))
         h = float(self.dt_s) / max(1, int(self.substeps))
         source = self.base_b_gpu + self.inv_C_gpu * powers
@@ -53,7 +59,8 @@ class GpuSparseStepper:
                     float(self.ambient_K) ** 4 - temperatures**4
                 )
             temperatures = temperatures + h * rhs
-        return cp.asnumpy(temperatures)
+        self.temperatures_gpu = temperatures
+        return cp.asnumpy(self.temperatures_gpu)
 
 
 @dataclass
@@ -147,6 +154,7 @@ class PreparedSimulation:
             )
         ]
         self.history_index = 0
+        self._sync_gpu_state()
 
     def set_uniform_temperature(self, temperature_K: float) -> None:
         uniform = np.full(len(self.node_ids), float(temperature_K), dtype=float)
@@ -176,6 +184,7 @@ class PreparedSimulation:
             )
         ]
         self.history_index = 0
+        self._sync_gpu_state()
 
     def reset_controller_integrators(self) -> None:
         self.controller_integrators = {}
@@ -256,6 +265,7 @@ class PreparedSimulation:
         self.controller_warnings = list(snapshot.controller_warnings)
         self.controller_last_power_by_heater = dict(snapshot.controller_last_power_by_heater)
         self.controller_allocator_diagnostics = dict(snapshot.controller_allocator_diagnostics)
+        self._sync_gpu_state()
 
     def step_forward(self) -> SimulationState:
         if self.history_index < len(self.history) - 1:
@@ -339,7 +349,12 @@ class PreparedSimulation:
         self.controller_error_history = dict(state.controller_error_history)
         self.controller_last_power_by_heater = dict(state.controller_last_power_by_heater)
         self.controller_mode = state.controller_mode
+        self._sync_gpu_state()
         return state
+
+    def _sync_gpu_state(self) -> None:
+        if self.gpu_stepper is not None and hasattr(self.gpu_stepper, "set_state"):
+            self.gpu_stepper.set_state(self.temperatures_K)
 
     def _step_dynamic_heater_inputs(self) -> None:
         if self.model is None or self.inv_C is None or self.A is None or self.base_b is None:
