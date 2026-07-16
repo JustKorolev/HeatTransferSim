@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import time
 from typing import Any, Callable
 
 import numpy as np
@@ -108,6 +109,8 @@ class HeatTransferSimulationTab:
         self.widget = self.QtWidgets.QWidget(parent)
         self.timer = self.QtCore.QTimer(self.widget)
         self.timer.timeout.connect(self.step_forward)
+        self.fast_forward_timer = self.QtCore.QTimer(self.widget)
+        self.fast_forward_timer.timeout.connect(self._fast_forward_tick)
         self.sys_id_timer = self.QtCore.QTimer(self.widget)
         self.sys_id_timer.timeout.connect(self._step_sys_id)
         self.sys_id_state: dict[str, Any] | None = None
@@ -300,12 +303,15 @@ class HeatTransferSimulationTab:
             ("Reset", self.reset),
             ("Step +", self.step_forward),
             ("Step -", self.step_backward),
+            ("Run To End", self.run_to_end),
         ):
             button = self.QtWidgets.QPushButton(text)
             if text == "Play":
                 button.setToolTip("Start live playback using the precomputed transition matrix.")
             elif text == "Reset":
                 button.setToolTip("Return the simulation to each cell's initial_temperature_K.")
+            elif text == "Run To End":
+                button.setToolTip("Advance to t_final_s as fast as possible, refreshing the view between compute bursts.")
             button.clicked.connect(callback)
             row.addWidget(button)
         form.addRow(row)
@@ -709,9 +715,12 @@ class HeatTransferSimulationTab:
 
     def pause(self) -> None:
         self.timer.stop()
+        if hasattr(self, "fast_forward_timer"):
+            self.fast_forward_timer.stop()
 
     def shutdown(self) -> None:
         self.timer.stop()
+        self.fast_forward_timer.stop()
         try:
             self.viewer.close()
         except Exception:
@@ -779,6 +788,55 @@ class HeatTransferSimulationTab:
             return
         self.prepared.step_backward()
         self._after_state_change()
+
+    def run_to_end(self) -> None:
+        self.timer.stop()
+        if self.prepared is None or self._simulation_reinitialize_pending:
+            self.initialize_simulation()
+        if self.prepared is None:
+            self._status("Simulation did not initialize; fast run was not started.", True)
+            return
+        if self.prepared.time_s >= self.params.t_final_s:
+            self._status("Simulation is already at t_final_s.")
+            return
+        self.fast_forward_timer.start(0)
+        self._fast_forward_tick()
+
+    def _fast_forward_tick(self) -> None:
+        if self.prepared is None:
+            self.fast_forward_timer.stop()
+            return
+        start = time.perf_counter()
+        budget_s = self._fast_forward_budget_s()
+        previous_temperatures = np.asarray(self.prepared.temperatures_K, dtype=float).copy()
+        steps_completed = 0
+        while self.prepared.time_s < self.params.t_final_s:
+            self.prepared.step_forward()
+            steps_completed += 1
+            if time.perf_counter() - start >= budget_s:
+                break
+        if steps_completed <= 0:
+            self.fast_forward_timer.stop()
+            return
+        current_temperatures = np.asarray(self.prepared.temperatures_K, dtype=float)
+        max_delta_K = (
+            float(np.max(np.abs(current_temperatures - previous_temperatures)))
+            if current_temperatures.size and previous_temperatures.size == current_temperatures.size
+            else 0.0
+        )
+        self._after_state_change()
+        done = self.prepared.time_s >= self.params.t_final_s
+        if done:
+            self.fast_forward_timer.stop()
+        self._status(
+            f"{'Completed' if done else 'Fast-running'} simulation: "
+            f"t = {self.prepared.time_s:.3g} s, steps/burst = {steps_completed}, "
+            f"max dT/burst = {max_delta_K:.3e} K."
+        )
+
+    def _fast_forward_budget_s(self) -> float:
+        display_interval = max(10.0, float(getattr(self.params, "display_update_interval_ms", 100.0)))
+        return max(0.01, min(0.25, display_interval / 1000.0))
 
     def save_current_trajectory(self) -> None:
         if self.prepared is None or self.folder is None:

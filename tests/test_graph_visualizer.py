@@ -1934,6 +1934,72 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(tab._playback_timer_interval_ms(), 400)
         self.assertEqual(tab._playback_steps_per_tick(), 1)
 
+    def test_simulation_run_to_end_advances_in_fast_burst(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Timer:
+            def __init__(self) -> None:
+                self.started = False
+                self.stopped = False
+
+            def start(self, interval: int) -> None:
+                self.started = True
+                self.interval = int(interval)
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.time_s = 0.0
+                self.values = np.array([300.0], dtype=float)
+                self.calls = 0
+
+            @property
+            def temperatures_K(self) -> np.ndarray:
+                return self.values
+
+            def step_forward(self) -> None:
+                self.calls += 1
+                self.time_s += 1.0
+                self.values = self.values + 0.5
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.timer = Timer()
+        tab.fast_forward_timer = Timer()
+        tab.prepared = Prepared()
+        tab.params = SimulationParameters(t_final_s=5.0, display_update_interval_ms=100.0)
+        tab._simulation_reinitialize_pending = False
+        tab.initialize_simulation = lambda: (_ for _ in ()).throw(AssertionError("initialized unexpectedly"))
+        after_calls = []
+        tab._after_state_change = lambda: after_calls.append(True)
+        statuses = []
+        tab._status = lambda message, error=False: statuses.append(message)
+
+        tab.run_to_end()
+
+        self.assertTrue(tab.fast_forward_timer.started)
+        self.assertTrue(tab.fast_forward_timer.stopped)
+        self.assertEqual(tab.prepared.calls, 5)
+        self.assertEqual(after_calls, [True])
+        self.assertTrue(any("Completed simulation" in message for message in statuses))
+
+    def test_fast_forward_budget_uses_display_interval_bounds(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.params = SimulationParameters(display_update_interval_ms=1.0)
+        self.assertAlmostEqual(tab._fast_forward_budget_s(), 0.01)
+
+        tab.params = SimulationParameters(display_update_interval_ms=1000.0)
+        self.assertAlmostEqual(tab._fast_forward_budget_s(), 0.25)
+
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(
             {
