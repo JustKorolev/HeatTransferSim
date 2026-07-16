@@ -43,12 +43,15 @@ class SimulationParameters:
     colormap: str = "thermal_jet"
     loop_playback: bool = False
     save_trajectory: bool = False
-    gpu_simulation_enabled: bool = False
+    gpu_simulation_enabled: bool = True
     gpu_simulation_max_substeps: int = 128
     gpu_simulation_safety_factor: float = 0.2
+    fast_sparse_simulation_enabled: bool = True
+    fast_sparse_simulation_max_substeps: int = 128
+    fast_sparse_simulation_safety_factor: float = 0.2
     simulation_history_limit: int = 256
-    live_step_profiling_enabled: bool = False
-    live_step_profile_threshold_ms: float = 200.0
+    live_step_profiling_enabled: bool = True
+    live_step_profile_threshold_ms: float = 1000.0
     browser_simulation_size_warning: int = 1000
     display_update_interval_ms: float = 100.0
 

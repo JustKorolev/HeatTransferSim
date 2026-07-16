@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+import threading
 import time
 from typing import Any, Callable
 
@@ -42,7 +44,6 @@ _REINITIALIZE_PARAMETER_FIELDS = {
     "use_ambient_radiation",
     "T_env_K",
     "input_mode",
-    "gpu_simulation_enabled",
 }
 _DISPLAY_PARAMETER_FIELDS = {
     "autoscale_temperature",
@@ -111,6 +112,12 @@ class HeatTransferSimulationTab:
         self.timer.timeout.connect(self.step_forward)
         self.fast_forward_timer = self.QtCore.QTimer(self.widget)
         self.fast_forward_timer.timeout.connect(self._fast_forward_tick)
+        self.simulation_worker_timer = self.QtCore.QTimer(self.widget)
+        self.simulation_worker_timer.timeout.connect(self._poll_simulation_worker)
+        self.simulation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="HeatTransferSimulation")
+        self.simulation_future: Future[dict[str, Any]] | None = None
+        self.simulation_cancel_event: threading.Event | None = None
+        self._simulation_worker_mode: str | None = None
         self.sys_id_timer = self.QtCore.QTimer(self.widget)
         self.sys_id_timer.timeout.connect(self._step_sys_id)
         self.sys_id_state: dict[str, Any] | None = None
@@ -229,28 +236,6 @@ class HeatTransferSimulationTab:
             "Loop playback", self.params.loop_playback, self._handle_parameter_change
         )
         run_form.addRow(self.inputs["loop_playback"])
-        self.inputs["gpu_simulation_enabled"] = self._checkbox(
-            "GPU sparse stepping", self.params.gpu_simulation_enabled, self._handle_parameter_change
-        )
-        self.inputs["gpu_simulation_enabled"].setToolTip(
-            "Use CuPy for large sparse temperature stepping when available. Falls back to CPU if unavailable."
-        )
-        run_form.addRow(self.inputs["gpu_simulation_enabled"])
-        self.inputs["live_step_profiling_enabled"] = self._checkbox(
-            "Profile live steps", self.params.live_step_profiling_enabled, self._handle_parameter_change
-        )
-        self.inputs["live_step_profiling_enabled"].setToolTip(
-            "Print per-step timing breakdowns for slow live simulation updates."
-        )
-        run_form.addRow(self.inputs["live_step_profiling_enabled"])
-        self._add_double_parameter(
-            run_form,
-            "live_step_profile_threshold_ms",
-            "profile threshold ms",
-            0.0,
-            1.0e9,
-            50.0,
-        )
         self.input_mode = self.QtWidgets.QComboBox()
         self.input_mode.addItems(["zero", "heater_inputs"])
         self.input_mode.setCurrentText(self.params.input_mode)
@@ -641,6 +626,10 @@ class HeatTransferSimulationTab:
         return int(node_id) in self.enabled_sensor_node_ids
 
     def use_current_graph(self) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; load the current graph after the current compute step finishes.")
+            return
         self.model = self.current_model()
         self.folder = self.current_folder()
         self.matrices = build_matrices(self.model)
@@ -655,6 +644,10 @@ class HeatTransferSimulationTab:
         self._status("Using current editor graph.")
 
     def load_selected_graph(self) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; load the graph after the current compute step finishes.")
+            return
         name = self.graph_combo.currentText()
         if not name:
             self._status("No graph selected.", True)
@@ -685,6 +678,10 @@ class HeatTransferSimulationTab:
             self._status(str(exc), True)
 
     def initialize_simulation(self) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; initialize after the current compute step finishes.")
+            return
         if self.model is None:
             self.use_current_graph()
         if self.model is None:
@@ -732,16 +729,28 @@ class HeatTransferSimulationTab:
         self.timer.stop()
         if hasattr(self, "fast_forward_timer"):
             self.fast_forward_timer.stop()
+        self._cancel_simulation_worker()
 
     def shutdown(self) -> None:
         self.timer.stop()
         self.fast_forward_timer.stop()
+        self._cancel_simulation_worker()
+        executor = getattr(self, "simulation_executor", None)
+        if executor is not None:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=False)
         try:
             self.viewer.close()
         except Exception:
             pass
 
     def reset(self) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; reset after the current compute step finishes.")
+            return
         if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
             return
@@ -754,49 +763,10 @@ class HeatTransferSimulationTab:
         if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
             return
-        profile: dict[str, float] | None = {} if self._live_step_profiling_enabled() else None
-        total_start = time.perf_counter() if profile is not None else 0.0
-        previous_temperatures = np.asarray(self.prepared.temperatures_K, dtype=float).copy()
-        steps_completed = 0
-        model_profile: dict[str, float] = {}
-        step_loop_start = time.perf_counter() if profile is not None else 0.0
-        for _ in range(self._playback_steps_per_tick() if self.timer.isActive() else 1):
-            if self.prepared.time_s >= self.params.t_final_s:
-                if self.params.loop_playback:
-                    self.prepared.reset()
-                else:
-                    self.pause()
-                    break
-            self.prepared.step_forward()
-            if profile is not None:
-                _accumulate_profile_ms(model_profile, getattr(self.prepared, "last_step_profile_ms", None))
-            steps_completed += 1
-        if steps_completed <= 0:
+        if self._simulation_worker_active():
             return
-        if profile is not None:
-            profile["step_loop_ms"] = (time.perf_counter() - step_loop_start) * 1000.0
-            profile.update(model_profile)
-        current_temperatures = np.asarray(self.prepared.temperatures_K, dtype=float)
-        if current_temperatures.size and previous_temperatures.size == current_temperatures.size:
-            max_delta_K = float(np.max(np.abs(current_temperatures - previous_temperatures)))
-        else:
-            max_delta_K = 0.0
-        if profile is None:
-            self._after_state_change()
-        else:
-            self._after_state_change(profile)
-        if profile is not None:
-            profile["total_ms"] = (time.perf_counter() - total_start) * 1000.0
-        if self.timer.isActive():
-            status = (
-                f"Playing simulation: t = {self.prepared.time_s:.3g} s, "
-                f"steps/update = {steps_completed}, max dT/update = {max_delta_K:.3e} K."
-            )
-            if max_delta_K <= 1.0e-12:
-                status += " No temperature change is being produced by the current inputs/initial conditions."
-            self._status(status)
-        if profile is not None:
-            self._report_live_step_profile(profile, steps_completed, max_delta_K)
+        mode = "play" if self.timer.isActive() else "step"
+        self._start_simulation_worker(mode=mode, steps=self._playback_steps_per_tick() if mode == "play" else 1)
 
     def _playback_target_step_interval_ms(self) -> float:
         return 100.0 / max(float(self.params.playback_speed), 1.0e-9)
@@ -812,6 +782,10 @@ class HeatTransferSimulationTab:
         return max(1, int(round(interval / target_step_interval)))
 
     def step_backward(self) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; step backward after the current compute step finishes.")
+            return
         if self.prepared is None:
             return
         if self._simulation_reinitialize_pending:
@@ -830,8 +804,9 @@ class HeatTransferSimulationTab:
         if self.prepared.time_s >= self.params.t_final_s:
             self._status("Simulation is already at t_final_s.")
             return
-        self.fast_forward_timer.start(0)
-        self._fast_forward_tick()
+        if self._simulation_worker_active():
+            return
+        self._start_simulation_worker(mode="run_to_end", steps=self._run_to_end_steps_per_batch())
 
     def _fast_forward_tick(self) -> None:
         if self.prepared is None:
@@ -869,8 +844,141 @@ class HeatTransferSimulationTab:
         display_interval = max(10.0, float(getattr(self.params, "display_update_interval_ms", 100.0)))
         return max(0.01, min(0.25, display_interval / 1000.0))
 
+    def _run_to_end_steps_per_batch(self) -> int:
+        return max(5, min(100, self._playback_steps_per_tick()))
+
+    def _simulation_worker_active(self) -> bool:
+        future = getattr(self, "simulation_future", None)
+        return future is not None and not future.done()
+
+    def _cancel_simulation_worker(self) -> None:
+        event = getattr(self, "simulation_cancel_event", None)
+        if event is not None:
+            event.set()
+        future = getattr(self, "simulation_future", None)
+        if future is not None and not future.done():
+            future.cancel()
+
+    def _start_simulation_worker(self, *, mode: str, steps: int) -> None:
+        if self.prepared is None or self._simulation_worker_active():
+            return
+        event = threading.Event()
+        self.simulation_cancel_event = event
+        self._simulation_worker_mode = str(mode)
+        worker_args = (
+            self.prepared,
+            self.params,
+            max(1, int(steps)),
+            bool(mode == "run_to_end"),
+            bool(self.params.loop_playback and mode == "play"),
+            event,
+            bool(self._live_step_profiling_enabled()),
+        )
+        executor = getattr(self, "simulation_executor", None)
+        if executor is None:
+            result = _run_simulation_worker_batch(*worker_args)
+            self._apply_simulation_worker_result(result)
+            return
+        self.simulation_future = executor.submit(_run_simulation_worker_batch, *worker_args)
+        self.simulation_worker_timer.start(20)
+        if mode == "step":
+            self._status("Simulation step running in background.")
+        elif mode == "run_to_end":
+            self._status("Simulation running to end in background.")
+
+    def _poll_simulation_worker(self) -> None:
+        future = getattr(self, "simulation_future", None)
+        if future is None:
+            self.simulation_worker_timer.stop()
+            return
+        if not future.done():
+            return
+        self.simulation_worker_timer.stop()
+        self.simulation_future = None
+        self.simulation_cancel_event = None
+        if future.cancelled():
+            self._simulation_worker_mode = None
+            self._status("Simulation worker stopped.")
+            return
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.timer.stop()
+            self.fast_forward_timer.stop()
+            self._simulation_worker_mode = None
+            self._status(f"Simulation worker failed: {exc}", True)
+            log_exception("simulation worker failed", exc)
+            return
+        self._apply_simulation_worker_result(result)
+
+    def _apply_simulation_worker_result(self, result: dict[str, Any]) -> None:
+        if self.prepared is None:
+            self._simulation_worker_mode = None
+            return
+        steps_completed = int(result.get("steps_completed", 0))
+        mode = str(result.get("mode") or self._simulation_worker_mode or "")
+        self._simulation_worker_mode = None
+        if bool(result.get("cancelled", False)):
+            self._status("Simulation worker stopped.")
+            return
+        if steps_completed <= 0:
+            if bool(result.get("done", False)):
+                self.timer.stop()
+                self.fast_forward_timer.stop()
+            return
+        profile = result.get("profile")
+        profile = profile if isinstance(profile, dict) else None
+        ui_start = time.perf_counter()
+        self._after_worker_state_change(profile)
+        if profile is not None:
+            profile["total_ms"] = float(profile.get("step_loop_ms", 0.0)) + (time.perf_counter() - ui_start) * 1000.0
+        max_delta_K = float(result.get("max_delta_K", 0.0))
+        done = bool(result.get("done", False))
+        if mode == "run_to_end":
+            if done:
+                self._status(
+                    f"Completed simulation: t = {self.prepared.time_s:.3g} s, "
+                    f"steps/batch = {steps_completed}, max dT/batch = {max_delta_K:.3e} K."
+                )
+            else:
+                self._status(
+                    f"Fast-running simulation: t = {self.prepared.time_s:.3g} s, "
+                    f"steps/batch = {steps_completed}, max dT/batch = {max_delta_K:.3e} K."
+                )
+                self._start_simulation_worker(mode="run_to_end", steps=self._run_to_end_steps_per_batch())
+        elif self.timer.isActive():
+            status = (
+                f"Playing simulation: t = {self.prepared.time_s:.3g} s, "
+                f"steps/update = {steps_completed}, max dT/update = {max_delta_K:.3e} K."
+            )
+            if max_delta_K <= 1.0e-12:
+                status += " No temperature change is being produced by the current inputs/initial conditions."
+            self._status(status)
+            if done and not self.params.loop_playback:
+                self.timer.stop()
+        else:
+            self._status(
+                f"Simulation step complete: t = {self.prepared.time_s:.3g} s, "
+                f"max dT = {max_delta_K:.3e} K."
+            )
+        if profile is not None:
+            self._report_live_step_profile(profile, steps_completed, max_delta_K)
+
     def _live_step_profiling_enabled(self) -> bool:
-        return bool(getattr(self.params, "live_step_profiling_enabled", False))
+        return True
+
+    def _after_worker_state_change(self, profile: dict[str, float] | None) -> None:
+        if profile is None:
+            self._after_state_change()
+            return
+        try:
+            self._after_state_change(profile)
+        except TypeError:
+            callback = getattr(self, "_after_state_change", None)
+            if getattr(callback, "__name__", "") == "<lambda>":
+                self._after_state_change()
+                return
+            raise
 
     def _live_step_profile_threshold_ms(self) -> float:
         return max(0.0, float(getattr(self.params, "live_step_profile_threshold_ms", 200.0)))
@@ -898,6 +1006,10 @@ class HeatTransferSimulationTab:
         self._status(_format_live_step_profile(profile, steps_completed, max_delta_K))
 
     def save_current_trajectory(self) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; save the trajectory after the current compute step finishes.")
+            return
         if self.prepared is None or self.folder is None:
             self._status("Initialize a graph simulation before saving.", True)
             return
@@ -907,6 +1019,10 @@ class HeatTransferSimulationTab:
         self._status(f"Saved trajectory to {target}.")
 
     def apply_component_initial_temperature(self) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; apply component temperature after the current compute step finishes.")
+            return
         if self.model is None:
             self.use_current_graph()
         if self.model is None:
@@ -932,6 +1048,10 @@ class HeatTransferSimulationTab:
         folder: Path | None,
         reinitialize: bool = False,
     ) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; sync the editor graph after the current compute step finishes.")
+            return
         if self.sys_id_state is not None:
             self.cancel_sys_id("Graph changed while sys ID was running; run cancelled.")
         if self.model is model:
@@ -954,6 +1074,8 @@ class HeatTransferSimulationTab:
 
     def refresh_live_readouts_from_editor(self, model: ThermalGraphModel, folder: Path | None) -> None:
         """Refresh cheap editor-driven readouts without rebuilding matrices or restarting playback."""
+        if self._simulation_worker_active():
+            return
         if self.sys_id_state is not None:
             self.cancel_sys_id("Graph changed while sys ID was running; run cancelled.")
         if self.model is model:
@@ -976,6 +1098,10 @@ class HeatTransferSimulationTab:
             self._status(f"Could not update active G matrix: {exc}", True)
 
     def reset_controller_integrators(self) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; reset MIMO integrators after the current compute step finishes.")
+            return
         if self.prepared is None:
             self._status("Initialize the simulation before resetting MIMO integrators.", True)
             return
@@ -985,6 +1111,10 @@ class HeatTransferSimulationTab:
         self._status("MIMO controller integrators reset.")
 
     def run_simulation_sys_id_for_G_ctrl(self) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; run G_ctrl sys ID after the current compute step finishes.")
+            return
         if self.sys_id_state is not None:
             self._status("G_ctrl sys ID is already running.", True)
             return
@@ -1390,6 +1520,10 @@ class HeatTransferSimulationTab:
         self._after_state_change()
 
     def _handle_parameter_change(self, *_: Any) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; parameter changes will apply after the current compute step finishes.")
+            return
         if self.sys_id_state is not None:
             self.cancel_sys_id("Simulation parameter changed while sys ID was running; run cancelled.")
             return
@@ -1431,12 +1565,15 @@ class HeatTransferSimulationTab:
             color_max_K=float(self.inputs["color_max_K"].value()),
             loop_playback=bool(self.inputs["loop_playback"].isChecked()),
             save_trajectory=bool(getattr(self.params, "save_trajectory", False)),
-            gpu_simulation_enabled=bool(self.inputs["gpu_simulation_enabled"].isChecked()),
+            gpu_simulation_enabled=True,
             gpu_simulation_max_substeps=int(getattr(self.params, "gpu_simulation_max_substeps", 128)),
             gpu_simulation_safety_factor=float(getattr(self.params, "gpu_simulation_safety_factor", 0.2)),
+            fast_sparse_simulation_enabled=True,
+            fast_sparse_simulation_max_substeps=int(getattr(self.params, "fast_sparse_simulation_max_substeps", 128)),
+            fast_sparse_simulation_safety_factor=float(getattr(self.params, "fast_sparse_simulation_safety_factor", 0.2)),
             simulation_history_limit=int(self.inputs["simulation_history_limit"].value()),
-            live_step_profiling_enabled=bool(self.inputs["live_step_profiling_enabled"].isChecked()),
-            live_step_profile_threshold_ms=float(self.inputs["live_step_profile_threshold_ms"].value()),
+            live_step_profiling_enabled=True,
+            live_step_profile_threshold_ms=float(getattr(self.params, "live_step_profile_threshold_ms", 1000.0)),
             browser_simulation_size_warning=int(getattr(self.params, "browser_simulation_size_warning", 1000)),
             display_update_interval_ms=float(getattr(self.params, "display_update_interval_ms", 100.0)),
             mimo_controller_enabled=self._mimo_controller_should_run(),
@@ -1955,6 +2092,7 @@ def _format_live_step_profile(profile: dict[str, float], steps_completed: int, m
         "controller_heater_power_ms": "heater controller",
         "zero_power_vector_ms": "zero power vector",
         "gpu_step_ms": "GPU step",
+        "cpu_fast_sparse_step_ms": "fast sparse step",
         "state_vector_update_ms": "state vector",
         "radiation_source_ms": "radiation source",
         "source_vector_build_ms": "source vector",
@@ -1992,6 +2130,52 @@ def _format_live_step_profile(profile: dict[str, float], steps_completed: int, m
         f"Live step profile: total={total_ms:.1f} ms, steps={int(steps_completed)}, "
         f"max dT={float(max_delta_K):.3e} K, largest={bottleneck}.{detail}"
     )
+
+
+def _run_simulation_worker_batch(
+    prepared: PreparedSimulation,
+    params: SimulationParameters,
+    steps_requested: int,
+    run_to_end: bool,
+    loop_playback: bool,
+    cancel_event: threading.Event,
+    profile_enabled: bool,
+) -> dict[str, Any]:
+    profile: dict[str, float] | None = {} if profile_enabled else None
+    previous_temperatures = np.asarray(prepared.temperatures_K, dtype=float).copy()
+    steps_completed = 0
+    model_profile: dict[str, float] = {}
+    step_loop_start = time.perf_counter()
+    while not cancel_event.is_set():
+        if prepared.time_s >= params.t_final_s:
+            if loop_playback and not run_to_end:
+                prepared.reset()
+            else:
+                break
+        prepared.step_forward()
+        if profile is not None:
+            _accumulate_profile_ms(model_profile, getattr(prepared, "last_step_profile_ms", None))
+        steps_completed += 1
+        if not run_to_end and steps_completed >= max(1, int(steps_requested)):
+            break
+        if run_to_end and steps_completed >= max(1, int(steps_requested)):
+            break
+    if profile is not None:
+        profile["step_loop_ms"] = (time.perf_counter() - step_loop_start) * 1000.0
+        profile.update(model_profile)
+    current_temperatures = np.asarray(prepared.temperatures_K, dtype=float)
+    max_delta_K = (
+        float(np.max(np.abs(current_temperatures - previous_temperatures)))
+        if current_temperatures.size and previous_temperatures.size == current_temperatures.size
+        else 0.0
+    )
+    return {
+        "steps_completed": int(steps_completed),
+        "max_delta_K": float(max_delta_K),
+        "done": bool(prepared.time_s >= params.t_final_s and not loop_playback),
+        "cancelled": bool(cancel_event.is_set()),
+        "profile": profile,
+    }
 
 
 def _node_uses_mimo_controller(

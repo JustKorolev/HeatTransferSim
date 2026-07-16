@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1924,6 +1925,88 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(float(tab.prepared.temperatures_K[0]), 310.0)
         self.assertTrue(any("steps/update = 10" in message for message in statuses))
 
+    def test_simulation_step_forward_submits_background_worker_when_executor_exists(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Timer:
+            def __init__(self, active: bool = False) -> None:
+                self.active = active
+                self.started = False
+                self.stopped = False
+
+            def isActive(self) -> bool:
+                return self.active
+
+            def start(self, *_: object) -> None:
+                self.started = True
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        class Executor:
+            def __init__(self) -> None:
+                self.future: Future = Future()
+                self.submitted: tuple[object, ...] | None = None
+
+            def submit(self, fn, *args):
+                self.submitted = (fn, *args)
+                return self.future
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.node_ids = np.array([1], dtype=int)
+                self.time_s = 0.0
+                self.values = np.array([300.0], dtype=float)
+                self.calls = 0
+                self.last_step_profile_ms: dict[str, float] = {}
+
+            @property
+            def temperatures_K(self) -> np.ndarray:
+                return self.values
+
+            def step_forward(self) -> None:
+                self.calls += 1
+                self.time_s += 1.0
+                self.values = self.values + 2.0
+                self.last_step_profile_ms = {"model_solve_ms": 1.0}
+
+        executor = Executor()
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.prepared = Prepared()
+        tab.params = SimulationParameters(t_final_s=10.0, live_step_profile_threshold_ms=1.0e9)
+        tab.timer = Timer(active=False)
+        tab.fast_forward_timer = Timer(active=False)
+        tab.simulation_worker_timer = Timer(active=False)
+        tab.simulation_executor = executor
+        tab.simulation_future = None
+        tab.simulation_cancel_event = None
+        tab._simulation_worker_mode = None
+        tab._simulation_reinitialize_pending = False
+        statuses = []
+        tab._status = lambda message, error=False: statuses.append(message)
+        after_calls = []
+        tab._after_state_change = lambda profile=None: after_calls.append(profile)
+        tab._report_live_step_profile = lambda profile, steps, max_delta: None
+
+        tab.step_forward()
+
+        self.assertIs(tab.simulation_future, executor.future)
+        self.assertTrue(tab.simulation_worker_timer.started)
+        self.assertEqual(tab.prepared.calls, 0)
+        self.assertTrue(any("background" in message for message in statuses))
+
+        fn, *args = executor.submitted
+        executor.future.set_result(fn(*args))
+        tab._poll_simulation_worker()
+
+        self.assertIsNone(tab.simulation_future)
+        self.assertEqual(tab.prepared.calls, 1)
+        self.assertAlmostEqual(float(tab.prepared.temperatures_K[0]), 302.0)
+        self.assertEqual(len(after_calls), 1)
+
     def test_slow_playback_keeps_single_step_interval(self) -> None:
         try:
             from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
@@ -2061,6 +2144,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
         params = SimulationParameters(
             live_step_profiling_enabled=True,
             live_step_profile_threshold_ms=12.5,
+            fast_sparse_simulation_enabled=True,
+            fast_sparse_simulation_max_substeps=64,
+            fast_sparse_simulation_safety_factor=0.5,
         )
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "simulation_parameters.json"
@@ -2070,6 +2156,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertTrue(loaded.live_step_profiling_enabled)
         self.assertAlmostEqual(loaded.live_step_profile_threshold_ms, 12.5)
+        self.assertTrue(loaded.fast_sparse_simulation_enabled)
+        self.assertEqual(loaded.fast_sparse_simulation_max_substeps, 64)
+        self.assertAlmostEqual(loaded.fast_sparse_simulation_safety_factor, 0.5)
         self.assertEqual(extras["custom"], "kept")
 
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
@@ -2655,7 +2744,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(node.heater_control.pid.lambda_order, 1.0)
         self.assertAlmostEqual(node.heater_control.pid.mu_order, 1.0)
 
-    def test_large_simulation_uses_incremental_expm_multiply_stepper(self) -> None:
+    def test_large_simulation_uses_fast_sparse_cpu_stepper_by_default(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="large_sparse_stepper"))
         node_count = 513
         for node_id in range(node_count):
@@ -2681,8 +2770,72 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertIsNone(prepared.Phi_aug)
         self.assertLess(float(prepared.temperatures_K[0]), float(before[0]))
-        self.assertIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
+        self.assertIn("cpu_fast_sparse_step_ms", prepared.last_step_profile_ms)
+        self.assertNotIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
         self.assertIn("model_solve_ms", prepared.last_step_profile_ms)
+
+    def test_fast_sparse_cpu_stepper_bypasses_expm_multiply_automatically(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="fast_sparse_cpu"))
+        node_count = 513
+        for node_id in range(node_count):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+            node.C_J_K = 10.0
+            node.initial_temperature_K = 300.0
+            model.add_node(node)
+        diagonal = np.ones(node_count, dtype=float)
+        matrices = {
+            "node_ids": np.arange(node_count, dtype=int),
+            "C": np.full(node_count, 10.0),
+            "L": csr_matrix((diagonal, (np.arange(node_count), np.arange(node_count))), shape=(node_count, node_count)),
+            "G_rad": np.zeros(node_count),
+        }
+
+        prepared = prepare_simulation(
+            model,
+            matrices,
+            SimulationParameters(
+                dt_s=1.0,
+                use_ambient_radiation=False,
+                fast_sparse_simulation_safety_factor=1.0,
+            ),
+        )
+        prepared.step_forward()
+
+        self.assertEqual(prepared.fast_sparse_substeps, 1)
+        self.assertIn("cpu_fast_sparse_step_ms", prepared.last_step_profile_ms)
+        self.assertNotIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
+
+    def test_fast_sparse_cpu_stepper_falls_back_when_substep_limit_is_too_low(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="fast_sparse_cpu_fallback"))
+        node_count = 513
+        for node_id in range(node_count):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+            node.C_J_K = 10.0
+            node.initial_temperature_K = 300.0
+            model.add_node(node)
+        diagonal = np.ones(node_count, dtype=float)
+        matrices = {
+            "node_ids": np.arange(node_count, dtype=int),
+            "C": np.full(node_count, 10.0),
+            "L": csr_matrix((diagonal, (np.arange(node_count), np.arange(node_count))), shape=(node_count, node_count)),
+            "G_rad": np.zeros(node_count),
+        }
+
+        prepared = prepare_simulation(
+            model,
+            matrices,
+            SimulationParameters(
+                dt_s=100.0,
+                use_ambient_radiation=False,
+                fast_sparse_simulation_enabled=True,
+                fast_sparse_simulation_max_substeps=1,
+            ),
+        )
+        prepared.step_forward()
+
+        self.assertIsNone(prepared.fast_sparse_substeps)
+        self.assertIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
+        self.assertTrue(any("Fast sparse CPU stepping" in warning for warning in prepared.warnings))
 
     def test_gpu_simulation_request_falls_back_when_cupy_unavailable(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="gpu_unavailable"))
@@ -2711,7 +2864,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
             )
 
         self.assertIsNone(prepared.gpu_stepper)
-        self.assertTrue(any("CuPy is unavailable" in warning for warning in prepared.warnings))
+        self.assertTrue(any("GPU sparse stepping unavailable" in warning for warning in prepared.warnings))
 
     def test_gpu_stepper_is_used_when_available(self) -> None:
         class FakeGpuStepper:
