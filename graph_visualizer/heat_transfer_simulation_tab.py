@@ -1956,15 +1956,25 @@ class HeatTransferSimulationTab:
     def _mimo_controller_should_run(self) -> bool:
         if self.input_mode.currentText() != "heater_inputs" or self.model is None:
             return False
-        is_sensor = any(
-            _node_uses_mimo_controller(node, sensor_enabled=self._sensor_enabled_for_simulation(int(node_id)))
-            for node_id, node in self.model.nodes.items()
-        )
-        is_heater = any(
-            _node_uses_mimo_controller(node, heater_enabled=self._heater_enabled_for_simulation(int(node_id)))
-            for node_id, node in self.model.nodes.items()
-        )
-        return is_sensor and is_heater
+        for heater_id in tuple(self.enabled_heater_node_ids or self._known_heater_node_ids):
+            heater = self.model.nodes.get(int(heater_id))
+            if heater is None or not _node_uses_mimo_controller(
+                heater,
+                heater_enabled=self._heater_enabled_for_simulation(int(heater_id)),
+            ):
+                continue
+            sensor_id = getattr(heater, "assigned_sensor_id", None)
+            if sensor_id is None and bool(getattr(heater, "is_sensor", False)):
+                sensor_id = int(heater_id)
+            if sensor_id is None:
+                continue
+            sensor = self.model.nodes.get(int(sensor_id))
+            if sensor is not None and _node_uses_mimo_controller(
+                sensor,
+                sensor_enabled=self._sensor_enabled_for_simulation(int(sensor_id)),
+            ):
+                return True
+        return False
 
     def _load_params_from_folder(self) -> None:
         path = self._params_path()

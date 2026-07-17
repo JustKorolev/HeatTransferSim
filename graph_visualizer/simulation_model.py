@@ -606,7 +606,7 @@ class PreparedSimulation:
         if self.model is None or self.inv_C is None or self.A is None or self.base_b is None:
             return
         mode_start = time.perf_counter()
-        use_mimo = _mimo_controller_is_active(self.model, self.node_ids, self.params)
+        use_mimo = _mimo_controller_is_active(self.model, self.heater_node_ids, self.params)
         _record_profile_ms(profile, "controller_mode_check_ms", mode_start)
         if use_mimo:
             controller_start = time.perf_counter()
@@ -847,7 +847,7 @@ class PreparedSimulation:
             node_index_by_id=self.node_index_by_id,
             heater_node_ids=self.heater_node_ids,
             cryocooler_node_ids=self.cryocooler_node_ids,
-        ) if not _mimo_controller_is_active(self.model, self.node_ids, self.params) else self._mimo_controller_power_vector(update_state=False)
+        ) if not _mimo_controller_is_active(self.model, self.heater_node_ids, self.params) else self._mimo_controller_power_vector(update_state=False)
         node_index = self.node_index_by_id or {int(node_id): row for row, node_id in enumerate(self.node_ids)}
         role_node_ids = sorted(set(self.heater_node_ids).union(self.cryocooler_node_ids))
         result: dict[int, float] = {}
@@ -885,7 +885,7 @@ class PreparedSimulation:
     def heater_actuator_power_by_node(self, *, disable_mimo_controller: bool = False) -> dict[int, float]:
         if self.model is None:
             return {}
-        if _mimo_controller_is_active(self.model, self.node_ids, self.params) and not disable_mimo_controller:
+        if _mimo_controller_is_active(self.model, self.heater_node_ids, self.params) and not disable_mimo_controller:
             self._mimo_controller_power_vector(update_state=False)
             diagnostics = self.controller_allocator_diagnostics or {}
             heater_ids = [int(value) for value in diagnostics.get("heater_ids", []) or []]
@@ -1427,7 +1427,7 @@ def prepare_simulation(
     pairing_warnings.extend(refresh_sensor_connected_nodes(model))
     warnings.extend(pairing_warnings)
     has_cryocooler = any(model.nodes[int(node_id)].has_cryocooler for node_id in node_ids)
-    has_mimo_controller = _mimo_controller_is_active(model, node_ids, params)
+    has_mimo_controller = _mimo_controller_is_active(model, heater_node_ids, params)
     has_nonlinear_radiation = bool(params.use_ambient_radiation and np.any(radiation_coeff > 0.0))
     dynamic_heater_inputs = (
         params.input_mode == "heater_inputs"
@@ -2194,25 +2194,23 @@ def _node_uses_mimo_controller(
 
 def _mimo_controller_is_active(
     model: ThermalGraphModel | None,
-    node_ids: np.ndarray,
+    heater_node_ids: Sequence[int] | np.ndarray,
     params: SimulationParameters,
 ) -> bool:
     if model is None or str(params.input_mode) != "heater_inputs":
         return False
-    enabled_heater_ids = _enabled_node_id_set(params.enabled_heater_node_ids)
     enabled_sensor_ids = _enabled_node_id_set(params.enabled_sensor_node_ids)
-    is_sensor = any(
-        _node_is_mimo_sensor(model.nodes[int(node_id)])
-        and _node_id_enabled(enabled_sensor_ids, int(node_id))
-        for node_id in node_ids
-    )
-    is_heater = any(
-        bool(getattr(model.nodes[int(node_id)], "is_heater", False))
-        and _node_id_enabled(enabled_heater_ids, int(node_id))
-        and _heater_has_active_mimo_sensor(model, int(node_id), enabled_sensor_ids)
-        for node_id in node_ids
-    )
-    return is_sensor and is_heater
+    enabled_heater_ids = _enabled_node_id_set(params.enabled_heater_node_ids)
+    for node_id in heater_node_ids:
+        heater = model.nodes.get(int(node_id))
+        if (
+            heater is not None
+            and bool(getattr(heater, "is_heater", False))
+            and _node_id_enabled(enabled_heater_ids, int(node_id))
+            and _heater_has_active_mimo_sensor(model, int(node_id), enabled_sensor_ids)
+        ):
+            return True
+    return False
 
 
 def _heater_has_active_mimo_sensor(

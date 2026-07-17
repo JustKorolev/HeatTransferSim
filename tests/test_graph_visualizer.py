@@ -1304,6 +1304,33 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(prepared.heater_power_by_node(), {1: 0.0})
         self.assertEqual(prepared.controller_last_power_by_heater, {})
 
+    def test_mimo_active_check_uses_heater_role_ids(self) -> None:
+        from graph_visualizer.simulation_model import _mimo_controller_is_active
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_role_id_check"))
+        sensor = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        sensor.is_sensor = True
+        sensor.sensor_control_mode = "mimo"
+        sensor.controller_setpoint_K = 310.0
+        sensor.sensor_connected_node_ids = [1]
+        sensor.assigned_heater_ids = [2]
+        heater = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        heater.is_heater = True
+        heater.heater_valid = True
+        heater.heater_control.mode = "mimo"
+        heater.assigned_sensor_id = 1
+        heater.power_deposition_node_ids = [2]
+        model.add_node(sensor)
+        model.add_node(heater)
+
+        active = _mimo_controller_is_active(
+            model,
+            np.array([2], dtype=int),
+            SimulationParameters(input_mode="heater_inputs"),
+        )
+
+        self.assertTrue(active)
+
     def test_mimo_controller_integrator_updates_per_sensor(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_integrator"))
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
