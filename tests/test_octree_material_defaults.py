@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+import io
 import json
 import unittest
 from unittest.mock import patch
@@ -57,6 +58,7 @@ from octree_graph.octree import (
     OctreeDiagnostics,
     OctreeParams,
     _adjacent_balance_refinement_targets,
+    _crowded_component_refine_margin_mm,
     _mesh_contains_point,
     _mesh_triangles,
     _needs_gap_preservation_refinement,
@@ -2402,6 +2404,44 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(len(coarse), 1)
         self.assertGreater(len(crowded), len(coarse))
         self.assertLess(min(max(cell.size_mm) for cell in crowded), max(coarse[0].size_mm))
+
+    def test_crowded_component_refinement_margin_can_be_cell_relative(self) -> None:
+        params = OctreeParams(
+            crowded_component_refine_count=2,
+            crowded_component_refine_neighbor_cells=0.5,
+        )
+
+        margin = _crowded_component_refine_margin_mm(np.array([8.0, 4.0, 2.0], dtype=float), params)
+
+        self.assertEqual(margin, 4.0)
+
+    def test_crowded_component_absolute_margin_overrides_cell_relative_margin(self) -> None:
+        params = OctreeParams(
+            crowded_component_refine_count=2,
+            crowded_component_refine_distance_mm=3.0,
+            crowded_component_refine_neighbor_cells=0.5,
+        )
+
+        margin = _crowded_component_refine_margin_mm(np.array([20.0, 20.0, 20.0], dtype=float), params)
+
+        self.assertEqual(margin, 3.0)
+
+    def test_crowded_component_cli_rejects_absolute_and_cell_relative_margins_together(self) -> None:
+        parser = build_parser()
+
+        with patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "--mesh-dir",
+                    "mesh",
+                    "--graph-name",
+                    "graph",
+                    "--crowded-component-refine-distance-mm",
+                    "5",
+                    "--crowded-component-refine-neighbor-cells",
+                    "1",
+                ]
+            )
 
     def test_occupied_above_max_cell_size_dominates_discretionary_refinement_priority(self) -> None:
         params = OctreeParams(max_cell_size_mm=8.0)

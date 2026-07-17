@@ -83,6 +83,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         },
     )
     voxel_scene, role_components = _split_role_components(scene, args, warnings)
+    crowded_refine_distance_mm, crowded_refine_neighbor_cells = _resolve_crowded_component_refine_margins(args)
     params = OctreeParams(
         min_cell_size_mm=args.min_cell_size_mm,
         max_cell_size_mm=args.max_cell_size_mm,
@@ -99,7 +100,8 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         voxel_workers=args.voxel_workers,
         voxel_batch_size=args.voxel_batch_size,
         crowded_component_refine_count=args.crowded_component_refine_count,
-        crowded_component_refine_distance_mm=args.crowded_component_refine_distance_mm,
+        crowded_component_refine_distance_mm=crowded_refine_distance_mm,
+        crowded_component_refine_neighbor_cells=crowded_refine_neighbor_cells,
         adaptive_refine_priority=args.adaptive_refine_priority,
         multi_surface_refine_count=args.multi_surface_refine_count,
         surface_complexity_refine_threshold=args.surface_complexity_refine_threshold,
@@ -294,12 +296,24 @@ def build_parser() -> argparse.ArgumentParser:
             "CAD component bounds. Useful for preserving empty gaps in dense small-part regions."
         ),
     )
-    parser.add_argument(
+    crowded_refine_distance = parser.add_mutually_exclusive_group()
+    crowded_refine_distance.add_argument(
         "--crowded-component-refine-distance-mm",
         type=float,
-        default=0.0,
+        default=None,
         help=(
-            "Padding around each octree cell when counting nearby components for crowded-region refinement."
+            "Absolute padding around each octree cell when counting nearby components for crowded-region "
+            "refinement. Mutually exclusive with --crowded-component-refine-neighbor-cells."
+        ),
+    )
+    crowded_refine_distance.add_argument(
+        "--crowded-component-refine-neighbor-cells",
+        type=float,
+        default=None,
+        help=(
+            "Cell-relative padding for crowded-region refinement. A value of 1 counts components within "
+            "one current-cell side length around the cell. Mutually exclusive with "
+            "--crowded-component-refine-distance-mm."
         ),
     )
     parser.add_argument(
@@ -911,9 +925,22 @@ def _format_bytes(value: int | None) -> str:
         number /= 1024.0
 
 
+def _resolve_crowded_component_refine_margins(args: argparse.Namespace) -> tuple[float, float]:
+    absolute = getattr(args, "crowded_component_refine_distance_mm", None)
+    relative = getattr(args, "crowded_component_refine_neighbor_cells", None)
+    if absolute is not None:
+        return max(0.0, float(absolute)), 0.0
+    if relative is None:
+        relative = 1.0
+    return 0.0, max(0.0, float(relative))
+
+
 def _parameters_payload(args: argparse.Namespace) -> dict:
     payload = dict(vars(args))
     payload.pop("role_components", None)
+    distance_mm, neighbor_cells = _resolve_crowded_component_refine_margins(args)
+    payload["crowded_component_refine_distance_mm"] = distance_mm
+    payload["crowded_component_refine_neighbor_cells"] = neighbor_cells
     return payload
 
 

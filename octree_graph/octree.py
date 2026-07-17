@@ -54,6 +54,7 @@ class OctreeParams:
     voxel_batch_size: int = 64
     crowded_component_refine_count: int = 0
     crowded_component_refine_distance_mm: float = 0.0
+    crowded_component_refine_neighbor_cells: float = 1.0
     adaptive_refine_priority: bool = True
     multi_surface_refine_count: int = 2
     surface_complexity_refine_threshold: int = 64
@@ -990,7 +991,7 @@ def _classify_cell(
     near_min = cell_min - near_margin
     near_max = cell_max + near_margin
     candidate_objects = _objects_intersecting_bounds(objects, near_min, near_max)
-    crowded_margin = max(0.0, float(params.crowded_component_refine_distance_mm))
+    crowded_margin = _crowded_component_refine_margin_mm(size_mm, params)
     crowded_objects = (
         _objects_intersecting_bounds(objects, cell_min - crowded_margin, cell_max + crowded_margin)
         if int(params.crowded_component_refine_count) > 0
@@ -1135,6 +1136,14 @@ def _normalize_fraction_map(values: dict[str, float]) -> dict[str, float]:
     if total <= 1.0:
         return clean
     return {name: value / total for name, value in clean.items()}
+
+
+def _crowded_component_refine_margin_mm(size_mm: np.ndarray, params: OctreeParams) -> float:
+    absolute_margin = max(0.0, float(getattr(params, "crowded_component_refine_distance_mm", 0.0) or 0.0))
+    if absolute_margin > 0.0:
+        return absolute_margin
+    neighbor_cells = max(0.0, float(getattr(params, "crowded_component_refine_neighbor_cells", 0.0) or 0.0))
+    return neighbor_cells * float(max(size_mm))
 
 
 def _needs_crowded_component_refinement(
