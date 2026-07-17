@@ -1979,6 +1979,59 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(sync_calls, [True])
         self.assertEqual(tab.viewer.render_count, 1)
 
+    def test_simulation_readout_groups_heaters_under_sensors(self) -> None:
+        import sys
+        import types
+
+        heat_tab_module_name = "graph_visualizer.heat_transfer_simulation_tab"
+        pyvista_module_name = "graph_visualizer.pyvista_widget"
+        qtpy_module_name = "qtpy"
+        previous_heat_tab = sys.modules.pop(heat_tab_module_name, None)
+        previous_pyvista = sys.modules.get(pyvista_module_name)
+        previous_qtpy = sys.modules.get(qtpy_module_name)
+        pyvista_stub = types.ModuleType(pyvista_module_name)
+        pyvista_stub.GraphPyVistaWidget = object
+        sys.modules[pyvista_module_name] = pyvista_stub
+        qtpy_stub = types.ModuleType(qtpy_module_name)
+        qtpy_stub.QtGui = types.SimpleNamespace()
+        sys.modules[qtpy_module_name] = qtpy_stub
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        finally:
+            sys.modules.pop(heat_tab_module_name, None)
+            if previous_heat_tab is not None:
+                sys.modules[heat_tab_module_name] = previous_heat_tab
+            if previous_pyvista is not None:
+                sys.modules[pyvista_module_name] = previous_pyvista
+            else:
+                sys.modules.pop(pyvista_module_name, None)
+            if previous_qtpy is not None:
+                sys.modules[qtpy_module_name] = previous_qtpy
+            else:
+                sys.modules.pop(qtpy_module_name, None)
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="readout_groups"))
+        sensor = NodeProperties.with_material(10, (0, 0, 0), material="copper")
+        sensor.is_sensor = True
+        sensor.assigned_heater_ids = [20]
+        heater = NodeProperties.with_material(20, (1, 0, 0), material="copper")
+        heater.is_heater = True
+        heater.assigned_sensor_id = 10
+        second_heater = NodeProperties.with_material(30, (2, 0, 0), material="copper")
+        second_heater.is_heater = True
+        second_heater.assigned_sensor_id = 10
+        model.add_node(sensor)
+        model.add_node(heater)
+        model.add_node(second_heater)
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.model = model
+
+        sensors = tab._heating_sensor_nodes()
+        heater_ids = tab._associated_heater_ids_for_sensor(10)
+
+        self.assertEqual([node.node_id for node in sensors], [10])
+        self.assertEqual(heater_ids, [20, 30])
+
     def test_simulation_parameter_change_defers_reinitialize_without_redraw(self) -> None:
         try:
             from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab

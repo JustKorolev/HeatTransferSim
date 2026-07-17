@@ -180,18 +180,28 @@ class HeatTransferSimulationTab:
         self.controller_status_label = self.QtWidgets.QLabel("")
         self.controller_status_label.setWordWrap(True)
         form.addRow(self.controller_status_label)
-        self.sensor_readout_box = self.QtWidgets.QGroupBox("Sensor / Heater / Cooler Readouts")
+        self.sensor_readout_box = self.QtWidgets.QGroupBox("Thermal I/O Readouts")
         sensor_layout = self.QtWidgets.QVBoxLayout(self.sensor_readout_box)
-        self.sensor_readout_table = self.QtWidgets.QTableWidget(0, 6)
-        self.sensor_readout_table.setHorizontalHeaderLabels(
-            ["cell/node", "temperature", "net power", "cryocooler power", "desired temperature", "error"]
-        )
-        self.sensor_readout_table.verticalHeader().setVisible(False)
-        self.sensor_readout_table.setEditTriggers(self.QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.sensor_readout_table.setSelectionBehavior(self.QtWidgets.QAbstractItemView.SelectRows)
-        self.sensor_readout_table.setMaximumHeight(170)
-        self.sensor_readout_table.itemSelectionChanged.connect(self._handle_sensor_table_selection)
-        sensor_layout.addWidget(self.sensor_readout_table)
+        self.cooling_readout_box = self.QtWidgets.QGroupBox("Cooling")
+        cooling_layout = self.QtWidgets.QVBoxLayout(self.cooling_readout_box)
+        self.cooling_readout_table = self.QtWidgets.QTableWidget(0, 3)
+        self.cooling_readout_table.setHorizontalHeaderLabels(["cell/node", "temperature", "cryocooler power"])
+        self.cooling_readout_table.verticalHeader().setVisible(False)
+        self.cooling_readout_table.setEditTriggers(self.QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.cooling_readout_table.setSelectionBehavior(self.QtWidgets.QAbstractItemView.SelectRows)
+        self.cooling_readout_table.setMaximumHeight(130)
+        self.cooling_readout_table.itemSelectionChanged.connect(self._handle_cooling_table_selection)
+        cooling_layout.addWidget(self.cooling_readout_table)
+        sensor_layout.addWidget(self.cooling_readout_box)
+        self.heating_readout_box = self.QtWidgets.QGroupBox("Heating")
+        heating_layout = self.QtWidgets.QVBoxLayout(self.heating_readout_box)
+        self.heating_readout_tree = self.QtWidgets.QTreeWidget()
+        self.heating_readout_tree.setHeaderLabels(["role", "cell/node", "measured temperature", "desired temperature", "error", "heater power"])
+        self.heating_readout_tree.setSelectionMode(self.QtWidgets.QAbstractItemView.SingleSelection)
+        self.heating_readout_tree.setMaximumHeight(220)
+        self.heating_readout_tree.itemSelectionChanged.connect(self._handle_heating_tree_selection)
+        heating_layout.addWidget(self.heating_readout_tree)
+        sensor_layout.addWidget(self.heating_readout_box)
         self.sensor_readout_box.setVisible(False)
         form.addRow(self.sensor_readout_box)
         self.legend_label = self.QtWidgets.QLabel(self._legend_text())
@@ -2164,15 +2174,18 @@ class HeatTransferSimulationTab:
     def _refresh_sensor_readouts(self) -> None:
         if self.model is None:
             self.sensor_readout_box.setVisible(False)
-            self.sensor_readout_table.setRowCount(0)
+            self.cooling_readout_table.setRowCount(0)
+            self.heating_readout_tree.clear()
             return
-        readout_nodes = [
+        cooling_nodes = [
             node
             for node in self.model.nodes.values()
-            if node.is_sensor or node.is_heater or node.has_cryocooler
+            if node.has_cryocooler
         ]
-        self.sensor_readout_box.setVisible(bool(readout_nodes))
-        self.sensor_readout_table.setRowCount(len(readout_nodes))
+        heating_sensors = self._heating_sensor_nodes()
+        self.sensor_readout_box.setVisible(bool(cooling_nodes or heating_sensors))
+        self.cooling_readout_box.setVisible(bool(cooling_nodes))
+        self.heating_readout_box.setVisible(bool(heating_sensors))
         temperatures = self._temperature_values()
         sys_id_heater_powers = self._sys_id_readout_heater_powers()
         heater_powers = (
@@ -2188,66 +2201,153 @@ class HeatTransferSimulationTab:
             if self.prepared is not None
             else {}
         )
-        for row, node in enumerate(sorted(readout_nodes, key=lambda item: item.node_id)):
-            if node.is_sensor and self.prepared is not None:
-                temperature = sensor_readout_temperature_K(
+        self._refresh_cooling_readouts(cooling_nodes, temperatures, cryocooler_powers)
+        self._refresh_heating_readouts(heating_sensors, temperatures, heater_powers, node_index)
+
+    def _refresh_cooling_readouts(
+        self,
+        cooling_nodes: list[Any],
+        temperatures: dict[int, float],
+        cryocooler_powers: dict[int, float],
+    ) -> None:
+        self.cooling_readout_table.setRowCount(len(cooling_nodes))
+        for row, node in enumerate(sorted(cooling_nodes, key=lambda item: item.node_id)):
+            temperature = float(temperatures.get(int(node.node_id), node.initial_temperature_K))
+            id_item = self.QtWidgets.QTableWidgetItem(str(node.node_id))
+            id_item.setData(self.QtCore.Qt.UserRole, int(node.node_id))
+            self.cooling_readout_table.setItem(row, 0, id_item)
+            self.cooling_readout_table.setItem(row, 1, self.QtWidgets.QTableWidgetItem(_format_temperature(temperature)))
+            self.cooling_readout_table.setItem(
+                row,
+                2,
+                self.QtWidgets.QTableWidgetItem(_format_power(float(cryocooler_powers.get(int(node.node_id), 0.0)))),
+            )
+        self.cooling_readout_table.resizeColumnsToContents()
+
+    def _refresh_heating_readouts(
+        self,
+        heating_sensors: list[Any],
+        temperatures: dict[int, float],
+        heater_powers: dict[int, float],
+        node_index: dict[int, int],
+    ) -> None:
+        self.heating_readout_tree.clear()
+        for sensor in sorted(heating_sensors, key=lambda item: item.node_id):
+            sensor_id = int(sensor.node_id)
+            measured = self._sensor_measured_temperature(sensor_id, temperatures, node_index)
+            desired = float(getattr(sensor, "controller_setpoint_K", 293.15))
+            sensor_item = self.QtWidgets.QTreeWidgetItem(
+                [
+                    "sensor",
+                    str(sensor_id),
+                    _format_temperature(measured),
+                    _format_temperature(desired),
+                    _format_error(desired - measured),
+                    "",
+                ]
+            )
+            sensor_item.setData(1, self.QtCore.Qt.UserRole, sensor_id)
+            font = sensor_item.font(0)
+            font.setBold(True)
+            for column in range(6):
+                sensor_item.setFont(column, font)
+            self.heating_readout_tree.addTopLevelItem(sensor_item)
+            for heater_id in self._associated_heater_ids_for_sensor(sensor_id):
+                heater = self.model.nodes.get(int(heater_id)) if self.model is not None else None
+                if heater is None or not bool(getattr(heater, "is_heater", False)):
+                    continue
+                heater_temperature = float(temperatures.get(int(heater_id), heater.initial_temperature_K))
+                power = float(heater_powers.get(int(heater_id), 0.0))
+                heater_item = self.QtWidgets.QTreeWidgetItem(
+                    [
+                        "heater",
+                        str(heater_id),
+                        _format_temperature(heater_temperature),
+                        "",
+                        "",
+                        _format_power(power),
+                    ]
+                )
+                heater_item.setData(1, self.QtCore.Qt.UserRole, int(heater_id))
+                sensor_item.addChild(heater_item)
+            sensor_item.setExpanded(True)
+        for column in range(6):
+            self.heating_readout_tree.resizeColumnToContents(column)
+
+    def _heating_sensor_nodes(self) -> list[Any]:
+        if self.model is None:
+            return []
+        sensor_ids = {
+            int(node_id)
+            for node_id, node in self.model.nodes.items()
+            if bool(getattr(node, "is_sensor", False))
+            and (
+                bool(getattr(node, "assigned_heater_ids", []) or [])
+                or getattr(node, "assigned_heater_id", None) is not None
+            )
+        }
+        for node in self.model.nodes.values():
+            if bool(getattr(node, "is_heater", False)) and getattr(node, "assigned_sensor_id", None) is not None:
+                sensor_ids.add(int(getattr(node, "assigned_sensor_id")))
+        return [
+            self.model.nodes[sensor_id]
+            for sensor_id in sorted(sensor_ids)
+            if sensor_id in self.model.nodes and bool(getattr(self.model.nodes[sensor_id], "is_sensor", False))
+        ]
+
+    def _associated_heater_ids_for_sensor(self, sensor_id: int) -> list[int]:
+        if self.model is None or int(sensor_id) not in self.model.nodes:
+            return []
+        sensor = self.model.nodes[int(sensor_id)]
+        heater_ids = {
+            int(value)
+            for value in getattr(sensor, "assigned_heater_ids", []) or []
+            if int(value) in self.model.nodes
+        }
+        if getattr(sensor, "assigned_heater_id", None) is not None:
+            heater_ids.add(int(getattr(sensor, "assigned_heater_id")))
+        for heater in self.model.nodes.values():
+            if bool(getattr(heater, "is_heater", False)) and getattr(heater, "assigned_sensor_id", None) == int(sensor_id):
+                heater_ids.add(int(heater.node_id))
+        return sorted(heater_ids)
+
+    def _sensor_measured_temperature(
+        self,
+        sensor_id: int,
+        temperatures: dict[int, float],
+        node_index: dict[int, int],
+    ) -> float:
+        if self.prepared is not None and self.model is not None:
+            return float(
+                sensor_readout_temperature_K(
                     self.model,
                     node_index,
                     self.prepared.temperatures_K,
-                    int(node.node_id),
+                    int(sensor_id),
                 )
-            else:
-                temperature = float(temperatures.get(node.node_id, node.initial_temperature_K))
-            id_item = self.QtWidgets.QTableWidgetItem(str(node.node_id))
-            temp_item = self.QtWidgets.QTableWidgetItem(
-                "invalid"
-                if not np.isfinite(float(temperature))
-                else f"{temperature:.3f} K / {temperature - 273.15:.3f} C"
             )
-            power_text = (
-                f"{float(heater_powers.get(node.node_id, 0.0)):.3f} W"
-                if node.is_heater or node.has_cryocooler
-                else ""
-            )
-            power_item = self.QtWidgets.QTableWidgetItem(power_text)
-            cooler_text = (
-                f"{float(cryocooler_powers.get(node.node_id, 0.0)):.3f} W"
-                if node.has_cryocooler
-                else ""
-            )
-            cooler_item = self.QtWidgets.QTableWidgetItem(cooler_text)
-            desired_text = ""
-            error_text = ""
-            if (
-                self._mimo_controller_should_run()
-                and _node_uses_mimo_controller(
-                    node,
-                    sensor_enabled=self._sensor_enabled_for_simulation(int(node.node_id)),
-                )
-            ):
-                desired_temperature = float(getattr(node, "controller_setpoint_K", 293.15))
-                error = desired_temperature - temperature
-                desired_text = f"{desired_temperature:.3f} K / {desired_temperature - 273.15:.3f} C"
-                error_text = "invalid" if not np.isfinite(float(error)) else f"{error:.3f} K"
-            desired_item = self.QtWidgets.QTableWidgetItem(desired_text)
-            error_item = self.QtWidgets.QTableWidgetItem(error_text)
-            id_item.setData(self.QtCore.Qt.UserRole, int(node.node_id))
-            self.sensor_readout_table.setItem(row, 0, id_item)
-            self.sensor_readout_table.setItem(row, 1, temp_item)
-            self.sensor_readout_table.setItem(row, 2, power_item)
-            self.sensor_readout_table.setItem(row, 3, cooler_item)
-            self.sensor_readout_table.setItem(row, 4, desired_item)
-            self.sensor_readout_table.setItem(row, 5, error_item)
-        self.sensor_readout_table.resizeColumnsToContents()
+        if self.model is None or int(sensor_id) not in self.model.nodes:
+            return float("nan")
+        node = self.model.nodes[int(sensor_id)]
+        return float(temperatures.get(int(sensor_id), node.initial_temperature_K))
 
-    def _handle_sensor_table_selection(self) -> None:
-        row = self.sensor_readout_table.currentRow()
+    def _handle_cooling_table_selection(self) -> None:
+        row = self.cooling_readout_table.currentRow()
         if row < 0:
             return
-        id_item = self.sensor_readout_table.item(row, 0)
+        id_item = self.cooling_readout_table.item(row, 0)
         if id_item is None:
             return
         node_id = id_item.data(self.QtCore.Qt.UserRole)
+        if node_id is None:
+            return
+        self._handle_pick(int(node_id))
+
+    def _handle_heating_tree_selection(self) -> None:
+        item = self.heating_readout_tree.currentItem()
+        if item is None:
+            return
+        node_id = item.data(1, self.QtCore.Qt.UserRole)
         if node_id is None:
             return
         self._handle_pick(int(node_id))
@@ -2501,6 +2601,36 @@ def _format_live_step_profile(profile: dict[str, float], steps_completed: int, m
         f"Live step profile: total={total_ms:.1f} ms, steps={int(steps_completed)}, "
         f"max dT={float(max_delta_K):.3e} K, largest={bottleneck}.{detail}"
     )
+
+
+def _format_temperature(value_K: float) -> str:
+    try:
+        value = float(value_K)
+    except (TypeError, ValueError):
+        return "invalid"
+    if not np.isfinite(value):
+        return "invalid"
+    return f"{value:.3f} K / {value - 273.15:.3f} C"
+
+
+def _format_error(value_K: float) -> str:
+    try:
+        value = float(value_K)
+    except (TypeError, ValueError):
+        return "invalid"
+    if not np.isfinite(value):
+        return "invalid"
+    return f"{value:.3f} K"
+
+
+def _format_power(value_W: float) -> str:
+    try:
+        value = float(value_W)
+    except (TypeError, ValueError):
+        return "invalid"
+    if not np.isfinite(value):
+        return "invalid"
+    return f"{value:.3f} W"
 
 
 def _run_stepper_diagnostic_worker(
