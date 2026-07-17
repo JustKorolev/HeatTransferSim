@@ -2182,7 +2182,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertIn("max_leaf_cells was exceeded to enforce max_cell_size_mm", " ".join(warnings))
         self.assertTrue(diagnostics.max_leaf_cells_reached)
 
-    def test_occupied_cells_warn_when_max_size_blocked_by_depth(self) -> None:
+    def test_occupied_cells_exceed_depth_to_honor_max_cell_size(self) -> None:
         materials = self.make_materials()
         triangle = np.array(
             [
@@ -2224,10 +2224,56 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         solid = [leaf for leaf in leaves if not leaf.is_empty]
         self.assertTrue(solid)
-        self.assertGreater(max(max(leaf.size_mm) for leaf in solid), 2.0)
-        self.assertEqual(solid[0].confidence, "low")
-        self.assertIn("Some occupied cells exceed max_cell_size_mm", " ".join(warnings))
-        self.assertIn("Cannot satisfy max_cell_size_mm", " ".join(solid[0].warnings))
+        self.assertLessEqual(max(max(leaf.size_mm) for leaf in solid), 2.0)
+        self.assertGreater(diagnostics.max_depth_reached, params.max_depth)
+        self.assertIn("max_depth or min_cell_size_mm was exceeded", " ".join(warnings))
+        self.assertNotIn("Cannot satisfy max_cell_size_mm", " ".join(" ".join(leaf.warnings) for leaf in solid))
+
+    def test_occupied_cells_exceed_min_cell_size_to_honor_max_cell_size(self) -> None:
+        materials = self.make_materials()
+        triangle = np.array(
+            [
+                [[-3.0, -3.0, 0.0], [3.0, -3.0, 0.0], [0.0, 3.0, 0.0]],
+            ],
+            dtype=float,
+        )
+        mesh = SimpleNamespace(
+            vertices=triangle.reshape(-1, 3),
+            faces=np.array([[0, 1, 2]]),
+            triangles=triangle,
+            is_watertight=False,
+        )
+        obj = MeshObject(
+            name="panel",
+            material_name="Copper",
+            mesh=mesh,
+            vertices_mm=triangle.reshape(-1, 3),
+            bounds_mm=(np.array([-3.0, -3.0, 0.0]), np.array([3.0, 3.0, 0.0])),
+            watertight=False,
+        )
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[obj],
+            bounds_mm=(np.array([-4.0, -4.0, -4.0]), np.array([4.0, 4.0, 4.0])),
+            warnings=[],
+        )
+        params = OctreeParams(
+            min_cell_size_mm=4.0,
+            max_cell_size_mm=2.0,
+            max_leaf_cells=256,
+            max_depth=4,
+            samples_per_cell=4,
+        )
+        warnings: list[str] = []
+        diagnostics = OctreeDiagnostics()
+
+        leaves = build_octree(scene, ContactReport(), materials, params, warnings=warnings, diagnostics=diagnostics)
+
+        solid = [leaf for leaf in leaves if not leaf.is_empty]
+        self.assertTrue(solid)
+        self.assertLessEqual(max(max(leaf.size_mm) for leaf in solid), 2.0)
+        self.assertIn("max_depth or min_cell_size_mm was exceeded", " ".join(warnings))
+        self.assertNotIn("Cannot satisfy max_cell_size_mm", " ".join(" ".join(leaf.warnings) for leaf in solid))
 
     def test_occupied_cells_honor_max_cell_size_when_budget_allows(self) -> None:
         materials = self.make_materials()

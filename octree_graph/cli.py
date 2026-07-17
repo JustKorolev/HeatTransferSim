@@ -234,9 +234,30 @@ def build_parser() -> argparse.ArgumentParser:
             "force sparse matrix output."
         ),
     )
-    parser.add_argument("--min-cell-size-mm", type=float, default=5.0)
-    parser.add_argument("--max-cell-size-mm", type=float, default=50.0)
-    parser.add_argument("--max-depth", type=int, default=8)
+    parser.add_argument(
+        "--min-cell-size-mm",
+        type=float,
+        default=5.0,
+        help=(
+            "Smallest cell size for optional adaptive/detail refinement. Occupied cells still subdivide "
+            "below this value when needed to satisfy --max-cell-size-mm."
+        ),
+    )
+    parser.add_argument(
+        "--max-cell-size-mm",
+        type=float,
+        default=50.0,
+        help="Hard maximum size for occupied voxel graph nodes.",
+    )
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=8,
+        help=(
+            "Depth cap for optional adaptive/detail refinement. Occupied cells may exceed this depth "
+            "when needed to satisfy --max-cell-size-mm."
+        ),
+    )
     parser.add_argument(
         "--ignore-component-substring",
         "--ignored-component-substring",
@@ -253,7 +274,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--material-contrast-refine-threshold", type=float, default=5.0)
     parser.add_argument("--contact-refine-distance-mm", type=float, default=10.0)
     parser.add_argument("--boundary-refine", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--max-leaf-cells", type=int, default=None)
+    parser.add_argument(
+        "--max-leaf-cells",
+        type=int,
+        default=None,
+        help=(
+            "Leaf budget for optional adaptive/detail refinement. Mandatory occupied-cell subdivision "
+            "still runs until --max-cell-size-mm is satisfied."
+        ),
+    )
     parser.add_argument("--samples-per-cell", type=int, default=9)
     parser.add_argument("--min-solid-fraction", type=float, default=0.12)
     parser.add_argument(
@@ -1605,7 +1634,7 @@ def _raise_if_empty_graph(nodes: list[dict], leaves: list, args: argparse.Namesp
     if args.max_leaf_cells is not None:
         guidance.append(
             "The max_leaf_cells cap limits optional adaptive refinement; mandatory occupied-cell "
-            "subdivision still runs until max_cell_size_mm, max_depth, or min_cell_size_mm stops it."
+            "subdivision still runs until max_cell_size_mm is satisfied."
         )
     guidance.append("Check octree_diagnostics.json for surface-hit, bbox-only, and depth counters.")
     raise SystemExit(" ".join(guidance))
