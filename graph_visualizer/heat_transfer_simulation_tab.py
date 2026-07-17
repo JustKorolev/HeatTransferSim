@@ -69,6 +69,7 @@ _CONTROLLER_PARAMETER_FIELDS = {
     "mimo_integral_abs_max",
     "mimo_freeze_integral_when_saturated",
 }
+_CONTROLLER_RUNTIME_HOTSWAP_FIELDS = set(_CONTROLLER_PARAMETER_FIELDS)
 _LIGHTWEIGHT_RUNTIME_PARAMETER_FIELDS = {
     "playback_speed",
     "loop_playback",
@@ -124,6 +125,9 @@ class HeatTransferSimulationTab:
         self.simulation_future: Future[dict[str, Any]] | None = None
         self.simulation_cancel_event: threading.Event | None = None
         self._simulation_worker_mode: str | None = None
+        self._pending_controller_runtime_params: SimulationParameters | None = None
+        self._pending_controller_runtime_fields: set[str] = set()
+        self._pending_editor_controller_refresh: tuple[ThermalGraphModel, Path | None] | None = None
         self.parameter_save_timer = self.QtCore.QTimer(self.widget)
         self.parameter_save_timer.setSingleShot(True)
         self.parameter_save_timer.timeout.connect(self._flush_deferred_parameter_save)
@@ -915,6 +919,7 @@ class HeatTransferSimulationTab:
         self.simulation_cancel_event = None
         if future.cancelled():
             self._simulation_worker_mode = None
+            self._apply_pending_runtime_changes()
             self._status("Simulation worker stopped.")
             return
         try:
@@ -936,6 +941,7 @@ class HeatTransferSimulationTab:
         mode = str(result.get("mode") or self._simulation_worker_mode or "")
         self._simulation_worker_mode = None
         if bool(result.get("cancelled", False)):
+            self._apply_pending_runtime_changes()
             self._status("Simulation worker stopped.")
             return
         if steps_completed <= 0:
@@ -980,6 +986,7 @@ class HeatTransferSimulationTab:
             )
         if profile is not None:
             self._report_live_step_profile(profile, steps_completed, max_delta_K)
+        self._apply_pending_runtime_changes()
 
     def _live_step_profiling_enabled(self) -> bool:
         return True
@@ -1101,6 +1108,30 @@ class HeatTransferSimulationTab:
             if self.prepared is not None:
                 self.prepared.mark_controller_stale()
             self._refresh_sensor_readouts()
+
+    def refresh_controller_settings_from_editor(self, model: ThermalGraphModel, folder: Path | None) -> None:
+        """Apply editor-side MIMO/controller edits without rebuilding matrices or temperatures."""
+        if self._simulation_worker_active():
+            self._pending_editor_controller_refresh = (model, folder)
+            self.pause()
+            self._status(
+                "Simulation paused; controller edits will apply after the current compute step finishes."
+            )
+            return
+        self._apply_editor_controller_refresh(model, folder)
+
+    def _apply_editor_controller_refresh(self, model: ThermalGraphModel, folder: Path | None) -> None:
+        if self.sys_id_state is not None:
+            self.cancel_sys_id("Controller settings changed while sys ID was running; run cancelled.")
+        if self.model is not model:
+            return
+        self.folder = folder
+        self._sync_enabled_io_table()
+        if self.prepared is not None:
+            self.prepared.mark_controller_stale()
+            self.prepared.reset_controller_integrators()
+        self._simulation_reinitialize_pending = False
+        self._refresh_sensor_readouts()
 
     def save_active_controller_gain_matrix_from_editor(self, model: ThermalGraphModel) -> None:
         if self.model is not model:
@@ -1548,12 +1579,18 @@ class HeatTransferSimulationTab:
         changed = _changed_parameter_names(previous_params, self.params)
         if not changed:
             return
+        if self._simulation_worker_active() and changed <= _CONTROLLER_RUNTIME_HOTSWAP_FIELDS:
+            self._queue_controller_runtime_parameter_change(changed)
+            return
         if self._simulation_worker_active() and not changed <= _NONBLOCKING_PARAMETER_FIELDS:
             self.params = previous_params
             self.pause()
             self._status(
                 "Simulation worker is stopping; parameter changes will apply after the current compute step finishes."
             )
+            return
+        if changed <= _CONTROLLER_RUNTIME_HOTSWAP_FIELDS:
+            self._apply_controller_runtime_parameter_change(changed)
             return
         if changed <= _LIGHTWEIGHT_RUNTIME_PARAMETER_FIELDS:
             self._apply_lightweight_runtime_parameter_change(changed)
@@ -1579,6 +1616,43 @@ class HeatTransferSimulationTab:
                     self.timer.start(self._playback_timer_interval_ms())
                 self._refresh_stats()
                 self._refresh_sensor_readouts()
+
+    def _queue_controller_runtime_parameter_change(self, changed: set[str]) -> None:
+        self._pending_controller_runtime_params = self.params
+        self._pending_controller_runtime_fields = set(changed)
+        self.pause()
+        self._schedule_parameter_save()
+        self._status(
+            "Simulation paused; controller parameter changes will apply after the current compute step finishes."
+        )
+
+    def _apply_controller_runtime_parameter_change(self, changed: set[str]) -> None:
+        self._save_params_to_folder()
+        if self.prepared is not None:
+            self.prepared.params = self.params
+            self.prepared.mark_controller_stale()
+            self.prepared.reset_controller_integrators()
+        self._simulation_reinitialize_pending = False
+        self._refresh_stats()
+        self._refresh_sensor_readouts()
+
+    def _apply_pending_runtime_changes(self) -> bool:
+        applied = False
+        pending_params = getattr(self, "_pending_controller_runtime_params", None)
+        if pending_params is not None:
+            pending_fields = set(getattr(self, "_pending_controller_runtime_fields", set()) or set())
+            self.params = pending_params
+            self._pending_controller_runtime_params = None
+            self._pending_controller_runtime_fields = set()
+            self._apply_controller_runtime_parameter_change(pending_fields)
+            applied = True
+        pending_editor = getattr(self, "_pending_editor_controller_refresh", None)
+        if pending_editor is not None:
+            self._pending_editor_controller_refresh = None
+            model, folder = pending_editor
+            self._apply_editor_controller_refresh(model, folder)
+            applied = True
+        return applied
 
     def _apply_lightweight_runtime_parameter_change(self, changed: set[str]) -> None:
         if self.prepared is not None:

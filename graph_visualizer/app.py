@@ -65,6 +65,21 @@ from .two_d_graph_widget import TwoDGraphWidget
 from .validation import raise_if_errors, validate_model
 
 
+_EDITOR_CONTROLLER_RUNTIME_FIELDS = {
+    "controller_setpoint_K",
+    "controller_weight",
+    "sensor_settling_time_s",
+    "controller_kp_coarse",
+    "controller_ki_coarse",
+    "controller_kp_hold",
+    "controller_ki_hold",
+    "controller_kd_coarse",
+    "controller_kd_hold",
+    "controller_lambda_order",
+    "controller_mu_order",
+}
+
+
 class GraphVisualizerApp:
     """Interactive Qt/PyVista editor for lumped thermal graph folders."""
 
@@ -573,6 +588,7 @@ class GraphVisualizerApp:
         self,
         show_status: bool = False,
         lightweight: bool = False,
+        controller_hot_swap: bool = False,
     ) -> None:
         if self._building_form or self._applying_node_form:
             return
@@ -590,7 +606,10 @@ class GraphVisualizerApp:
             visual_tags_changed = visual_tags_before != self._visual_tag_snapshot(target_ids)
             if lightweight and not visual_tags_changed:
                 self._refresh_details()
-                self._schedule_deferred_editor_sync(reinitialize=False)
+                if controller_hot_swap and hasattr(self, "simulation_tab"):
+                    self.simulation_tab.refresh_controller_settings_from_editor(self.model, self.current_folder)
+                else:
+                    self._schedule_deferred_editor_sync(reinitialize=False)
             else:
                 self._refresh_all(reset_camera=False)
                 self._sync_simulation_from_editor(reinitialize=visual_tags_changed or not lightweight)
@@ -630,13 +649,19 @@ class GraphVisualizerApp:
             "controller_lambda_order",
             "controller_mu_order",
         ):
-            self.inputs[key].valueChanged.connect(self._handle_node_form_changed)
-        self.inputs["notes"].textChanged.connect(self._handle_node_form_changed)
+            self.inputs[key].valueChanged.connect(
+                lambda *_args, field=key: self._handle_node_form_changed(field)
+            )
+        self.inputs["notes"].textChanged.connect(lambda *_args: self._handle_node_form_changed("notes"))
 
-    def _handle_node_form_changed(self, *_: Any) -> None:
+    def _handle_node_form_changed(self, changed_field: str | None = None, *_: Any) -> None:
         if self._building_form or not self._selected_target_ids():
             return
-        self._apply_node_form_to_selected(show_status=False, lightweight=True)
+        self._apply_node_form_to_selected(
+            show_status=False,
+            lightweight=True,
+            controller_hot_swap=changed_field in _EDITOR_CONTROLLER_RUNTIME_FIELDS,
+        )
 
     def _selected_target_ids(self) -> list[int]:
         target_ids = sorted(node_id for node_id in self.selected_node_ids if node_id in self.model.nodes)
@@ -907,7 +932,9 @@ class GraphVisualizerApp:
         self._mark_dirty()
         if hasattr(self, "simulation_tab"):
             self.simulation_tab.save_active_controller_gain_matrix_from_editor(self.model)
-        self._refresh_simulation_readouts_from_editor()
+            self.simulation_tab.refresh_controller_settings_from_editor(self.model, self.current_folder)
+        else:
+            self._refresh_simulation_readouts_from_editor()
 
     def _handle_controller_gain_matrix_changed(self) -> None:
         self._mark_dirty()

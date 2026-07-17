@@ -1968,6 +1968,223 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertIs(tab.prepared.params, tab.params)
         self.assertEqual(saves, [True])
 
+    def test_controller_parameter_change_applies_without_reinitialize_when_paused(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Spin:
+            def __init__(self, value: float) -> None:
+                self._value = value
+
+            def value(self) -> float:
+                return self._value
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.params = None
+                self.marked = False
+                self.reset = False
+
+            def mark_controller_stale(self) -> None:
+                self.marked = True
+
+            def reset_controller_integrators(self) -> None:
+                self.reset = True
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.sys_id_state = None
+        tab.params = SimulationParameters(mimo_lambda_u=1.0e-3)
+        tab.inputs = {"mimo_lambda_u": Spin(0.25)}
+        tab.prepared = Prepared()
+        tab.simulation_future = None
+        tab._simulation_reinitialize_pending = False
+        tab._read_params = lambda: (_ for _ in ()).throw(AssertionError("read all params"))
+        saves = []
+        tab._save_params_to_folder = lambda: saves.append(True)
+        tab._refresh_stats = lambda: None
+        tab._refresh_sensor_readouts = lambda: None
+
+        tab._handle_parameter_change("mimo_lambda_u")
+
+        self.assertFalse(tab._simulation_reinitialize_pending)
+        self.assertAlmostEqual(tab.params.mimo_lambda_u, 0.25)
+        self.assertIs(tab.prepared.params, tab.params)
+        self.assertTrue(tab.prepared.marked)
+        self.assertTrue(tab.prepared.reset)
+        self.assertEqual(saves, [True])
+
+    def test_controller_parameter_change_pauses_active_worker_and_defers_apply(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Spin:
+            def __init__(self, value: float) -> None:
+                self._value = value
+
+            def value(self) -> float:
+                return self._value
+
+        class Timer:
+            def __init__(self) -> None:
+                self.active = True
+
+            def isActive(self) -> bool:
+                return self.active
+
+            def stop(self) -> None:
+                self.active = False
+
+        class Event:
+            def __init__(self) -> None:
+                self.set_called = False
+
+            def set(self) -> None:
+                self.set_called = True
+
+        class Future:
+            def __init__(self) -> None:
+                self.cancelled = False
+
+            def done(self) -> bool:
+                return False
+
+            def cancel(self) -> bool:
+                self.cancelled = True
+                return True
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.params = None
+                self.marked = False
+                self.reset = False
+
+            def mark_controller_stale(self) -> None:
+                self.marked = True
+
+            def reset_controller_integrators(self) -> None:
+                self.reset = True
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.sys_id_state = None
+        tab.params = SimulationParameters(mimo_lambda_u=1.0e-3)
+        tab.inputs = {"mimo_lambda_u": Spin(0.5)}
+        tab.prepared = Prepared()
+        tab.timer = Timer()
+        tab.fast_forward_timer = Timer()
+        tab.simulation_future = Future()
+        tab.simulation_cancel_event = Event()
+        tab._simulation_reinitialize_pending = False
+        tab._read_params = lambda: (_ for _ in ()).throw(AssertionError("read all params"))
+        scheduled_saves = []
+        final_saves = []
+        statuses = []
+        tab._schedule_parameter_save = lambda: scheduled_saves.append(True)
+        tab._save_params_to_folder = lambda: final_saves.append(True)
+        tab._refresh_stats = lambda: None
+        tab._refresh_sensor_readouts = lambda: None
+        tab._status = lambda message, error=False: statuses.append(message)
+
+        tab._handle_parameter_change("mimo_lambda_u")
+
+        self.assertFalse(tab.timer.isActive())
+        self.assertTrue(tab.simulation_cancel_event.set_called)
+        self.assertTrue(tab.simulation_future.cancelled)
+        self.assertAlmostEqual(tab.params.mimo_lambda_u, 0.5)
+        self.assertIsNone(tab.prepared.params)
+        self.assertFalse(tab.prepared.marked)
+        self.assertEqual(scheduled_saves, [True])
+
+        self.assertTrue(tab._apply_pending_runtime_changes())
+
+        self.assertFalse(tab._simulation_reinitialize_pending)
+        self.assertIs(tab.prepared.params, tab.params)
+        self.assertTrue(tab.prepared.marked)
+        self.assertTrue(tab.prepared.reset)
+        self.assertEqual(final_saves, [True])
+        self.assertTrue(any("Simulation paused" in message for message in statuses))
+
+    def test_editor_controller_refresh_pauses_active_worker_and_defers_apply(self) -> None:
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Timer:
+            def __init__(self) -> None:
+                self.active = True
+
+            def isActive(self) -> bool:
+                return self.active
+
+            def stop(self) -> None:
+                self.active = False
+
+        class Event:
+            def __init__(self) -> None:
+                self.set_called = False
+
+            def set(self) -> None:
+                self.set_called = True
+
+        class Future:
+            def __init__(self) -> None:
+                self.cancelled = False
+
+            def done(self) -> bool:
+                return False
+
+            def cancel(self) -> bool:
+                self.cancelled = True
+                return True
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.marked = False
+                self.reset = False
+
+            def mark_controller_stale(self) -> None:
+                self.marked = True
+
+            def reset_controller_integrators(self) -> None:
+                self.reset = True
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        model = ThermalGraphModel()
+        folder = Path("graphs") / "controller-test"
+        tab.sys_id_state = None
+        tab.model = model
+        tab.folder = None
+        tab.prepared = Prepared()
+        tab.timer = Timer()
+        tab.fast_forward_timer = Timer()
+        tab.simulation_future = Future()
+        tab.simulation_cancel_event = Event()
+        tab._simulation_reinitialize_pending = False
+        tab._sync_enabled_io_table = lambda: None
+        tab._refresh_sensor_readouts = lambda: None
+        statuses = []
+        tab._status = lambda message, error=False: statuses.append(message)
+
+        tab.refresh_controller_settings_from_editor(model, folder)
+
+        self.assertFalse(tab.timer.isActive())
+        self.assertTrue(tab.simulation_cancel_event.set_called)
+        self.assertTrue(tab.simulation_future.cancelled)
+        self.assertFalse(tab.prepared.marked)
+        self.assertFalse(tab.prepared.reset)
+
+        self.assertTrue(tab._apply_pending_runtime_changes())
+
+        self.assertIs(tab.folder, folder)
+        self.assertFalse(tab._simulation_reinitialize_pending)
+        self.assertTrue(tab.prepared.marked)
+        self.assertTrue(tab.prepared.reset)
+        self.assertTrue(any("Simulation paused" in message for message in statuses))
+
     def test_display_parameter_change_does_not_stop_active_simulation_worker(self) -> None:
         try:
             from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
