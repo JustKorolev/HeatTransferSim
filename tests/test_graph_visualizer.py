@@ -2043,6 +2043,132 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(color_updates, [True])
         self.assertEqual(tab.prepared.params.color_min_K, 10.0)
 
+    def test_simulation_run_reuses_loaded_octree_matrices(self) -> None:
+        import sys
+        import types
+
+        heat_tab_module_name = "graph_visualizer.heat_transfer_simulation_tab"
+        pyvista_module_name = "graph_visualizer.pyvista_widget"
+        qtpy_module_name = "qtpy"
+        previous_heat_tab = sys.modules.pop(heat_tab_module_name, None)
+        previous_pyvista = sys.modules.get(pyvista_module_name)
+        previous_qtpy = sys.modules.get(qtpy_module_name)
+        pyvista_stub = types.ModuleType(pyvista_module_name)
+        pyvista_stub.GraphPyVistaWidget = object
+        sys.modules[pyvista_module_name] = pyvista_stub
+        qtpy_stub = types.ModuleType(qtpy_module_name)
+        qtpy_stub.QtGui = types.SimpleNamespace()
+        sys.modules[qtpy_module_name] = qtpy_stub
+        try:
+            from graph_visualizer import heat_transfer_simulation_tab as heat_tab_module
+            HeatTransferSimulationTab = heat_tab_module.HeatTransferSimulationTab
+        finally:
+            sys.modules.pop(heat_tab_module_name, None)
+            if previous_heat_tab is not None:
+                sys.modules[heat_tab_module_name] = previous_heat_tab
+            if previous_pyvista is not None:
+                sys.modules[pyvista_module_name] = previous_pyvista
+            else:
+                sys.modules.pop(pyvista_module_name, None)
+            if previous_qtpy is not None:
+                sys.modules[qtpy_module_name] = previous_qtpy
+            else:
+                sys.modules.pop(qtpy_module_name, None)
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="loaded_octree_runtime"))
+        left = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        right = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        for node in (left, right):
+            node.center_mm = tuple(float(value) for value in node.coord)
+            node.size_mm = (1.0, 1.0, 1.0)
+            node.C_J_K = 20.0
+            node.G_rad_W_K = 1.0e-8
+            model.add_node(node)
+        model.octree_graph_data = {"graph_edges": []}
+        L = csr_matrix(np.array([[0.25, -0.25], [-0.25, 0.25]], dtype=float))
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.model = model
+        tab.matrices = {
+            "node_ids": np.array([1, 2], dtype=int),
+            "coords": np.array([[0, 0, 0], [1, 0, 0]], dtype=int),
+            "C": np.array([1.0, 1.0], dtype=float),
+            "Grad": np.array([0.0, 0.0], dtype=float),
+            "G_rad": np.array([0.0, 0.0], dtype=float),
+            "initial_temperature_K": np.array([293.15, 293.15], dtype=float),
+            "L": L,
+        }
+
+        with patch.object(heat_tab_module, "refresh_geometry_edges") as refresh_edges, patch.object(
+            heat_tab_module, "refresh_radiation_from_exposed_faces"
+        ) as refresh_radiation:
+            tab._refresh_matrices_for_run()
+
+        refresh_edges.assert_not_called()
+        refresh_radiation.assert_not_called()
+        self.assertIs(tab.matrices["L"], L)
+        self.assertTrue(np.array_equal(tab.matrices["node_ids"], np.array([1, 2], dtype=int)))
+        self.assertTrue(np.allclose(tab.matrices["C"], np.array([20.0, 20.0], dtype=float)))
+        self.assertTrue(np.allclose(tab.matrices["G_rad"], np.array([1.0e-8, 1.0e-8], dtype=float)))
+
+    def test_simulation_initialize_updates_existing_view_without_redraw(self) -> None:
+        import sys
+        import types
+
+        heat_tab_module_name = "graph_visualizer.heat_transfer_simulation_tab"
+        pyvista_module_name = "graph_visualizer.pyvista_widget"
+        qtpy_module_name = "qtpy"
+        previous_heat_tab = sys.modules.pop(heat_tab_module_name, None)
+        previous_pyvista = sys.modules.get(pyvista_module_name)
+        previous_qtpy = sys.modules.get(qtpy_module_name)
+        pyvista_stub = types.ModuleType(pyvista_module_name)
+        pyvista_stub.GraphPyVistaWidget = object
+        sys.modules[pyvista_module_name] = pyvista_stub
+        qtpy_stub = types.ModuleType(qtpy_module_name)
+        qtpy_stub.QtGui = types.SimpleNamespace()
+        sys.modules[qtpy_module_name] = qtpy_stub
+        try:
+            from graph_visualizer import heat_transfer_simulation_tab as heat_tab_module
+            HeatTransferSimulationTab = heat_tab_module.HeatTransferSimulationTab
+        finally:
+            sys.modules.pop(heat_tab_module_name, None)
+            if previous_heat_tab is not None:
+                sys.modules[heat_tab_module_name] = previous_heat_tab
+            if previous_pyvista is not None:
+                sys.modules[pyvista_module_name] = previous_pyvista
+            else:
+                sys.modules.pop(pyvista_module_name, None)
+            if previous_qtpy is not None:
+                sys.modules[qtpy_module_name] = previous_qtpy
+            else:
+                sys.modules.pop(qtpy_module_name, None)
+
+        class Viewer:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def update_node_scalars(self, values, scalar_clim=None) -> bool:
+                self.calls += 1
+                self.values = values
+                self.scalar_clim = scalar_clim
+                return True
+
+        model = ThermalGraphModel()
+        node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        node.initial_temperature_K = 300.0
+        model.add_node(node)
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.model = model
+        tab.params = SimulationParameters(autoscale_temperature=True)
+        tab.temperature_by_node = {1: 301.0}
+        tab.viewer = Viewer()
+        tab._draw_current = lambda reset_camera=False: (_ for _ in ()).throw(AssertionError("redrew voxels"))
+
+        tab._refresh_initialized_view()
+
+        self.assertEqual(tab.viewer.calls, 1)
+        self.assertEqual(tab.viewer.values, {1: 301.0})
+
     def test_playback_speed_change_does_not_stop_active_simulation_worker(self) -> None:
         try:
             from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab

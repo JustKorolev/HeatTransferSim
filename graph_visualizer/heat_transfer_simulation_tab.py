@@ -713,7 +713,7 @@ class HeatTransferSimulationTab:
                 for node_id, temp in zip(self.prepared.node_ids, self.prepared.temperatures_K)
             }
             self._reset_time_slider()
-            self._draw_current(reset_camera=False)
+            self._refresh_initialized_view()
             self._refresh_stats()
             self._set_warnings(self.prepared.warnings)
             self._simulation_reinitialize_pending = False
@@ -733,6 +733,15 @@ class HeatTransferSimulationTab:
     def _refresh_matrices_for_run(self) -> None:
         if self.model is None:
             return
+        if self._can_reuse_loaded_octree_matrices_for_run():
+            self.matrices = self._runtime_matrices_from_loaded_octree()
+            log_event(
+                "simulation refresh_matrices_for_run reused loaded octree matrices",
+                nodes=len(self.model.nodes),
+                matrix_keys=sorted(self.matrices),
+                L_type=type(self.matrices.get("L")).__name__ if "L" in self.matrices else None,
+            )
+            return
         if (
             EdgeMode.normalize(self.model.metadata.edge_mode) == EdgeMode.AUTO.value
             and all(node.center_mm is not None and node.size_mm is not None for node in self.model.nodes.values())
@@ -741,6 +750,55 @@ class HeatTransferSimulationTab:
             refresh_geometry_edges(self.model)
             refresh_radiation_from_exposed_faces(self.model)
         self.matrices = build_matrices(self.model)
+
+    def _can_reuse_loaded_octree_matrices_for_run(self) -> bool:
+        if self.model is None or not self.model.octree_graph_data:
+            return False
+        if not isinstance(self.matrices, dict) or "L" not in self.matrices:
+            return False
+        try:
+            matrix_node_ids = np.asarray(self.matrices.get("node_ids"), dtype=int).reshape(-1)
+        except Exception:
+            return False
+        expected_node_ids = np.asarray(self.model.ordered_node_ids(), dtype=int)
+        if matrix_node_ids.shape != expected_node_ids.shape:
+            return False
+        if not np.array_equal(matrix_node_ids, expected_node_ids):
+            return False
+        L = self.matrices.get("L")
+        return bool(getattr(L, "shape", None) == (len(expected_node_ids), len(expected_node_ids)))
+
+    def _runtime_matrices_from_loaded_octree(self) -> dict[str, Any]:
+        assert self.model is not None
+        node_ids = np.asarray(self.matrices["node_ids"], dtype=int).reshape(-1)
+        matrices = dict(self.matrices)
+        matrices["node_ids"] = node_ids
+        matrices["coords"] = np.array(
+            [self.model.nodes[int(node_id)].coord for node_id in node_ids],
+            dtype=int,
+        )
+        matrices["C"] = np.array(
+            [float(self.model.nodes[int(node_id)].C_J_K) for node_id in node_ids],
+            dtype=float,
+        )
+        matrices["Grad"] = np.array(
+            [float(self.model.nodes[int(node_id)].Grad_W_K) for node_id in node_ids],
+            dtype=float,
+        )
+        matrices["G_rad"] = np.array(
+            [
+                float(self.model.nodes[int(node_id)].G_rad_W_K)
+                if float(self.model.nodes[int(node_id)].G_rad_W_K) > 0.0
+                else float(self.model.nodes[int(node_id)].Grad_W_K)
+                for node_id in node_ids
+            ],
+            dtype=float,
+        )
+        matrices["initial_temperature_K"] = np.array(
+            [float(self.model.nodes[int(node_id)].initial_temperature_K) for node_id in node_ids],
+            dtype=float,
+        )
+        return matrices
 
     def pause(self) -> None:
         self.timer.stop()
@@ -1868,6 +1926,17 @@ class HeatTransferSimulationTab:
         )
         if not updated and self.prepared is None:
             self._draw_current(reset_camera=False)
+
+    def _refresh_initialized_view(self) -> None:
+        updated = self.viewer.update_node_scalars(
+            self._temperature_values(),
+            scalar_clim=self._temperature_clim(),
+        )
+        if updated:
+            log_event("simulation initialize updated existing view scalars")
+            return
+        log_event("simulation initialize redraw view after scalar update miss")
+        self._draw_current(reset_camera=False)
 
     def _temperature_values(self) -> dict[int, float]:
         if self.model is None:
