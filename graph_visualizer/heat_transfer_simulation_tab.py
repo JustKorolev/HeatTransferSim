@@ -76,6 +76,20 @@ _LIGHTWEIGHT_RUNTIME_PARAMETER_FIELDS = {
     "loop_playback",
 }
 _NONBLOCKING_PARAMETER_FIELDS = _LIGHTWEIGHT_RUNTIME_PARAMETER_FIELDS | _DISPLAY_PARAMETER_FIELDS
+_READOUT_SENSOR_CONTROLLER_FIELDS = (
+    "sensor_manual_power_W",
+    "controller_setpoint_K",
+    "controller_weight",
+    "sensor_settling_time_s",
+    "controller_kp_coarse",
+    "controller_ki_coarse",
+    "controller_kd_coarse",
+    "controller_kp_hold",
+    "controller_ki_hold",
+    "controller_kd_hold",
+    "controller_lambda_order",
+    "controller_mu_order",
+)
 
 
 class HeatTransferSimulationTab:
@@ -118,8 +132,6 @@ class HeatTransferSimulationTab:
         self.widget = self.QtWidgets.QWidget(parent)
         self.timer = self.QtCore.QTimer(self.widget)
         self.timer.timeout.connect(self.step_forward)
-        self.fast_forward_timer = self.QtCore.QTimer(self.widget)
-        self.fast_forward_timer.timeout.connect(self._fast_forward_tick)
         self.simulation_worker_timer = self.QtCore.QTimer(self.widget)
         self.simulation_worker_timer.timeout.connect(self._poll_simulation_worker)
         self.simulation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="HeatTransferSimulation")
@@ -129,6 +141,11 @@ class HeatTransferSimulationTab:
         self.stepper_diagnostic_future: Future[dict[str, Any]] | None = None
         self.stepper_diagnostic_timer = self.QtCore.QTimer(self.widget)
         self.stepper_diagnostic_timer.timeout.connect(self._poll_stepper_diagnostic_worker)
+        self._readout_editor_syncing = False
+        self._readout_editor_kind: str | None = None
+        self._readout_editor_node_id: int | None = None
+        self._readout_editor_sensor_id: int | None = None
+        self.readout_editor_inputs: dict[str, Any] = {}
         self._pending_controller_runtime_params: SimulationParameters | None = None
         self._pending_controller_runtime_fields: set[str] = set()
         self._pending_editor_controller_refresh: tuple[ThermalGraphModel, Path | None] | None = None
@@ -181,7 +198,8 @@ class HeatTransferSimulationTab:
         self.controller_status_label.setWordWrap(True)
         form.addRow(self.controller_status_label)
         self.sensor_readout_box = self.QtWidgets.QGroupBox("Thermal I/O Readouts")
-        sensor_layout = self.QtWidgets.QVBoxLayout(self.sensor_readout_box)
+        sensor_layout = self.QtWidgets.QHBoxLayout(self.sensor_readout_box)
+        readout_layout = self.QtWidgets.QVBoxLayout()
         self.cooling_readout_box = self.QtWidgets.QGroupBox("Cooling")
         cooling_layout = self.QtWidgets.QVBoxLayout(self.cooling_readout_box)
         self.cooling_readout_table = self.QtWidgets.QTableWidget(0, 3)
@@ -192,7 +210,7 @@ class HeatTransferSimulationTab:
         self.cooling_readout_table.setMaximumHeight(130)
         self.cooling_readout_table.itemSelectionChanged.connect(self._handle_cooling_table_selection)
         cooling_layout.addWidget(self.cooling_readout_table)
-        sensor_layout.addWidget(self.cooling_readout_box)
+        readout_layout.addWidget(self.cooling_readout_box)
         self.heating_readout_box = self.QtWidgets.QGroupBox("Heating")
         heating_layout = self.QtWidgets.QVBoxLayout(self.heating_readout_box)
         self.heating_readout_tree = self.QtWidgets.QTreeWidget()
@@ -201,7 +219,9 @@ class HeatTransferSimulationTab:
         self.heating_readout_tree.setMaximumHeight(220)
         self.heating_readout_tree.itemSelectionChanged.connect(self._handle_heating_tree_selection)
         heating_layout.addWidget(self.heating_readout_tree)
-        sensor_layout.addWidget(self.heating_readout_box)
+        readout_layout.addWidget(self.heating_readout_box)
+        sensor_layout.addLayout(readout_layout, 2)
+        self._build_readout_parameter_editor(sensor_layout)
         self.sensor_readout_box.setVisible(False)
         form.addRow(self.sensor_readout_box)
         self.legend_label = self.QtWidgets.QLabel(self._legend_text())
@@ -335,15 +355,12 @@ class HeatTransferSimulationTab:
             ("Reset", self.reset),
             ("Step +", self.step_forward),
             ("Step -", self.step_backward),
-            ("Run To End", self.run_to_end),
         ):
             button = self.QtWidgets.QPushButton(text)
             if text == "Play":
                 button.setToolTip("Start live playback using the precomputed transition matrix.")
             elif text == "Reset":
                 button.setToolTip("Return the simulation to each cell's initial_temperature_K.")
-            elif text == "Run To End":
-                button.setToolTip("Advance to t_final_s as fast as possible, refreshing the view between compute bursts.")
             button.clicked.connect(callback)
             row.addWidget(button)
         form.addRow(row)
@@ -377,6 +394,57 @@ class HeatTransferSimulationTab:
         self.stepper_diagnostic_status_label.setWordWrap(True)
         diag_form.addRow("result", self.stepper_diagnostic_status_label)
         form.addRow(box)
+
+    def _build_readout_parameter_editor(self, parent_layout: Any) -> None:
+        self.readout_editor_box = self.QtWidgets.QGroupBox("Parameters")
+        self.readout_editor_box.setVisible(False)
+        self.readout_editor_box.setMinimumWidth(260)
+        layout = self.QtWidgets.QVBoxLayout(self.readout_editor_box)
+        self.readout_editor_title = self.QtWidgets.QLabel("Select a readout row.")
+        self.readout_editor_title.setWordWrap(True)
+        layout.addWidget(self.readout_editor_title)
+
+        self.readout_sensor_editor = self.QtWidgets.QWidget()
+        sensor_form = self.QtWidgets.QFormLayout(self.readout_sensor_editor)
+        mode = self.QtWidgets.QComboBox()
+        mode.addItems(["manual", "mimo"])
+        mode.currentTextChanged.connect(lambda *_: self._apply_readout_sensor_editor_change("sensor_control_mode"))
+        self.readout_editor_inputs["sensor_control_mode"] = mode
+        sensor_form.addRow("mode", mode)
+        for name, label, minimum, maximum, step in (
+            ("sensor_manual_power_W", "manual power W", 0.0, 1.0e9, 1.0),
+            ("controller_setpoint_K", "setpoint K", 0.0, 1.0e6, 1.0),
+            ("controller_weight", "weight", 0.0, 1.0e9, 0.1),
+            ("sensor_settling_time_s", "settling time s", 0.0, 1.0e9, 1.0),
+            ("controller_kp_coarse", "coarse kP", 0.0, 1.0e9, 0.1),
+            ("controller_ki_coarse", "coarse kI", 0.0, 1.0e9, 0.1),
+            ("controller_kd_coarse", "coarse kD", 0.0, 1.0e9, 0.1),
+            ("controller_kp_hold", "hold kP", 0.0, 1.0e9, 0.1),
+            ("controller_ki_hold", "hold kI", 0.0, 1.0e9, 0.1),
+            ("controller_kd_hold", "hold kD", 0.0, 1.0e9, 0.1),
+            ("controller_lambda_order", "lambda", 0.0, 1.0e9, 0.1),
+            ("controller_mu_order", "mu", 0.0, 1.0e9, 0.1),
+        ):
+            widget = self._double_spin(minimum, maximum, 0.0, step)
+            widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_sensor_editor_change(field))
+            self.readout_editor_inputs[name] = widget
+            sensor_form.addRow(label, widget)
+        layout.addWidget(self.readout_sensor_editor)
+
+        self.readout_cooling_editor = self.QtWidgets.QWidget()
+        cooling_form = self.QtWidgets.QFormLayout(self.readout_cooling_editor)
+        for name, label, minimum, maximum, step in (
+            ("Kp_cooler", "Kp cooler W/K", 0.0, 1.0e9, 0.1),
+            ("P_cooler_max", "max cooling W", 0.0, 1.0e9, 1.0),
+            ("T_cooler_setpoint", "setpoint K", 0.0, 1.0e6, 1.0),
+        ):
+            widget = self._double_spin(minimum, maximum, float(getattr(self.params, name)), step)
+            widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_cooling_editor_change(field))
+            self.readout_editor_inputs[name] = widget
+            cooling_form.addRow(label, widget)
+        layout.addWidget(self.readout_cooling_editor)
+        layout.addStretch(1)
+        parent_layout.addWidget(self.readout_editor_box, 1)
 
     def _add_enabled_io_controls(self, form: Any) -> None:
         box, layout = self._section("Enabled Simulation I/O")
@@ -837,13 +905,10 @@ class HeatTransferSimulationTab:
 
     def pause(self) -> None:
         self.timer.stop()
-        if hasattr(self, "fast_forward_timer"):
-            self.fast_forward_timer.stop()
         self._cancel_simulation_worker()
 
     def shutdown(self) -> None:
         self.timer.stop()
-        self.fast_forward_timer.stop()
         diagnostic_timer = getattr(self, "stepper_diagnostic_timer", None)
         if diagnostic_timer is not None:
             diagnostic_timer.stop()
@@ -910,59 +975,6 @@ class HeatTransferSimulationTab:
             return
         self.prepared.step_backward()
         self._after_state_change()
-
-    def run_to_end(self) -> None:
-        self.timer.stop()
-        if self.prepared is None or self._simulation_reinitialize_pending:
-            self.initialize_simulation()
-        if self.prepared is None:
-            self._status("Simulation did not initialize; fast run was not started.", True)
-            return
-        if self.prepared.time_s >= self.params.t_final_s:
-            self._status("Simulation is already at t_final_s.")
-            return
-        if self._simulation_worker_active():
-            return
-        self._start_simulation_worker(mode="run_to_end", steps=self._run_to_end_steps_per_batch())
-
-    def _fast_forward_tick(self) -> None:
-        if self.prepared is None:
-            self.fast_forward_timer.stop()
-            return
-        start = time.perf_counter()
-        budget_s = self._fast_forward_budget_s()
-        previous_temperatures = np.asarray(self.prepared.temperatures_K, dtype=float).copy()
-        steps_completed = 0
-        while self.prepared.time_s < self.params.t_final_s:
-            self.prepared.step_forward()
-            steps_completed += 1
-            if time.perf_counter() - start >= budget_s:
-                break
-        if steps_completed <= 0:
-            self.fast_forward_timer.stop()
-            return
-        current_temperatures = np.asarray(self.prepared.temperatures_K, dtype=float)
-        max_delta_K = (
-            float(np.max(np.abs(current_temperatures - previous_temperatures)))
-            if current_temperatures.size and previous_temperatures.size == current_temperatures.size
-            else 0.0
-        )
-        self._after_state_change()
-        done = self.prepared.time_s >= self.params.t_final_s
-        if done:
-            self.fast_forward_timer.stop()
-        self._status(
-            f"{'Completed' if done else 'Fast-running'} simulation: "
-            f"t = {self.prepared.time_s:.3g} s, steps/burst = {steps_completed}, "
-            f"max dT/burst = {max_delta_K:.3e} K."
-        )
-
-    def _fast_forward_budget_s(self) -> float:
-        display_interval = max(10.0, float(getattr(self.params, "display_update_interval_ms", 100.0)))
-        return max(0.01, min(0.25, display_interval / 1000.0))
-
-    def _run_to_end_steps_per_batch(self) -> int:
-        return max(5, min(100, self._playback_steps_per_tick()))
 
     def run_stepper_diagnostic(self) -> None:
         if self._simulation_worker_active():
@@ -1086,7 +1098,6 @@ class HeatTransferSimulationTab:
             self.prepared,
             self.params,
             max(1, int(steps)),
-            bool(mode == "run_to_end"),
             bool(self.params.loop_playback and mode == "play"),
             event,
             bool(self._live_step_profiling_enabled()),
@@ -1100,8 +1111,6 @@ class HeatTransferSimulationTab:
         self.simulation_worker_timer.start(20)
         if mode == "step":
             self._status("Simulation step running in background.")
-        elif mode == "run_to_end":
-            self._status("Simulation running to end in background.")
 
     def _poll_simulation_worker(self) -> None:
         future = getattr(self, "simulation_future", None)
@@ -1122,7 +1131,6 @@ class HeatTransferSimulationTab:
             result = future.result()
         except Exception as exc:
             self.timer.stop()
-            self.fast_forward_timer.stop()
             self._simulation_worker_mode = None
             self._status(f"Simulation worker failed: {exc}", True)
             log_exception("simulation worker failed", exc)
@@ -1143,7 +1151,6 @@ class HeatTransferSimulationTab:
         if steps_completed <= 0:
             if bool(result.get("done", False)):
                 self.timer.stop()
-                self.fast_forward_timer.stop()
             return
         profile = result.get("profile")
         profile = profile if isinstance(profile, dict) else None
@@ -1153,19 +1160,7 @@ class HeatTransferSimulationTab:
             profile["total_ms"] = float(profile.get("step_loop_ms", 0.0)) + (time.perf_counter() - ui_start) * 1000.0
         max_delta_K = float(result.get("max_delta_K", 0.0))
         done = bool(result.get("done", False))
-        if mode == "run_to_end":
-            if done:
-                self._status(
-                    f"Completed simulation: t = {self.prepared.time_s:.3g} s, "
-                    f"steps/batch = {steps_completed}, max dT/batch = {max_delta_K:.3e} K."
-                )
-            else:
-                self._status(
-                    f"Fast-running simulation: t = {self.prepared.time_s:.3g} s, "
-                    f"steps/batch = {steps_completed}, max dT/batch = {max_delta_K:.3e} K."
-                )
-                self._start_simulation_worker(mode="run_to_end", steps=self._run_to_end_steps_per_batch())
-        elif self.timer.isActive():
+        if self.timer.isActive():
             status = (
                 f"Playing simulation: t = {self.prepared.time_s:.3g} s, "
                 f"steps/update = {steps_completed}, max dT/update = {max_delta_K:.3e} K."
@@ -2257,7 +2252,7 @@ class HeatTransferSimulationTab:
                 if heater is None or not bool(getattr(heater, "is_heater", False)):
                     continue
                 heater_temperature = float(temperatures.get(int(heater_id), heater.initial_temperature_K))
-                power = float(heater_powers.get(int(heater_id), 0.0))
+                power = self._heater_readout_power_for_sensor_heater(sensor_id, int(heater_id), heater_powers)
                 heater_item = self.QtWidgets.QTreeWidgetItem(
                     [
                         "heater",
@@ -2273,6 +2268,142 @@ class HeatTransferSimulationTab:
             sensor_item.setExpanded(True)
         for column in range(6):
             self.heating_readout_tree.resizeColumnToContents(column)
+
+    def _heater_readout_power_for_sensor_heater(
+        self,
+        sensor_id: int,
+        heater_id: int,
+        heater_powers: dict[int, float],
+    ) -> float:
+        if self.model is None:
+            return 0.0
+        if int(heater_id) in heater_powers:
+            return float(heater_powers.get(int(heater_id), 0.0))
+        sensor = self.model.nodes.get(int(sensor_id))
+        heater = self.model.nodes.get(int(heater_id))
+        if sensor is None or heater is None:
+            return 0.0
+        if not self._sensor_enabled_for_simulation(int(sensor_id)) or not self._heater_enabled_for_simulation(int(heater_id)):
+            return 0.0
+        if str(getattr(sensor, "sensor_control_mode", "manual")) != "manual":
+            return 0.0
+        max_power = max(
+            0.0,
+            float(getattr(getattr(heater, "heater", None), "heater_max_power_W", 0.0))
+            * float(getattr(getattr(heater, "heater", None), "heater_efficiency", 1.0)),
+        )
+        return min(max(float(getattr(sensor, "sensor_manual_power_W", 0.0)), 0.0), max_power)
+
+    def _show_readout_sensor_editor(self, sensor_id: int, *, selected_node_id: int | None = None) -> None:
+        if self.model is None or int(sensor_id) not in self.model.nodes:
+            self._hide_readout_parameter_editor()
+            return
+        sensor = self.model.nodes[int(sensor_id)]
+        self._readout_editor_syncing = True
+        try:
+            self._readout_editor_kind = "sensor"
+            self._readout_editor_sensor_id = int(sensor_id)
+            self._readout_editor_node_id = int(selected_node_id if selected_node_id is not None else sensor_id)
+            self.readout_editor_box.setVisible(True)
+            self.readout_sensor_editor.setVisible(True)
+            self.readout_cooling_editor.setVisible(False)
+            title = f"Sensor {int(sensor_id)}"
+            if selected_node_id is not None and int(selected_node_id) != int(sensor_id):
+                title = f"Heater {int(selected_node_id)} controlled by sensor {int(sensor_id)}"
+            self.readout_editor_title.setText(title)
+            mode = "mimo" if str(getattr(sensor, "sensor_control_mode", "manual")) == "mimo" else "manual"
+            self.readout_editor_inputs["sensor_control_mode"].setCurrentText(mode)
+            for field in _READOUT_SENSOR_CONTROLLER_FIELDS:
+                widget = self.readout_editor_inputs.get(field)
+                if widget is not None:
+                    widget.setValue(float(getattr(sensor, field, 0.0)))
+            self._sync_readout_sensor_editor_enabled()
+        finally:
+            self._readout_editor_syncing = False
+
+    def _show_readout_cooling_editor(self, node_id: int) -> None:
+        self._readout_editor_syncing = True
+        try:
+            self._readout_editor_kind = "cooling"
+            self._readout_editor_node_id = int(node_id)
+            self._readout_editor_sensor_id = None
+            self.readout_editor_box.setVisible(True)
+            self.readout_sensor_editor.setVisible(False)
+            self.readout_cooling_editor.setVisible(True)
+            self.readout_editor_title.setText(f"Cryocooler cell {int(node_id)}")
+            for field in ("Kp_cooler", "P_cooler_max", "T_cooler_setpoint"):
+                widget = self.readout_editor_inputs.get(field)
+                if widget is not None:
+                    widget.setValue(float(getattr(self.params, field)))
+        finally:
+            self._readout_editor_syncing = False
+
+    def _hide_readout_parameter_editor(self) -> None:
+        self._readout_editor_kind = None
+        self._readout_editor_node_id = None
+        self._readout_editor_sensor_id = None
+        if hasattr(self, "readout_editor_box"):
+            self.readout_editor_box.setVisible(False)
+
+    def _sync_readout_sensor_editor_enabled(self) -> None:
+        mode_widget = self.readout_editor_inputs.get("sensor_control_mode")
+        mode = mode_widget.currentText() if mode_widget is not None else "manual"
+        manual = str(mode) == "manual"
+        for field in _READOUT_SENSOR_CONTROLLER_FIELDS:
+            widget = self.readout_editor_inputs.get(field)
+            if widget is None:
+                continue
+            if field == "sensor_manual_power_W":
+                widget.setEnabled(manual)
+            elif field == "controller_setpoint_K":
+                widget.setEnabled(True)
+            else:
+                widget.setEnabled(not manual)
+
+    def _apply_readout_sensor_editor_change(self, field: str) -> None:
+        if self._readout_editor_syncing or self.model is None or self._readout_editor_sensor_id is None:
+            return
+        sensor = self.model.nodes.get(int(self._readout_editor_sensor_id))
+        if sensor is None:
+            return
+        widget = self.readout_editor_inputs.get(field)
+        if widget is None:
+            return
+        if field == "sensor_control_mode":
+            value = "mimo" if widget.currentText() == "mimo" else "manual"
+            sensor.sensor_control_mode = value
+            self._sync_readout_sensor_editor_enabled()
+        else:
+            setattr(sensor, field, float(widget.value()))
+        if self.prepared is not None:
+            self.prepared.mark_controller_stale()
+            self.prepared.reset_controller_integrators()
+        self._simulation_reinitialize_pending = False
+        self._refresh_stats()
+        self._refresh_sensor_readouts()
+        self._show_readout_sensor_editor(
+            int(self._readout_editor_sensor_id),
+            selected_node_id=self._readout_editor_node_id,
+        )
+        self._status(f"Updated controller parameters for sensor {int(sensor.node_id)}.")
+
+    def _apply_readout_cooling_editor_change(self, field: str) -> None:
+        if self._readout_editor_syncing:
+            return
+        widget = self.readout_editor_inputs.get(field)
+        if widget is None or not hasattr(self.params, field):
+            return
+        linked = self.inputs.get(field)
+        if linked is not None and hasattr(linked, "setValue"):
+            linked.blockSignals(True)
+            linked.setValue(float(widget.value()))
+            linked.blockSignals(False)
+            self._handle_parameter_change(field)
+        else:
+            self.params = replace(self.params, **{field: float(widget.value())})
+            self._apply_controller_runtime_parameter_change({field})
+        if self._readout_editor_node_id is not None:
+            self._show_readout_cooling_editor(int(self._readout_editor_node_id))
 
     def _heating_sensor_nodes(self) -> list[Any]:
         if self.model is None:
@@ -2342,6 +2473,7 @@ class HeatTransferSimulationTab:
         if node_id is None:
             return
         self._handle_pick(int(node_id))
+        self._show_readout_cooling_editor(int(node_id))
 
     def _handle_heating_tree_selection(self) -> None:
         item = self.heating_readout_tree.currentItem()
@@ -2351,6 +2483,19 @@ class HeatTransferSimulationTab:
         if node_id is None:
             return
         self._handle_pick(int(node_id))
+        if item.text(0) == "sensor":
+            self._show_readout_sensor_editor(int(node_id))
+            return
+        if self.model is None:
+            self._hide_readout_parameter_editor()
+            return
+        heater = self.model.nodes.get(int(node_id))
+        sensor_id = getattr(heater, "assigned_sensor_id", None) if heater is not None else None
+        if sensor_id is None:
+            self._hide_readout_parameter_editor()
+            return
+        self._show_readout_sensor_editor(int(sensor_id), selected_node_id=int(node_id))
+
 
     def _handle_visual_toggle(self, *_: Any) -> None:
         self._draw_current(reset_camera=False)
@@ -2760,7 +2905,6 @@ def _run_simulation_worker_batch(
     prepared: PreparedSimulation,
     params: SimulationParameters,
     steps_requested: int,
-    run_to_end: bool,
     loop_playback: bool,
     cancel_event: threading.Event,
     profile_enabled: bool,
@@ -2772,7 +2916,7 @@ def _run_simulation_worker_batch(
     step_loop_start = time.perf_counter()
     while not cancel_event.is_set():
         if prepared.time_s >= params.t_final_s:
-            if loop_playback and not run_to_end:
+            if loop_playback:
                 prepared.reset()
             else:
                 break
@@ -2780,9 +2924,7 @@ def _run_simulation_worker_batch(
         if profile is not None:
             _accumulate_profile_ms(model_profile, getattr(prepared, "last_step_profile_ms", None))
         steps_completed += 1
-        if not run_to_end and steps_completed >= max(1, int(steps_requested)):
-            break
-        if run_to_end and steps_completed >= max(1, int(steps_requested)):
+        if steps_completed >= max(1, int(steps_requested)):
             break
     if profile is not None:
         profile["step_loop_ms"] = (time.perf_counter() - step_loop_start) * 1000.0

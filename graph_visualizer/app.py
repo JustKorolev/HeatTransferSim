@@ -66,6 +66,8 @@ from .validation import raise_if_errors, validate_model
 
 
 _EDITOR_CONTROLLER_RUNTIME_FIELDS = {
+    "sensor_control_mode",
+    "sensor_manual_power_W",
     "controller_setpoint_K",
     "controller_weight",
     "sensor_settling_time_s",
@@ -760,7 +762,11 @@ class GraphVisualizerApp:
             self._sync_heater_control_enabled()
             return
         self._sync_heater_control_enabled()
-        self._handle_node_form_changed()
+        self._apply_node_form_to_selected(
+            show_status=False,
+            lightweight=True,
+            controller_hot_swap=True,
+        )
 
     def _apply_node_template_to_existing_node(self, target_id: int, template: NodeProperties) -> None:
         target = self.model.nodes[target_id]

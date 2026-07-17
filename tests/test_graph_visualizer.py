@@ -2014,9 +2014,12 @@ class GraphVisualizerModelTests(unittest.TestCase):
         sensor = NodeProperties.with_material(10, (0, 0, 0), material="copper")
         sensor.is_sensor = True
         sensor.assigned_heater_ids = [20]
+        sensor.sensor_control_mode = "manual"
+        sensor.sensor_manual_power_W = 100.0
         heater = NodeProperties.with_material(20, (1, 0, 0), material="copper")
         heater.is_heater = True
         heater.assigned_sensor_id = 10
+        heater.heater.heater_max_power_W = 120.0
         second_heater = NodeProperties.with_material(30, (2, 0, 0), material="copper")
         second_heater.is_heater = True
         second_heater.assigned_sensor_id = 10
@@ -2025,12 +2028,46 @@ class GraphVisualizerModelTests(unittest.TestCase):
         model.add_node(second_heater)
         tab = object.__new__(HeatTransferSimulationTab)
         tab.model = model
+        tab.enabled_sensor_node_ids = {10}
+        tab.enabled_heater_node_ids = {20, 30}
+        tab._readout_editor_syncing = False
+        tab._readout_editor_sensor_id = 10
+        tab._readout_editor_node_id = 10
+        tab._simulation_reinitialize_pending = False
+
+        class Spin:
+            def value(self) -> float:
+                return 77.0
+
+        class Prepared:
+            def __init__(self) -> None:
+                self.marked = False
+                self.reset = False
+
+            def mark_controller_stale(self) -> None:
+                self.marked = True
+
+            def reset_controller_integrators(self) -> None:
+                self.reset = True
+
+        tab.readout_editor_inputs = {"sensor_manual_power_W": Spin()}
+        tab.prepared = Prepared()
+        tab._refresh_stats = lambda: None
+        tab._refresh_sensor_readouts = lambda: None
+        tab._show_readout_sensor_editor = lambda sensor_id, selected_node_id=None: None
+        tab._status = lambda message, error=False: None
 
         sensors = tab._heating_sensor_nodes()
         heater_ids = tab._associated_heater_ids_for_sensor(10)
+        manual_power = tab._heater_readout_power_for_sensor_heater(10, 20, {})
+        tab._apply_readout_sensor_editor_change("sensor_manual_power_W")
 
         self.assertEqual([node.node_id for node in sensors], [10])
         self.assertEqual(heater_ids, [20, 30])
+        self.assertAlmostEqual(manual_power, 100.0)
+        self.assertAlmostEqual(model.nodes[10].sensor_manual_power_W, 77.0)
+        self.assertTrue(tab.prepared.marked)
+        self.assertTrue(tab.prepared.reset)
 
     def test_simulation_parameter_change_defers_reinitialize_without_redraw(self) -> None:
         try:
@@ -2417,7 +2454,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         tab.inputs = {"mimo_lambda_u": Spin(0.5)}
         tab.prepared = Prepared()
         tab.timer = Timer()
-        tab.fast_forward_timer = Timer()
         tab.simulation_future = Future()
         tab.simulation_cancel_event = Event()
         tab._simulation_reinitialize_pending = False
@@ -2503,7 +2539,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         tab.folder = None
         tab.prepared = Prepared()
         tab.timer = Timer()
-        tab.fast_forward_timer = Timer()
         tab.simulation_future = Future()
         tab.simulation_cancel_event = Event()
         tab._simulation_reinitialize_pending = False
@@ -2682,7 +2717,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         tab.prepared = Prepared()
         tab.params = SimulationParameters(t_final_s=10.0, live_step_profile_threshold_ms=1.0e9)
         tab.timer = Timer(active=False)
-        tab.fast_forward_timer = Timer(active=False)
         tab.simulation_worker_timer = Timer(active=False)
         tab.simulation_executor = executor
         tab.simulation_future = None
@@ -2722,72 +2756,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertEqual(tab._playback_timer_interval_ms(), 400)
         self.assertEqual(tab._playback_steps_per_tick(), 1)
-
-    def test_simulation_run_to_end_advances_in_fast_burst(self) -> None:
-        try:
-            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
-
-        class Timer:
-            def __init__(self) -> None:
-                self.started = False
-                self.stopped = False
-
-            def start(self, interval: int) -> None:
-                self.started = True
-                self.interval = int(interval)
-
-            def stop(self) -> None:
-                self.stopped = True
-
-        class Prepared:
-            def __init__(self) -> None:
-                self.time_s = 0.0
-                self.values = np.array([300.0], dtype=float)
-                self.calls = 0
-
-            @property
-            def temperatures_K(self) -> np.ndarray:
-                return self.values
-
-            def step_forward(self) -> None:
-                self.calls += 1
-                self.time_s += 1.0
-                self.values = self.values + 0.5
-
-        tab = object.__new__(HeatTransferSimulationTab)
-        tab.timer = Timer()
-        tab.fast_forward_timer = Timer()
-        tab.prepared = Prepared()
-        tab.params = SimulationParameters(t_final_s=5.0, display_update_interval_ms=100.0)
-        tab._simulation_reinitialize_pending = False
-        tab.initialize_simulation = lambda: (_ for _ in ()).throw(AssertionError("initialized unexpectedly"))
-        after_calls = []
-        tab._after_state_change = lambda: after_calls.append(True)
-        statuses = []
-        tab._status = lambda message, error=False: statuses.append(message)
-
-        tab.run_to_end()
-
-        self.assertTrue(tab.fast_forward_timer.started)
-        self.assertTrue(tab.fast_forward_timer.stopped)
-        self.assertEqual(tab.prepared.calls, 5)
-        self.assertEqual(after_calls, [True])
-        self.assertTrue(any("Completed simulation" in message for message in statuses))
-
-    def test_fast_forward_budget_uses_display_interval_bounds(self) -> None:
-        try:
-            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
-
-        tab = object.__new__(HeatTransferSimulationTab)
-        tab.params = SimulationParameters(display_update_interval_ms=1.0)
-        self.assertAlmostEqual(tab._fast_forward_budget_s(), 0.01)
-
-        tab.params = SimulationParameters(display_update_interval_ms=1000.0)
-        self.assertAlmostEqual(tab._fast_forward_budget_s(), 0.25)
 
     def test_live_step_profile_reports_slow_update_breakdown(self) -> None:
         try:
