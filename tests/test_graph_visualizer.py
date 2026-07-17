@@ -891,6 +891,70 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(prepared.heater_power_by_node()[2], 2.5)
         self.assertEqual(prepared.controller_mode, "coarse")
 
+    def test_mimo_qp_only_includes_heaters_with_mimo_enabled(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_only_enabled_heaters"))
+        sensor = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        sensor.C_J_K = 10.0
+        sensor.initial_temperature_K = 300.0
+        sensor.is_sensor = True
+        sensor.assigned_heater_ids = [2, 3]
+        sensor.readout_node_ids = [1]
+        sensor.controller_setpoint_K = 310.0
+        mimo_heater = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        mimo_heater.C_J_K = 10.0
+        mimo_heater.initial_temperature_K = 300.0
+        mimo_heater.is_heater = True
+        mimo_heater.assigned_sensor_id = 1
+        mimo_heater.heater.heater_max_power_W = 20.0
+        mimo_heater.sensor_control_mode = "mimo"
+        mimo_heater.controller_kp_coarse = 1.0
+        mimo_heater.power_deposition_node_ids = [2]
+        mimo_heater.power_deposition_weights = [1.0]
+        manual_heater = NodeProperties.with_material(3, (2, 0, 0), material="copper")
+        manual_heater.C_J_K = 10.0
+        manual_heater.initial_temperature_K = 300.0
+        manual_heater.is_heater = True
+        manual_heater.assigned_sensor_id = 1
+        manual_heater.heater.heater_max_power_W = 20.0
+        manual_heater.sensor_control_mode = "manual"
+        manual_heater.sensor_manual_power_W = 4.0
+        manual_heater.power_deposition_node_ids = [3]
+        manual_heater.power_deposition_weights = [1.0]
+        body = NodeProperties.with_material(4, (3, 0, 0), material="copper")
+        body.C_J_K = 10.0
+        body.initial_temperature_K = 300.0
+        model.add_node(sensor)
+        model.add_node(mimo_heater)
+        model.add_node(manual_heater)
+        model.add_node(body)
+        model.set_edge(1, 4, 0.1)
+        model.set_controller_gain(1, 2, 2.0)
+        model.set_controller_gain(1, 3, 999.0)
+        matrices = {
+            "node_ids": np.array([1, 2, 3, 4], dtype=int),
+            "C": np.array([10.0, 10.0, 10.0, 10.0]),
+            "L": np.zeros((4, 4)),
+            "G_rad": np.array([0.0, 0.0, 0.0, 0.0]),
+        }
+        params = SimulationParameters(
+            dt_s=1.0,
+            input_mode="heater_inputs",
+            mimo_controller_enabled=True,
+            mimo_lambda_u=0.0,
+            use_ambient_radiation=False,
+        )
+
+        prepared = prepare_simulation(model, matrices, params)
+        powers = prepared.heater_power_by_node()
+        diagnostics = prepared.controller_allocator_diagnostics
+
+        self.assertEqual(diagnostics["heater_ids"], [2])
+        self.assertEqual(diagnostics["active_heater_count"], 1)
+        self.assertEqual(len(diagnostics["B_s"][0]), 1)
+        self.assertEqual(len(diagnostics["heater_commands_W"]), 1)
+        self.assertAlmostEqual(powers[2], 2.5)
+        self.assertAlmostEqual(powers[3], 4.0)
+
     def test_bulk_role_assignment_matches_normalized_component_substring_per_node(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="bulk_roles"))
         left = NodeProperties.with_material(1, (0, 0, 0), material="copper")
