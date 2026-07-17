@@ -483,6 +483,82 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertTrue(issparse(loaded_matrices["L"]))
         self.assertAlmostEqual(float(loaded_matrices["L"][0, 0]), 0.25)
 
+    def test_octree_load_preserves_complete_saved_radiation_without_recomputing(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="saved_radiation"))
+        node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        node.material = "Copper"
+        node.center_mm = (0.0, 0.0, 0.0)
+        node.size_mm = (1.0, 1.0, 1.0)
+        node.C_J_K = 10.0
+        node.is_exposed = True
+        node.radiating_area_m2 = 1.25e-6
+        node.G_rad_W_K = 4.5e-8
+        node.Grad_W_K = 4.5e-8
+        model.add_node(node)
+        model.octree_graph_data = {"graph_edges": []}
+
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "graph.json").write_text(
+                json.dumps(model.to_octree_graph_dict()),
+                encoding="utf-8",
+            )
+
+            with patch("graph_visualizer.graph_io.refresh_radiation_from_exposed_faces") as refresh:
+                loaded_model, loaded_matrices = load_graph_folder(folder)
+
+        refresh.assert_not_called()
+        self.assertTrue(loaded_model.nodes[1].is_exposed)
+        self.assertAlmostEqual(loaded_model.nodes[1].radiating_area_m2, 1.25e-6)
+        self.assertAlmostEqual(loaded_model.nodes[1].G_rad_W_K, 4.5e-8)
+        self.assertAlmostEqual(float(loaded_matrices["G_rad"][0]), 4.5e-8)
+
+    def test_octree_load_recomputes_radiation_for_incomplete_legacy_payload(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="legacy_radiation"))
+        node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        node.material = "Copper"
+        node.center_mm = (0.0, 0.0, 0.0)
+        node.size_mm = (1.0, 1.0, 1.0)
+        node.C_J_K = 10.0
+        model.add_node(node)
+        model.octree_graph_data = {"graph_edges": []}
+        payload = model.to_octree_graph_dict()
+        payload["graph_nodes"][0].pop("radiation")
+
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "graph.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+
+            with patch("graph_visualizer.graph_io.refresh_radiation_from_exposed_faces", return_value=0) as refresh:
+                load_graph_folder(folder)
+
+        refresh.assert_called_once()
+
+    def test_octree_load_recomputes_radiation_for_all_zero_placeholder_payload(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="placeholder_radiation"))
+        node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        node.material = "Copper"
+        node.center_mm = (0.0, 0.0, 0.0)
+        node.size_mm = (1.0, 1.0, 1.0)
+        node.C_J_K = 10.0
+        model.add_node(node)
+        model.octree_graph_data = {"graph_edges": []}
+
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "graph.json").write_text(
+                json.dumps(model.to_octree_graph_dict()),
+                encoding="utf-8",
+            )
+
+            with patch("graph_visualizer.graph_io.refresh_radiation_from_exposed_faces", return_value=0) as refresh:
+                load_graph_folder(folder)
+
+        refresh.assert_called_once()
+
     def test_large_octree_save_preserves_existing_matrix_payload(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="metadata_only_large_save"))
         left = NodeProperties.with_material(1, (0, 0, 0), material="copper")

@@ -72,10 +72,12 @@ def load_graph_folder(folder_path: str | Path) -> tuple[ThermalGraphModel, dict[
     octree_path = folder / OCTREE_GRAPH_FILE
     graph_path = folder / GRAPH_FILE
     matrix_path = folder / MATRIX_FILE
+    has_saved_octree_radiation = False
     if octree_path.exists():
         log_event("load_graph_folder read octree graph.json")
         with octree_path.open("r", encoding="utf-8") as handle:
             graph_data = json.load(handle)
+        has_saved_octree_radiation = _has_complete_saved_octree_radiation(graph_data)
         model = ThermalGraphModel.from_octree_graph_dict(graph_data)
         log_event("load_graph_folder parsed octree graph", nodes=len(model.nodes), edges=len(model.edges))
         model.metadata.graph_name = model.metadata.graph_name or folder.name
@@ -136,8 +138,11 @@ def load_graph_folder(folder_path: str | Path) -> tuple[ThermalGraphModel, dict[
     if octree_path.exists():
         log_event("load_graph_folder refresh octree auto geometry")
         matrices = _refresh_octree_auto_geometry(model, matrices)
-        log_event("load_graph_folder refresh octree radiation")
-        _refresh_octree_radiation(model)
+        if has_saved_octree_radiation:
+            log_event("load_graph_folder preserve saved octree radiation")
+        else:
+            log_event("load_graph_folder refresh octree radiation")
+            _refresh_octree_radiation(model)
         matrices = _sync_radiation_matrix_from_model(model, matrices)
     matrix_errors = validate_matrices(matrices, model.ordered_node_ids())
     raise_if_errors(matrix_errors, "Loaded matrices are invalid")
@@ -229,6 +234,41 @@ def has_generated_role_contact_edges(model: ThermalGraphModel) -> bool:
 
 def has_consolidated_role_edges(model: ThermalGraphModel) -> bool:
     return has_generated_role_contact_edges(model)
+
+
+def _has_complete_saved_octree_radiation(graph_data: dict[str, Any]) -> bool:
+    graph_nodes = graph_data.get("graph_nodes", [])
+    if not isinstance(graph_nodes, list) or not graph_nodes:
+        return False
+    physical_nodes = 0
+    has_radiation_signal = False
+    for raw_node in graph_nodes:
+        if not isinstance(raw_node, dict):
+            return False
+        if _raw_node_is_cad_role_node(raw_node):
+            continue
+        physical_nodes += 1
+        radiation = raw_node.get("radiation")
+        if not isinstance(radiation, dict):
+            return False
+        if not {"is_exposed", "radiating_area_m2", "G_rad_W_K"}.issubset(radiation):
+            return False
+        try:
+            area_m2 = float(radiation["radiating_area_m2"])
+            conductance = float(radiation["G_rad_W_K"])
+        except (TypeError, ValueError):
+            return False
+        if not np.isfinite(area_m2) or not np.isfinite(conductance):
+            return False
+        if area_m2 < -1.0e-15 or conductance < -1.0e-15:
+            return False
+        if bool(radiation.get("is_exposed", False)) or area_m2 > 1.0e-15 or conductance > 1.0e-15:
+            has_radiation_signal = True
+    return physical_nodes > 0 and has_radiation_signal
+
+
+def _raw_node_is_cad_role_node(raw_node: dict[str, Any]) -> bool:
+    return bool(str(raw_node.get("node_type", "")) in {"heater", "sensor"} and raw_node.get("source_components"))
 
 
 def _matrix_has_conduction(matrices: dict[str, np.ndarray]) -> bool:
