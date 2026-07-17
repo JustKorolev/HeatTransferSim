@@ -1186,15 +1186,30 @@ class PreparedSimulation:
         )
         slew_rate = max(0.0, float(getattr(self.params, "mimo_heater_slew_rate_W_per_s", 0.0)))
         max_delta_power = np.full(len(heater_ids), slew_rate * dt, dtype=float) if slew_rate > 0.0 else None
-        raw_dTdt, dTdt_hat = self._mimo_sensor_drift_estimate(sensor_ids, y, dt)
         B_s = self._mimo_dynamic_gain_matrix(
             sensor_ids,
             heater_ids,
             node_index,
         )
+        raw_dTdt, dTdt_hat = self._mimo_sensor_drift_estimate(sensor_ids, y, dt)
+        passive_dTdt = self._mimo_baseline_sensor_drift(sensor_ids, node_index, powers)
+        hold_result = allocate_thermal_rate_qp(
+            B_s,
+            passive_dTdt,
+            np.zeros(len(sensor_ids), dtype=float),
+            weights,
+            maxima,
+            np.zeros(len(heater_ids), dtype=float),
+            0.0,
+            0.0,
+            None,
+        )
+        u_ff = np.asarray(hold_result.u, dtype=float).reshape(-1)
+        u_ff = np.clip(np.where(np.isfinite(u_ff), u_ff, 0.0), 0.0, maxima)
+        drift_for_qp = passive_dTdt + B_s @ u_prev
         allocation = allocate_thermal_rate_qp(
             B_s,
-            dTdt_hat,
+            drift_for_qp,
             v_cmd,
             weights,
             maxima,
@@ -1202,6 +1217,7 @@ class PreparedSimulation:
             float(getattr(self.params, "mimo_lambda_u", 1.0e-3)),
             float(getattr(self.params, "mimo_rho_du", 0.0)),
             max_delta_power,
+            u_ff,
         )
         u = np.asarray(allocation.u, dtype=float).reshape(-1)
         u = np.clip(np.where(np.isfinite(u), u, 0.0), 0.0, maxima)
@@ -1214,10 +1230,12 @@ class PreparedSimulation:
                 float(command),
             )
         heater_delta_dTdt = B_s @ (u - u_prev)
-        predicted_dTdt = dTdt_hat + heater_delta_dTdt
+        heater_total_dTdt = B_s @ u
+        predicted_dTdt = passive_dTdt + heater_total_dTdt
         residual = predicted_dTdt - v_cmd
         gain_warnings = list((self.controller_dynamic_gain_cache or {}).get("warnings", ()))
-        self.controller_warnings = pair_warnings + gain_warnings + list(allocation.warnings)
+        hold_warnings = [f"MIMO feedforward hold solve: {warning}" for warning in hold_result.warnings]
+        self.controller_warnings = pair_warnings + gain_warnings + hold_warnings + list(allocation.warnings)
         self.controller_allocator_diagnostics = {
             "active_sensor_count": len(sensor_ids),
             "active_heater_count": len(heater_ids),
@@ -1234,6 +1252,8 @@ class PreparedSimulation:
             "rate_command_norm": float(np.linalg.norm(v_cmd)),
             "heater_command_norm": float(np.linalg.norm(u)),
             "measured_drift_dTdt_norm": float(np.linalg.norm(dTdt_hat)),
+            "passive_drift_dTdt_norm": float(np.linalg.norm(passive_dTdt)),
+            "feedforward_hold_power_norm": float(np.linalg.norm(u_ff)),
             "predicted_dTdt_norm": float(np.linalg.norm(predicted_dTdt)),
             "predicted_dTdt_residual_norm": float(np.linalg.norm(residual)),
             "allocation_residual_norm": float(np.linalg.norm(residual)),
@@ -1241,6 +1261,9 @@ class PreparedSimulation:
             "bounds_active": bool(allocation.bounds_active),
             "solver_success": bool(allocation.solver_success),
             "solver_message": str(allocation.solver_message),
+            "feedforward_solver_success": bool(hold_result.solver_success),
+            "feedforward_solver_message": str(hold_result.solver_message),
+            "feedforward_residual_norm": float(hold_result.residual_norm),
             "lambda_u": float(getattr(self.params, "mimo_lambda_u", 1.0e-3)),
             "rho_du": float(getattr(self.params, "mimo_rho_du", 0.0)),
             "slew_rate_limit_W_per_s": float(slew_rate),
@@ -1249,13 +1272,17 @@ class PreparedSimulation:
             "v_cmd_max_K_per_s": float(np.max(v_cmd)) if v_cmd.size else 0.0,
             "raw_dTdt_s": [float(value) for value in raw_dTdt],
             "filtered_dTdt_hat_s": [float(value) for value in dTdt_hat],
+            "passive_dTdt_s": [float(value) for value in passive_dTdt],
+            "drift_for_qp_dTdt_s": [float(value) for value in drift_for_qp],
             "B_s": [[float(value) for value in row] for row in B_s],
             "average_inverse_C_s": list((self.controller_dynamic_gain_cache or {}).get("average_inverse_C_s", [])),
             "B_s_delta_u_dTdt_s": [float(value) for value in heater_delta_dTdt],
+            "B_s_u_dTdt_s": [float(value) for value in heater_total_dTdt],
             "v_cmd_s": [float(value) for value in v_cmd],
             "predicted_dTdt_s": [float(value) for value in predicted_dTdt],
             "achieved_predicted_dTdt_s": [float(value) for value in predicted_dTdt],
             "residual_s": [float(value) for value in residual],
+            "feedforward_hold_power_W": [float(value) for value in u_ff],
             "heater_commands_W": [float(value) for value in u],
             "u_prev_W": [float(value) for value in u_prev],
             "heater_at_lower_bound": [bool(value <= 1.0e-9) for value in u],
@@ -1313,6 +1340,25 @@ class PreparedSimulation:
             }
             self.controller_error_history = committed_error_history
         return powers
+
+    def _mimo_baseline_sensor_drift(
+        self,
+        sensor_ids: list[int],
+        node_index: dict[int, int],
+        baseline_powers: np.ndarray,
+    ) -> np.ndarray:
+        if self.model is None or self.A is None or self.base_b is None or self.inv_C is None:
+            return np.zeros(len(sensor_ids), dtype=float)
+        try:
+            rhs = self._thermal_rhs(self.temperatures_K, baseline_powers)
+        except Exception as exc:
+            self.controller_warnings.append(f"MIMO feedforward passive drift estimate failed: {exc}")
+            return np.zeros(len(sensor_ids), dtype=float)
+        values = [
+            sensor_readout_temperature_K(self.model, node_index, rhs, int(sensor_id))
+            for sensor_id in sensor_ids
+        ]
+        return np.where(np.isfinite(values), np.asarray(values, dtype=float), 0.0)
 
     def _mimo_sensor_drift_estimate(
         self,

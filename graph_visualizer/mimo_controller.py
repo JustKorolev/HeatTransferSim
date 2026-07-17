@@ -43,6 +43,7 @@ def allocate_thermal_rate_qp(
     lambda_u: float,
     rho_du: float,
     max_delta_power: np.ndarray | None = None,
+    u_ref: np.ndarray | None = None,
 ) -> AllocationResult:
     raw_B = np.asarray(B_dyn, dtype=float)
     if raw_B.ndim != 2:
@@ -52,6 +53,11 @@ def allocate_thermal_rate_qp(
     command = np.asarray(v_cmd, dtype=float).reshape(-1)
     maxima = np.asarray(max_powers, dtype=float).reshape(-1)
     previous = np.asarray(u_prev, dtype=float).reshape(-1)
+    reference = (
+        np.zeros_like(previous, dtype=float)
+        if u_ref is None
+        else np.asarray(u_ref, dtype=float).reshape(-1)
+    )
     delta_limit = (
         np.full(nh, np.inf, dtype=float)
         if max_delta_power is None
@@ -65,6 +71,8 @@ def allocate_thermal_rate_qp(
         raise ValueError(f"Heater max-power vector length {maxima.shape} does not match B_dyn columns {nh}.")
     if previous.shape != (nh,):
         raise ValueError(f"Previous heater command vector length {previous.shape} does not match B_dyn columns {nh}.")
+    if reference.shape != (nh,):
+        raise ValueError(f"Heater reference vector length {reference.shape} does not match B_dyn columns {nh}.")
     if delta_limit.shape != (nh,):
         raise ValueError(f"Heater slew delta vector length {delta_limit.shape} does not match B_dyn columns {nh}.")
     if ns == 0 or nh == 0:
@@ -87,6 +95,7 @@ def allocate_thermal_rate_qp(
     command = np.where(np.isfinite(command), command, 0.0)
     maxima = np.where(np.isfinite(maxima), np.maximum(maxima, 0.0), 0.0)
     previous = np.clip(np.where(np.isfinite(previous), previous, 0.0), 0.0, maxima)
+    reference = np.clip(np.where(np.isfinite(reference), reference, 0.0), 0.0, maxima)
     delta_limit = np.where(np.isfinite(delta_limit), np.maximum(delta_limit, 0.0), np.inf)
     warnings: list[str] = []
     positive_power = maxima > 0.0
@@ -113,6 +122,7 @@ def allocate_thermal_rate_qp(
             lambda_u,
             rho_du,
             delta_limit[positive_power],
+            reference[positive_power],
         )
         u = np.zeros(nh, dtype=float)
         u[positive_power] = sub_result.u
@@ -152,7 +162,7 @@ def allocate_thermal_rate_qp(
     if lam > 0.0:
         scale = float(np.sqrt(lam))
         A_parts.append(scale * np.eye(nh))
-        b_parts.append(np.zeros(nh, dtype=float))
+        b_parts.append(scale * reference)
     rho = max(0.0, float(rho_du))
     if rho > 0.0:
         scale = float(np.sqrt(rho))

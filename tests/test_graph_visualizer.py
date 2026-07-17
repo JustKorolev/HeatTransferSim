@@ -798,6 +798,24 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(float(result.u[0]), 7.0)
         self.assertFalse(result.bounds_active)
 
+    def test_mimo_rate_allocator_penalizes_distance_from_reference_power(self) -> None:
+        result = allocate_thermal_rate_qp(
+            np.array([[1.0]], dtype=float),
+            np.array([0.0], dtype=float),
+            np.array([10.0], dtype=float),
+            np.array([1.0], dtype=float),
+            np.array([20.0], dtype=float),
+            np.array([0.0], dtype=float),
+            1.0,
+            0.0,
+            None,
+            np.array([20.0], dtype=float),
+        )
+
+        self.assertTrue(result.solver_success)
+        self.assertAlmostEqual(float(result.u[0]), 15.0)
+        self.assertFalse(result.bounds_active)
+
     def test_mimo_rate_allocator_enforces_hard_slew_bound(self) -> None:
         result = allocate_thermal_rate_qp(
             np.array([[1.0]], dtype=float),
@@ -1288,6 +1306,55 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(diagnostics["filtered_dTdt_hat_s"], [0.25])
         self.assertEqual(diagnostics["B_s"], [[0.1]])
 
+    def test_mimo_zero_gains_feedforward_holds_against_model_cooling_load(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_feedforward_hold"))
+        node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        node.C_J_K = 10.0
+        node.initial_temperature_K = 300.0
+        node.is_heater = True
+        node.is_sensor = True
+        node.has_cryocooler = True
+        node.sensor_connected_node_ids = [1]
+        node.power_deposition_node_ids = [1]
+        node.power_deposition_weights = [1.0]
+        node.heater.heater_max_power_W = 20.0
+        node.heater_control.mode = "mimo"
+        node.controller_setpoint_K = 300.0
+        node.controller_kp_coarse = 0.0
+        node.controller_ki_coarse = 0.0
+        node.controller_kd_coarse = 0.0
+        model.add_node(node)
+        matrices = {
+            "node_ids": np.array([1], dtype=int),
+            "C": np.array([10.0]),
+            "L": np.zeros((1, 1)),
+            "G_rad": np.array([0.0]),
+        }
+        prepared = prepare_simulation(
+            model,
+            matrices,
+            SimulationParameters(
+                dt_s=1.0,
+                input_mode="heater_inputs",
+                Kp_cooler=1.0,
+                P_cooler_max=5.0,
+                T_cooler_setpoint=290.0,
+                use_ambient_radiation=False,
+            ),
+        )
+
+        actuator_power = prepared.heater_actuator_power_by_node()[1]
+        net_power = prepared.heater_power_by_node()[1]
+
+        self.assertAlmostEqual(actuator_power, 5.0)
+        self.assertAlmostEqual(net_power, 0.0)
+        diagnostics = prepared.controller_allocator_diagnostics
+        self.assertEqual(diagnostics["v_cmd_s"], [0.0])
+        self.assertEqual(diagnostics["passive_dTdt_s"], [-0.5])
+        self.assertAlmostEqual(diagnostics["feedforward_hold_power_W"][0], 5.0)
+        prepared.step_forward()
+        self.assertAlmostEqual(float(prepared.temperatures_K[0]), 300.0)
+
     def test_disabled_manual_heater_outputs_zero_power(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="disabled_manual_heater"))
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
@@ -1455,7 +1522,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         prepared.step_forward()
 
         self.assertAlmostEqual(prepared.controller_integrators[1], 10.0)
-        self.assertAlmostEqual(prepared.heater_power_by_node()[1], 4.166666666666667)
+        self.assertAlmostEqual(prepared.heater_power_by_node()[1], 2.5)
 
     def test_mimo_fractional_integral_order_scales_rate_command(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_fractional_integrator"))
@@ -1682,7 +1749,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         prepared.step_forward()
 
         self.assertEqual(prepared.controller_mode, "hold")
-        self.assertAlmostEqual(prepared.controller_last_power_by_heater[1], 4.0)
+        self.assertGreater(prepared.controller_last_power_by_heater[1], 3.9)
+        self.assertLess(prepared.controller_last_power_by_heater[1], 4.0)
 
     def test_disabled_mimo_controller_does_not_use_manual_fallback_power_for_sys_id(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_sys_id_baseline"))
