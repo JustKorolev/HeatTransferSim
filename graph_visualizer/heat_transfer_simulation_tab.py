@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 import threading
@@ -31,6 +31,7 @@ from .simulation_parameters import (
     load_simulation_parameters,
     save_simulation_parameters,
 )
+from .simulation_diagnostics import compare_implicit_cpu_to_expm_multiply, save_stepper_comparison
 from .sys_id_artifacts import (
     list_sys_id_gain_matrices,
     load_sys_id_gain_matrix,
@@ -125,6 +126,9 @@ class HeatTransferSimulationTab:
         self.simulation_future: Future[dict[str, Any]] | None = None
         self.simulation_cancel_event: threading.Event | None = None
         self._simulation_worker_mode: str | None = None
+        self.stepper_diagnostic_future: Future[dict[str, Any]] | None = None
+        self.stepper_diagnostic_timer = self.QtCore.QTimer(self.widget)
+        self.stepper_diagnostic_timer.timeout.connect(self._poll_stepper_diagnostic_worker)
         self._pending_controller_runtime_params: SimulationParameters | None = None
         self._pending_controller_runtime_fields: set[str] = set()
         self._pending_editor_controller_refresh: tuple[ThermalGraphModel, Path | None] | None = None
@@ -164,6 +168,7 @@ class HeatTransferSimulationTab:
         self._add_playback_controls(form)
         self._add_enabled_io_controls(form)
         self._add_sys_id_controls(form)
+        self._add_stepper_diagnostic_controls(form)
         self._add_component_temperature_controls(form)
 
         self.warning_label = self.QtWidgets.QLabel("")
@@ -342,6 +347,25 @@ class HeatTransferSimulationTab:
         reset_controller = self.QtWidgets.QPushButton("Reset MIMO Integrators")
         reset_controller.clicked.connect(self.reset_controller_integrators)
         form.addRow(reset_controller)
+
+    def _add_stepper_diagnostic_controls(self, form: Any) -> None:
+        box, diag_form = self._section("Solver Diagnostic")
+        self.stepper_diagnostic_steps = self._int_spin(1, 100_000, 1, 1)
+        self.stepper_diagnostic_save = self._checkbox("Save matrices", True)
+        self.stepper_diagnostic_button = self.QtWidgets.QPushButton("Compare Implicit vs Reference")
+        self.stepper_diagnostic_button.setToolTip(
+            "Compare the implicit sparse CPU solver against expm_multiply using the current graph and parameters."
+        )
+        self.stepper_diagnostic_button.clicked.connect(self.run_stepper_diagnostic)
+        button_row = self.QtWidgets.QHBoxLayout()
+        button_row.addWidget(self.stepper_diagnostic_button)
+        button_row.addWidget(self.stepper_diagnostic_save)
+        diag_form.addRow("steps", self.stepper_diagnostic_steps)
+        diag_form.addRow(button_row)
+        self.stepper_diagnostic_status_label = self.QtWidgets.QLabel("Idle.")
+        self.stepper_diagnostic_status_label.setWordWrap(True)
+        diag_form.addRow("result", self.stepper_diagnostic_status_label)
+        form.addRow(box)
 
     def _add_enabled_io_controls(self, form: Any) -> None:
         box, layout = self._section("Enabled Simulation I/O")
@@ -809,6 +833,9 @@ class HeatTransferSimulationTab:
     def shutdown(self) -> None:
         self.timer.stop()
         self.fast_forward_timer.stop()
+        diagnostic_timer = getattr(self, "stepper_diagnostic_timer", None)
+        if diagnostic_timer is not None:
+            diagnostic_timer.stop()
         parameter_save_timer = getattr(self, "parameter_save_timer", None)
         if parameter_save_timer is not None:
             parameter_save_timer.stop()
@@ -925,6 +952,91 @@ class HeatTransferSimulationTab:
 
     def _run_to_end_steps_per_batch(self) -> int:
         return max(5, min(100, self._playback_steps_per_tick()))
+
+    def run_stepper_diagnostic(self) -> None:
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; run the solver diagnostic after the current compute step finishes.")
+            return
+        if self._stepper_diagnostic_worker_active():
+            self._status("Solver diagnostic is already running.", True)
+            return
+        if self.sys_id_state is not None:
+            self._status("Finish or cancel G_ctrl sys ID before running the solver diagnostic.", True)
+            return
+        self.pause()
+        if self.model is None:
+            self.use_current_graph()
+        if self.model is None:
+            self._status("Load a graph before running the solver diagnostic.", True)
+            return
+        try:
+            self._refresh_matrices_for_run()
+            self.params = self._read_params()
+            self._save_params_to_folder()
+            steps = max(1, int(self.stepper_diagnostic_steps.value()))
+            output_dir = self._stepper_diagnostic_output_dir() if self.stepper_diagnostic_save.isChecked() else None
+            self.stepper_diagnostic_status_label.setText(
+                f"Running {steps} step comparison: implicit sparse CPU vs expm_multiply."
+            )
+            self.stepper_diagnostic_button.setEnabled(False)
+            worker_args = (self.model, dict(self.matrices), self.params, steps, output_dir)
+            executor = getattr(self, "simulation_executor", None)
+            if executor is None:
+                result = _run_stepper_diagnostic_worker(*worker_args)
+                self._apply_stepper_diagnostic_result(result)
+                return
+            self.stepper_diagnostic_future = executor.submit(_run_stepper_diagnostic_worker, *worker_args)
+            self.stepper_diagnostic_timer.start(50)
+            self._status("Solver diagnostic running in background.")
+        except Exception as exc:
+            self.stepper_diagnostic_button.setEnabled(True)
+            self.stepper_diagnostic_status_label.setText(f"Failed: {exc}")
+            self._status(f"Solver diagnostic failed: {exc}", True)
+            log_exception("solver diagnostic failed", exc)
+
+    def _stepper_diagnostic_output_dir(self) -> Path | None:
+        if self.folder is None:
+            return None
+        name = "stepper_compare_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        return self.folder / "simulations" / name
+
+    def _stepper_diagnostic_worker_active(self) -> bool:
+        future = getattr(self, "stepper_diagnostic_future", None)
+        return future is not None and not future.done()
+
+    def _poll_stepper_diagnostic_worker(self) -> None:
+        future = getattr(self, "stepper_diagnostic_future", None)
+        if future is None:
+            self.stepper_diagnostic_timer.stop()
+            return
+        if not future.done():
+            return
+        self.stepper_diagnostic_timer.stop()
+        self.stepper_diagnostic_future = None
+        self.stepper_diagnostic_button.setEnabled(True)
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.stepper_diagnostic_status_label.setText(f"Failed: {exc}")
+            self._status(f"Solver diagnostic failed: {exc}", True)
+            log_exception("solver diagnostic failed", exc)
+            return
+        self._apply_stepper_diagnostic_result(result)
+
+    def _apply_stepper_diagnostic_result(self, result: dict[str, Any]) -> None:
+        self.stepper_diagnostic_button.setEnabled(True)
+        summary = _format_stepper_diagnostic_summary(result)
+        self.stepper_diagnostic_status_label.setText(summary)
+        metrics = result.get("metrics", {})
+        if isinstance(metrics, dict):
+            self._status(
+                "Solver diagnostic complete: "
+                f"max error = {float(metrics.get('max_abs_error_K', 0.0)):.4g} K, "
+                f"RMSE = {float(metrics.get('rmse_K', 0.0)):.4g} K."
+            )
+        else:
+            self._status("Solver diagnostic complete.")
 
     def _simulation_worker_active(self) -> bool:
         future = getattr(self, "simulation_future", None)
@@ -2363,6 +2475,82 @@ def _format_live_step_profile(profile: dict[str, float], steps_completed: int, m
         f"Live step profile: total={total_ms:.1f} ms, steps={int(steps_completed)}, "
         f"max dT={float(max_delta_K):.3e} K, largest={bottleneck}.{detail}"
     )
+
+
+def _run_stepper_diagnostic_worker(
+    model: ThermalGraphModel,
+    matrices: dict[str, Any],
+    params: SimulationParameters,
+    steps: int,
+    output_dir: Path | None,
+) -> dict[str, Any]:
+    result = compare_implicit_cpu_to_expm_multiply(model, matrices, params, steps=max(1, int(steps)))
+    saved_output_dir: str | None = None
+    if output_dir is not None:
+        saved_output_dir = str(save_stepper_comparison(result, output_dir))
+    return {
+        "metrics": asdict(result.metrics),
+        "implicit_profile_ms": dict(result.implicit_profile_ms),
+        "reference_profile_ms": dict(result.reference_profile_ms),
+        "implicit_warnings": list(result.implicit_warnings),
+        "reference_warnings": list(result.reference_warnings),
+        "output_dir": saved_output_dir,
+    }
+
+
+def _format_stepper_diagnostic_summary(result: dict[str, Any]) -> str:
+    metrics = result.get("metrics", {})
+    if not isinstance(metrics, dict):
+        return "Solver diagnostic complete."
+    implicit_profile = result.get("implicit_profile_ms", {})
+    reference_profile = result.get("reference_profile_ms", {})
+    implicit_profile = implicit_profile if isinstance(implicit_profile, dict) else {}
+    reference_profile = reference_profile if isinstance(reference_profile, dict) else {}
+    output_dir = result.get("output_dir")
+    parts = [
+        f"{metrics.get('implicit_stepper', 'implicit')} vs {metrics.get('reference_stepper', 'reference')}",
+        f"steps={int(metrics.get('steps', 0))}, nodes={int(metrics.get('node_count', 0))}, dt={float(metrics.get('dt_s', 0.0)):.6g} s",
+        (
+            f"max abs error={float(metrics.get('max_abs_error_K', 0.0)):.6g} K, "
+            f"mean abs={float(metrics.get('mean_abs_error_K', 0.0)):.6g} K, "
+            f"RMSE={float(metrics.get('rmse_K', 0.0)):.6g} K"
+        ),
+        (
+            f"final max={float(metrics.get('final_max_abs_error_K', 0.0)):.6g} K, "
+            f"final RMSE={float(metrics.get('final_rmse_K', 0.0)):.6g} K, "
+            f"relative Frobenius={float(metrics.get('relative_frobenius_error', 0.0)):.6g}"
+        ),
+        (
+            f"worst node={int(metrics.get('worst_node_id', -1))} "
+            f"at t={float(metrics.get('worst_time_s', 0.0)):.6g} s "
+            f"(step {int(metrics.get('worst_step_index', 0))})"
+        ),
+        (
+            f"solve time: implicit={float(metrics.get('implicit_elapsed_s', 0.0)):.3f} s, "
+            f"reference={float(metrics.get('reference_elapsed_s', 0.0)):.3f} s"
+        ),
+    ]
+    substeps = implicit_profile.get("substeps")
+    predicted_delta = implicit_profile.get("predicted_delta_K")
+    if substeps is not None or predicted_delta is not None:
+        details = []
+        if substeps is not None:
+            details.append(f"implicit substeps={int(float(substeps))}")
+        if predicted_delta is not None:
+            details.append(f"predicted dT={float(predicted_delta):.6g} K")
+        parts.append(", ".join(details))
+    if reference_profile:
+        reference_ms = reference_profile.get("cpu_expm_multiply_ms")
+        if reference_ms is not None:
+            parts.append(f"reference expm_multiply={float(reference_ms):.1f} ms")
+    if output_dir:
+        parts.append(f"saved: {output_dir}")
+    else:
+        parts.append("matrices not saved")
+    warnings = list(result.get("implicit_warnings") or []) + list(result.get("reference_warnings") or [])
+    if warnings:
+        parts.append("warnings: " + " | ".join(str(item) for item in warnings[:3]))
+    return "\n".join(parts)
 
 
 def _run_simulation_worker_batch(

@@ -3941,6 +3941,144 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertIn("No body power deposition nodes found.", text)
         self.assertIn("heater has no assigned sensor", text)
 
+    def test_stepper_comparison_builds_elementwise_error_matrix(self) -> None:
+        from graph_visualizer.simulation_diagnostics import compare_implicit_cpu_to_expm_multiply
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="stepper_compare"))
+        left = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        right = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        left.C_J_K = right.C_J_K = 10.0
+        left.initial_temperature_K = 310.0
+        right.initial_temperature_K = 290.0
+        model.add_node(left)
+        model.add_node(right)
+        L = csr_matrix(np.array([[0.5, -0.5], [-0.5, 0.5]], dtype=float))
+        matrices = {
+            "node_ids": np.array([1, 2], dtype=int),
+            "C": np.array([10.0, 10.0], dtype=float),
+            "L": L,
+            "G_rad": np.zeros(2, dtype=float),
+        }
+
+        result = compare_implicit_cpu_to_expm_multiply(
+            model,
+            matrices,
+            SimulationParameters(dt_s=1.0, use_ambient_radiation=False),
+            steps=3,
+        )
+
+        self.assertEqual(result.implicit_temperature_K.shape, (4, 2))
+        self.assertEqual(result.reference_temperature_K.shape, (4, 2))
+        self.assertEqual(result.error_K.shape, (4, 2))
+        self.assertEqual(result.metrics.steps, 3)
+        self.assertEqual(result.metrics.node_count, 2)
+        self.assertEqual(result.metrics.implicit_stepper, "implicit_sparse_cpu")
+        self.assertEqual(result.metrics.reference_stepper, "expm_multiply")
+        self.assertGreaterEqual(result.metrics.max_abs_error_K, 0.0)
+        self.assertTrue(np.allclose(result.error_K, result.implicit_temperature_K - result.reference_temperature_K))
+
+    def test_stepper_comparison_saves_artifacts(self) -> None:
+        from graph_visualizer.simulation_diagnostics import (
+            compare_implicit_cpu_to_expm_multiply,
+            save_stepper_comparison,
+        )
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="stepper_compare_save"))
+        node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        node.C_J_K = 10.0
+        node.initial_temperature_K = 300.0
+        model.add_node(node)
+        matrices = {
+            "node_ids": np.array([1], dtype=int),
+            "C": np.array([10.0], dtype=float),
+            "L": csr_matrix(np.array([[1.0]], dtype=float)),
+            "G_rad": np.zeros(1, dtype=float),
+        }
+        result = compare_implicit_cpu_to_expm_multiply(
+            model,
+            matrices,
+            SimulationParameters(dt_s=1.0, use_ambient_radiation=False),
+            steps=2,
+        )
+
+        with TemporaryDirectory() as directory:
+            output_dir = save_stepper_comparison(result, Path(directory))
+
+            self.assertTrue((output_dir / "summary.json").exists())
+            self.assertTrue((output_dir / "implicit_temperature_K.npy").exists())
+            self.assertTrue((output_dir / "reference_temperature_K.npy").exists())
+            self.assertTrue((output_dir / "temperature_error_K.npy").exists())
+            saved_error = np.load(output_dir / "temperature_error_K.npy")
+
+        self.assertTrue(np.allclose(saved_error, result.error_K))
+
+    def test_stepper_diagnostic_worker_returns_ui_summary_payload(self) -> None:
+        import sys
+        import types
+
+        heat_tab_module_name = "graph_visualizer.heat_transfer_simulation_tab"
+        pyvista_module_name = "graph_visualizer.pyvista_widget"
+        qtpy_module_name = "qtpy"
+        previous_heat_tab = sys.modules.pop(heat_tab_module_name, None)
+        previous_pyvista = sys.modules.get(pyvista_module_name)
+        previous_qtpy = sys.modules.get(qtpy_module_name)
+        pyvista_stub = types.ModuleType(pyvista_module_name)
+        pyvista_stub.GraphPyVistaWidget = object
+        sys.modules[pyvista_module_name] = pyvista_stub
+        qtpy_stub = types.ModuleType(qtpy_module_name)
+        qtpy_stub.QtGui = types.SimpleNamespace()
+        sys.modules[qtpy_module_name] = qtpy_stub
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import (
+                _format_stepper_diagnostic_summary,
+                _run_stepper_diagnostic_worker,
+            )
+        finally:
+            sys.modules.pop(heat_tab_module_name, None)
+            if previous_heat_tab is not None:
+                sys.modules[heat_tab_module_name] = previous_heat_tab
+            if previous_pyvista is not None:
+                sys.modules[pyvista_module_name] = previous_pyvista
+            else:
+                sys.modules.pop(pyvista_module_name, None)
+            if previous_qtpy is not None:
+                sys.modules[qtpy_module_name] = previous_qtpy
+            else:
+                sys.modules.pop(qtpy_module_name, None)
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="stepper_compare_worker"))
+        left = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        right = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        left.C_J_K = right.C_J_K = 10.0
+        left.initial_temperature_K = 310.0
+        right.initial_temperature_K = 290.0
+        model.add_node(left)
+        model.add_node(right)
+        matrices = {
+            "node_ids": np.array([1, 2], dtype=int),
+            "C": np.array([10.0, 10.0], dtype=float),
+            "L": csr_matrix(np.array([[0.5, -0.5], [-0.5, 0.5]], dtype=float)),
+            "G_rad": np.zeros(2, dtype=float),
+        }
+
+        with TemporaryDirectory() as directory:
+            payload = _run_stepper_diagnostic_worker(
+                model,
+                matrices,
+                SimulationParameters(dt_s=1.0, use_ambient_radiation=False),
+                2,
+                Path(directory) / "diagnostic",
+            )
+            summary = _format_stepper_diagnostic_summary(payload)
+
+            self.assertTrue((Path(directory) / "diagnostic" / "summary.json").exists())
+
+        self.assertEqual(payload["metrics"]["steps"], 2)
+        self.assertEqual(payload["metrics"]["implicit_stepper"], "implicit_sparse_cpu")
+        self.assertEqual(payload["metrics"]["reference_stepper"], "expm_multiply")
+        self.assertIn("max abs error", summary)
+        self.assertIn("saved:", summary)
+
     def test_2d_position_expansion_separates_close_nodes(self) -> None:
         positions = {1: (0.0, 0.0), 2: (0.01, 0.0), 3: (2.0, 0.0)}
         expanded = expand_positions(positions, minimum_distance=0.4, iterations=20)
