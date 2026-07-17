@@ -92,6 +92,12 @@ _READOUT_HEATER_CONTROLLER_FIELDS = (
     "controller_lambda_order",
     "controller_mu_order",
 )
+_READOUT_HEATER_HARDWARE_FIELDS = (
+    "heater_id",
+    "heater_min_power_W",
+    "heater_max_power_W",
+    "heater_efficiency",
+)
 
 
 class HeatTransferSimulationTab:
@@ -164,7 +170,7 @@ class HeatTransferSimulationTab:
         layout = self.QtWidgets.QHBoxLayout(self.widget)
         self.controls_scroll = self.QtWidgets.QScrollArea()
         self.controls_scroll.setWidgetResizable(True)
-        self.controls_scroll.setMinimumWidth(390)
+        self.controls_scroll.setMinimumWidth(320)
         controls = self.QtWidgets.QWidget()
         self.controls_scroll.setWidget(controls)
         form = self.QtWidgets.QFormLayout(controls)
@@ -428,6 +434,20 @@ class HeatTransferSimulationTab:
         mode.currentTextChanged.connect(lambda *_: self._apply_readout_heater_editor_change("sensor_control_mode"))
         self.readout_editor_inputs["sensor_control_mode"] = mode
         heater_form.addRow("mode", mode)
+        for name, label, minimum, maximum, step in (
+            ("heater_id", "heater id", -1, 1_000_000_000, 1),
+            ("heater_min_power_W", "min power W", 0.0, 1.0e9, 1.0),
+            ("heater_max_power_W", "max power W", 0.0, 1.0e9, 1.0),
+            ("heater_efficiency", "efficiency", 0.0, 1.0e6, 0.05),
+        ):
+            if name == "heater_id":
+                widget = self._int_spin(int(minimum), int(maximum), 0, int(step))
+                widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_heater_editor_change(field))
+            else:
+                widget = self._double_spin(float(minimum), float(maximum), 0.0, float(step))
+                widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_heater_editor_change(field))
+            self.readout_editor_inputs[name] = widget
+            heater_form.addRow(label, widget)
         for name, label, minimum, maximum, step in (
             ("sensor_manual_power_W", "manual power W", 0.0, 1.0e9, 1.0),
             ("controller_weight", "weight", 0.0, 1.0e9, 0.1),
@@ -2370,6 +2390,16 @@ class HeatTransferSimulationTab:
             self.readout_editor_title.setText(title)
             mode = "mimo" if str(getattr(heater, "sensor_control_mode", "manual")) == "mimo" else "manual"
             self.readout_editor_inputs["sensor_control_mode"].setCurrentText(mode)
+            heater_props = getattr(heater, "heater", None)
+            for field in _READOUT_HEATER_HARDWARE_FIELDS:
+                widget = self.readout_editor_inputs.get(field)
+                if widget is None:
+                    continue
+                value = getattr(heater_props, field, 0)
+                if field == "heater_id":
+                    widget.setValue(int(value or heater.node_id))
+                else:
+                    widget.setValue(float(value))
             for field in _READOUT_HEATER_CONTROLLER_FIELDS:
                 widget = self.readout_editor_inputs.get(field)
                 if widget is not None:
@@ -2458,6 +2488,14 @@ class HeatTransferSimulationTab:
             value = "mimo" if widget.currentText() == "mimo" else "manual"
             heater.sensor_control_mode = value
             self._sync_readout_heater_editor_enabled()
+        elif field in _READOUT_HEATER_HARDWARE_FIELDS:
+            heater_props = getattr(heater, "heater", None)
+            if heater_props is None:
+                return
+            if field == "heater_id":
+                setattr(heater_props, field, int(widget.value()))
+            else:
+                setattr(heater_props, field, float(widget.value()))
         else:
             setattr(heater, field, float(widget.value()))
         if self.prepared is not None:

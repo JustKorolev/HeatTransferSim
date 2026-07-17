@@ -2065,8 +2065,11 @@ class GraphVisualizerModelTests(unittest.TestCase):
         tab._simulation_reinitialize_pending = False
 
         class Spin:
+            def __init__(self, value: float) -> None:
+                self._value = float(value)
+
             def value(self) -> float:
-                return 77.0
+                return self._value
 
         class Prepared:
             def __init__(self) -> None:
@@ -2079,7 +2082,13 @@ class GraphVisualizerModelTests(unittest.TestCase):
             def reset_controller_integrators(self) -> None:
                 self.reset = True
 
-        tab.readout_editor_inputs = {"sensor_manual_power_W": Spin()}
+        tab.readout_editor_inputs = {
+            "sensor_manual_power_W": Spin(77.0),
+            "heater_id": Spin(44.0),
+            "heater_min_power_W": Spin(3.0),
+            "heater_max_power_W": Spin(55.0),
+            "heater_efficiency": Spin(0.8),
+        }
         tab.prepared = Prepared()
         tab._refresh_stats = lambda: None
         tab._refresh_sensor_readouts = lambda: None
@@ -2090,12 +2099,20 @@ class GraphVisualizerModelTests(unittest.TestCase):
         heater_ids = tab._associated_heater_ids_for_sensor(10)
         manual_power = tab._heater_readout_power_for_sensor_heater(10, 20, {})
         tab._apply_readout_heater_editor_change("sensor_manual_power_W")
+        tab._apply_readout_heater_editor_change("heater_id")
+        tab._apply_readout_heater_editor_change("heater_min_power_W")
+        tab._apply_readout_heater_editor_change("heater_max_power_W")
+        tab._apply_readout_heater_editor_change("heater_efficiency")
 
         self.assertEqual([node.node_id for node in sensors], [10])
         self.assertEqual(heater_ids, [20, 30])
         self.assertAlmostEqual(manual_power, 100.0)
         self.assertAlmostEqual(model.nodes[10].sensor_manual_power_W, 100.0)
         self.assertAlmostEqual(model.nodes[20].sensor_manual_power_W, 77.0)
+        self.assertEqual(model.nodes[20].heater.heater_id, 44)
+        self.assertAlmostEqual(model.nodes[20].heater.heater_min_power_W, 3.0)
+        self.assertAlmostEqual(model.nodes[20].heater.heater_max_power_W, 55.0)
+        self.assertAlmostEqual(model.nodes[20].heater.heater_efficiency, 0.8)
         self.assertTrue(tab.prepared.marked)
         self.assertTrue(tab.prepared.reset)
 

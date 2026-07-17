@@ -153,7 +153,7 @@ class GraphVisualizerApp:
 
         self.left_scroll = self.QtWidgets.QScrollArea()
         self.left_scroll.setWidgetResizable(True)
-        self.left_scroll.setMinimumWidth(390)
+        self.left_scroll.setMinimumWidth(320)
         left_content = self.QtWidgets.QWidget()
         self.left_scroll.setWidget(left_content)
         self.left_layout = self.QtWidgets.QVBoxLayout(left_content)
@@ -244,8 +244,14 @@ class GraphVisualizerApp:
         self.side_panel_stack.addWidget(self.simulation_tab.controls_scroll)
         self.side_panel_stack.setCurrentWidget(self.left_scroll)
 
-        layout.addWidget(self.side_panel_stack, 0)
-        layout.addWidget(right_panel, 1)
+        self.main_splitter = self.QtWidgets.QSplitter(self.QtCore.Qt.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(self.side_panel_stack)
+        self.main_splitter.addWidget(right_panel)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setSizes([430, 950])
+        layout.addWidget(self.main_splitter, 1)
         self.window.setCentralWidget(central)
         self.window.resize(1380, 820)
 
