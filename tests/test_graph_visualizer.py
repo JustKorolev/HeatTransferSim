@@ -4012,7 +4012,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertTrue(np.allclose(saved_error, result.error_K))
 
-    def test_stepper_diagnostic_worker_returns_ui_summary_payload(self) -> None:
+    def test_stepper_diagnostic_worker_compares_current_state_to_reference(self) -> None:
         import sys
         import types
 
@@ -4060,23 +4060,37 @@ class GraphVisualizerModelTests(unittest.TestCase):
             "L": csr_matrix(np.array([[0.5, -0.5], [-0.5, 0.5]], dtype=float)),
             "G_rad": np.zeros(2, dtype=float),
         }
+        params = SimulationParameters(dt_s=1.0, use_ambient_radiation=False)
+        prepared = prepare_simulation(model, matrices, params)
+        prepared.gpu_stepper = None
+        prepared.fast_sparse_substeps = None
+        prepared.step_forward()
 
         with TemporaryDirectory() as directory:
             payload = _run_stepper_diagnostic_worker(
                 model,
                 matrices,
-                SimulationParameters(dt_s=1.0, use_ambient_radiation=False),
-                2,
+                params,
+                prepared.node_ids.copy(),
+                prepared.initial_temperatures_K.copy(),
+                prepared.temperatures_K.copy(),
+                prepared.time_s,
+                "implicit_sparse_cpu",
+                float(prepared.last_step_profile_ms.get("total_ms", 0.0)) / 1000.0,
+                dict(prepared.last_step_profile_ms),
                 Path(directory) / "diagnostic",
             )
             summary = _format_stepper_diagnostic_summary(payload)
 
             self.assertTrue((Path(directory) / "diagnostic" / "summary.json").exists())
+            self.assertTrue((Path(directory) / "diagnostic" / "current_temperature_K.npy").exists())
 
-        self.assertEqual(payload["metrics"]["steps"], 2)
+        self.assertEqual(payload["mode"], "current_state")
+        self.assertEqual(payload["metrics"]["steps"], 1)
         self.assertEqual(payload["metrics"]["implicit_stepper"], "implicit_sparse_cpu")
         self.assertEqual(payload["metrics"]["reference_stepper"], "expm_multiply")
         self.assertIn("max abs error", summary)
+        self.assertIn("current time", summary)
         self.assertIn("saved:", summary)
 
     def test_2d_position_expansion_separates_close_nodes(self) -> None:

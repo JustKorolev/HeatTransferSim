@@ -112,6 +112,83 @@ def compare_implicit_cpu_to_expm_multiply(
     )
 
 
+def compare_current_state_to_expm_multiply(
+    model: ThermalGraphModel,
+    matrices: dict[str, Any],
+    params: SimulationParameters,
+    *,
+    node_ids: np.ndarray,
+    initial_temperatures_K: np.ndarray,
+    current_temperatures_K: np.ndarray,
+    current_time_s: float,
+    current_stepper: str = "current",
+    current_elapsed_s: float = 0.0,
+) -> StepperComparisonResult:
+    """Compare an already-computed simulation state against one expm_multiply solve to that time."""
+    target_time_s = max(0.0, float(current_time_s))
+    ordered_node_ids = np.asarray(node_ids, dtype=int).reshape(-1)
+    current_temperature = np.asarray(current_temperatures_K, dtype=float).reshape(-1)
+    initial_temperature = np.asarray(initial_temperatures_K, dtype=float).reshape(-1)
+    if current_temperature.shape != ordered_node_ids.shape:
+        raise ValueError(
+            f"Current temperature length {current_temperature.shape[0]} does not match node count {ordered_node_ids.shape[0]}."
+        )
+    if initial_temperature.shape != ordered_node_ids.shape:
+        raise ValueError(
+            f"Initial temperature length {initial_temperature.shape[0]} does not match node count {ordered_node_ids.shape[0]}."
+        )
+    reference_model = deepcopy(model)
+    reference = _prepare_current_state_reference(
+        reference_model,
+        matrices,
+        params,
+        initial_temperature,
+        target_time_s,
+    )
+    reference_elapsed = 0.0
+    if target_time_s > 0.0:
+        start = time.perf_counter()
+        reference.step_forward()
+        reference_elapsed = time.perf_counter() - start
+    if not np.array_equal(ordered_node_ids, reference.node_ids):
+        raise RuntimeError("Current-state comparison produced mismatched node ordering.")
+    reference_temperature = np.asarray(reference.temperatures_K, dtype=float).reshape(-1)
+    time_s = np.array([target_time_s], dtype=float)
+    current_matrix = current_temperature.reshape(1, -1)
+    reference_matrix = reference_temperature.reshape(1, -1)
+    error = current_matrix - reference_matrix
+    warnings = list(reference.warnings)
+    if bool(getattr(reference, "dynamic_heater_inputs", False)):
+        warnings.append(
+            "Reference is a one-shot expm_multiply solve to the current time; dynamic heater/controller/radiation "
+            "inputs are treated as one constant-input interval rather than replayed step-by-step."
+        )
+    metrics = _comparison_metrics(
+        node_ids=ordered_node_ids,
+        time_s=time_s,
+        error=error,
+        reference=reference_matrix,
+        dt_s=float(params.dt_s),
+        implicit_elapsed_s=float(current_elapsed_s),
+        reference_elapsed_s=reference_elapsed,
+        implicit_stepper=str(current_stepper),
+        reference_stepper=_last_solver_name(reference),
+        steps_override=_step_count_for_time(target_time_s, float(params.dt_s)),
+    )
+    return StepperComparisonResult(
+        node_ids=ordered_node_ids,
+        time_s=time_s,
+        implicit_temperature_K=current_matrix,
+        reference_temperature_K=reference_matrix,
+        error_K=error,
+        metrics=metrics,
+        implicit_profile_ms={},
+        reference_profile_ms=dict(reference.last_step_profile_ms),
+        implicit_warnings=[],
+        reference_warnings=warnings,
+    )
+
+
 def compare_graph_folder_steppers(
     graph_folder: Path,
     *,
@@ -159,6 +236,33 @@ def save_stepper_comparison(result: StepperComparisonResult, output_dir: Path) -
     return target
 
 
+def save_current_state_comparison(result: StepperComparisonResult, output_dir: Path) -> Path:
+    """Persist current-state comparison vectors and summary metrics."""
+    target = Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    np.save(target / "node_ids.npy", result.node_ids)
+    np.save(target / "time_s.npy", result.time_s)
+    np.save(target / "current_temperature_K.npy", result.implicit_temperature_K)
+    np.save(target / "reference_temperature_K.npy", result.reference_temperature_K)
+    np.save(target / "temperature_error_K.npy", result.error_K)
+    summary = {
+        "metrics": asdict(result.metrics),
+        "current_profile_ms": result.implicit_profile_ms,
+        "reference_profile_ms": result.reference_profile_ms,
+        "current_warnings": result.implicit_warnings,
+        "reference_warnings": result.reference_warnings,
+        "matrix_files": {
+            "node_ids": "node_ids.npy",
+            "time_s": "time_s.npy",
+            "current_temperature_K": "current_temperature_K.npy",
+            "reference_temperature_K": "reference_temperature_K.npy",
+            "temperature_error_K": "temperature_error_K.npy",
+        },
+    }
+    (target / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return target
+
+
 def _prepare_for_solver(
     model: ThermalGraphModel,
     matrices: dict[str, Any],
@@ -184,6 +288,28 @@ def _prepare_for_solver(
         prepared.fast_sparse_substeps = None
     elif solver == "implicit":
         prepared.fast_sparse_substeps = None
+    return prepared
+
+
+def _prepare_current_state_reference(
+    model: ThermalGraphModel,
+    matrices: dict[str, Any],
+    params: SimulationParameters,
+    initial_temperatures_K: np.ndarray,
+    target_time_s: float,
+) -> PreparedSimulation:
+    local_params = deepcopy(params)
+    local_params.dt_s = max(float(target_time_s), 1.0e-30)
+    local_params.t_final_s = max(float(getattr(local_params, "t_final_s", 0.0)), float(target_time_s))
+    local_params.gpu_simulation_enabled = False
+    local_params.implicit_sparse_simulation_enabled = False
+    local_params.fast_sparse_simulation_enabled = False
+    prepared = prepare_simulation(model, dict(matrices), local_params)
+    prepared.gpu_stepper = None
+    prepared.sparse_implicit_stepper = None
+    prepared.fast_sparse_substeps = None
+    prepared.initial_temperatures_K = np.asarray(initial_temperatures_K, dtype=float).reshape(-1).copy()
+    prepared.reset()
     return prepared
 
 
@@ -220,6 +346,7 @@ def _comparison_metrics(
     reference_elapsed_s: float,
     implicit_stepper: str,
     reference_stepper: str,
+    steps_override: int | None = None,
 ) -> StepperComparisonMetrics:
     abs_error = np.abs(np.asarray(error, dtype=float))
     finite = np.isfinite(abs_error)
@@ -231,7 +358,7 @@ def _comparison_metrics(
     error_norm = float(np.linalg.norm(np.asarray(error, dtype=float)))
     final_error = abs_error[-1, :]
     return StepperComparisonMetrics(
-        steps=int(error.shape[0] - 1),
+        steps=int(error.shape[0] - 1 if steps_override is None else steps_override),
         node_count=int(error.shape[1]),
         dt_s=float(dt_s),
         max_abs_error_K=float(np.nanmax(abs_error)),
@@ -248,6 +375,13 @@ def _comparison_metrics(
         implicit_stepper=str(implicit_stepper),
         reference_stepper=str(reference_stepper),
     )
+
+
+def _step_count_for_time(time_s: float, dt_s: float) -> int:
+    dt = abs(float(dt_s))
+    if dt <= 0.0:
+        return 0
+    return max(0, int(round(max(0.0, float(time_s)) / dt)))
 
 
 def _last_solver_name(prepared: PreparedSimulation) -> str:

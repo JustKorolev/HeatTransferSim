@@ -31,7 +31,7 @@ from .simulation_parameters import (
     load_simulation_parameters,
     save_simulation_parameters,
 )
-from .simulation_diagnostics import compare_implicit_cpu_to_expm_multiply, save_stepper_comparison
+from .simulation_diagnostics import compare_current_state_to_expm_multiply, save_current_state_comparison
 from .sys_id_artifacts import (
     list_sys_id_gain_matrices,
     load_sys_id_gain_matrix,
@@ -350,17 +350,18 @@ class HeatTransferSimulationTab:
 
     def _add_stepper_diagnostic_controls(self, form: Any) -> None:
         box, diag_form = self._section("Solver Diagnostic")
-        self.stepper_diagnostic_steps = self._int_spin(1, 100_000, 1, 1)
         self.stepper_diagnostic_save = self._checkbox("Save matrices", True)
-        self.stepper_diagnostic_button = self.QtWidgets.QPushButton("Compare Implicit vs Reference")
+        self.stepper_diagnostic_button = self.QtWidgets.QPushButton("Compare Current vs Reference")
         self.stepper_diagnostic_button.setToolTip(
-            "Compare the implicit sparse CPU solver against expm_multiply using the current graph and parameters."
+            "Compare the current simulation state against one expm_multiply reference solve to the same time."
         )
         self.stepper_diagnostic_button.clicked.connect(self.run_stepper_diagnostic)
         button_row = self.QtWidgets.QHBoxLayout()
         button_row.addWidget(self.stepper_diagnostic_button)
         button_row.addWidget(self.stepper_diagnostic_save)
-        diag_form.addRow("steps", self.stepper_diagnostic_steps)
+        self.stepper_diagnostic_target_label = self.QtWidgets.QLabel("Uses the current simulation time.")
+        self.stepper_diagnostic_target_label.setWordWrap(True)
+        diag_form.addRow("target", self.stepper_diagnostic_target_label)
         diag_form.addRow(button_row)
         self.stepper_diagnostic_status_label = self.QtWidgets.QLabel("Idle.")
         self.stepper_diagnostic_status_label.setWordWrap(True)
@@ -965,22 +966,37 @@ class HeatTransferSimulationTab:
             self._status("Finish or cancel G_ctrl sys ID before running the solver diagnostic.", True)
             return
         self.pause()
-        if self.model is None:
-            self.use_current_graph()
-        if self.model is None:
-            self._status("Load a graph before running the solver diagnostic.", True)
+        if self.model is None or self.prepared is None:
+            self._status("Initialize or run a simulation before running the solver diagnostic.", True)
+            return
+        current_time_s = float(self.prepared.time_s)
+        if current_time_s <= 0.0:
+            self._status("Advance the simulation before running the solver diagnostic.", True)
             return
         try:
-            self._refresh_matrices_for_run()
-            self.params = self._read_params()
-            self._save_params_to_folder()
-            steps = max(1, int(self.stepper_diagnostic_steps.value()))
+            params = self.prepared.params
             output_dir = self._stepper_diagnostic_output_dir() if self.stepper_diagnostic_save.isChecked() else None
+            current_profile = dict(getattr(self.prepared, "last_step_profile_ms", {}) or {})
             self.stepper_diagnostic_status_label.setText(
-                f"Running {steps} step comparison: implicit sparse CPU vs expm_multiply."
+                f"Running current-state comparison at t = {current_time_s:.6g} s."
+            )
+            self.stepper_diagnostic_target_label.setText(
+                f"Current simulation time: {current_time_s:.6g} s."
             )
             self.stepper_diagnostic_button.setEnabled(False)
-            worker_args = (self.model, dict(self.matrices), self.params, steps, output_dir)
+            worker_args = (
+                self.model,
+                dict(self.matrices),
+                params,
+                np.asarray(self.prepared.node_ids, dtype=int).copy(),
+                np.asarray(self.prepared.initial_temperatures_K, dtype=float).copy(),
+                np.asarray(self.prepared.temperatures_K, dtype=float).copy(),
+                current_time_s,
+                _last_prepared_solver_name(self.prepared),
+                float(current_profile.get("total_ms", 0.0)) / 1000.0,
+                current_profile,
+                output_dir,
+            )
             executor = getattr(self, "simulation_executor", None)
             if executor is None:
                 result = _run_stepper_diagnostic_worker(*worker_args)
@@ -2481,14 +2497,32 @@ def _run_stepper_diagnostic_worker(
     model: ThermalGraphModel,
     matrices: dict[str, Any],
     params: SimulationParameters,
-    steps: int,
+    node_ids: np.ndarray,
+    initial_temperatures_K: np.ndarray,
+    current_temperatures_K: np.ndarray,
+    current_time_s: float,
+    current_stepper: str,
+    current_elapsed_s: float,
+    current_profile_ms: dict[str, float],
     output_dir: Path | None,
 ) -> dict[str, Any]:
-    result = compare_implicit_cpu_to_expm_multiply(model, matrices, params, steps=max(1, int(steps)))
+    result = compare_current_state_to_expm_multiply(
+        model,
+        matrices,
+        params,
+        node_ids=node_ids,
+        initial_temperatures_K=initial_temperatures_K,
+        current_temperatures_K=current_temperatures_K,
+        current_time_s=current_time_s,
+        current_stepper=current_stepper,
+        current_elapsed_s=current_elapsed_s,
+    )
+    result.implicit_profile_ms.update(current_profile_ms)
     saved_output_dir: str | None = None
     if output_dir is not None:
-        saved_output_dir = str(save_stepper_comparison(result, output_dir))
+        saved_output_dir = str(save_current_state_comparison(result, output_dir))
     return {
+        "mode": "current_state",
         "metrics": asdict(result.metrics),
         "implicit_profile_ms": dict(result.implicit_profile_ms),
         "reference_profile_ms": dict(result.reference_profile_ms),
@@ -2507,9 +2541,16 @@ def _format_stepper_diagnostic_summary(result: dict[str, Any]) -> str:
     implicit_profile = implicit_profile if isinstance(implicit_profile, dict) else {}
     reference_profile = reference_profile if isinstance(reference_profile, dict) else {}
     output_dir = result.get("output_dir")
+    mode = str(result.get("mode") or "")
     parts = [
-        f"{metrics.get('implicit_stepper', 'implicit')} vs {metrics.get('reference_stepper', 'reference')}",
-        f"steps={int(metrics.get('steps', 0))}, nodes={int(metrics.get('node_count', 0))}, dt={float(metrics.get('dt_s', 0.0)):.6g} s",
+        f"{metrics.get('implicit_stepper', 'current')} vs {metrics.get('reference_stepper', 'reference')}",
+        (
+            f"current time={float(metrics.get('worst_time_s', 0.0)):.6g} s, "
+            f"nominal steps={int(metrics.get('steps', 0))}, nodes={int(metrics.get('node_count', 0))}, "
+            f"dt={float(metrics.get('dt_s', 0.0)):.6g} s"
+            if mode == "current_state"
+            else f"steps={int(metrics.get('steps', 0))}, nodes={int(metrics.get('node_count', 0))}, dt={float(metrics.get('dt_s', 0.0)):.6g} s"
+        ),
         (
             f"max abs error={float(metrics.get('max_abs_error_K', 0.0)):.6g} K, "
             f"mean abs={float(metrics.get('mean_abs_error_K', 0.0)):.6g} K, "
@@ -2526,8 +2567,13 @@ def _format_stepper_diagnostic_summary(result: dict[str, Any]) -> str:
             f"(step {int(metrics.get('worst_step_index', 0))})"
         ),
         (
-            f"solve time: implicit={float(metrics.get('implicit_elapsed_s', 0.0)):.3f} s, "
+            f"solve time: current-last-step={float(metrics.get('implicit_elapsed_s', 0.0)):.3f} s, "
             f"reference={float(metrics.get('reference_elapsed_s', 0.0)):.3f} s"
+            if mode == "current_state"
+            else (
+                f"solve time: implicit={float(metrics.get('implicit_elapsed_s', 0.0)):.3f} s, "
+                f"reference={float(metrics.get('reference_elapsed_s', 0.0)):.3f} s"
+            )
         ),
     ]
     substeps = implicit_profile.get("substeps")
@@ -2551,6 +2597,23 @@ def _format_stepper_diagnostic_summary(result: dict[str, Any]) -> str:
     if warnings:
         parts.append("warnings: " + " | ".join(str(item) for item in warnings[:3]))
     return "\n".join(parts)
+
+
+def _last_prepared_solver_name(prepared: PreparedSimulation) -> str:
+    profile = getattr(prepared, "last_step_profile_ms", {}) or {}
+    if "gpu_step_ms" in profile:
+        return "gpu_sparse"
+    if "cpu_sparse_implicit_step_ms" in profile:
+        return "implicit_sparse_cpu"
+    if "cpu_fast_sparse_step_ms" in profile:
+        return "fast_sparse_cpu"
+    if "cpu_expm_multiply_ms" in profile:
+        return "expm_multiply"
+    if "dense_phi_matvec_ms" in profile:
+        return "dense_phi_matvec"
+    if "dense_expm_matvec_ms" in profile:
+        return "dense_expm_matvec"
+    return "current"
 
 
 def _run_simulation_worker_batch(
