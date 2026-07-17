@@ -159,7 +159,7 @@ class HeatTransferSimulationTab:
         self.refresh_graph_list()
 
     def _build_layout(self) -> None:
-        layout = self.QtWidgets.QVBoxLayout(self.widget)
+        layout = self.QtWidgets.QHBoxLayout(self.widget)
         self.controls_scroll = self.QtWidgets.QScrollArea()
         self.controls_scroll.setWidgetResizable(True)
         self.controls_scroll.setMinimumWidth(390)
@@ -198,8 +198,7 @@ class HeatTransferSimulationTab:
         self.controller_status_label.setWordWrap(True)
         form.addRow(self.controller_status_label)
         self.sensor_readout_box = self.QtWidgets.QGroupBox("Thermal I/O Readouts")
-        sensor_layout = self.QtWidgets.QHBoxLayout(self.sensor_readout_box)
-        readout_layout = self.QtWidgets.QVBoxLayout()
+        readout_layout = self.QtWidgets.QVBoxLayout(self.sensor_readout_box)
         self.cooling_readout_box = self.QtWidgets.QGroupBox("Cooling")
         cooling_layout = self.QtWidgets.QVBoxLayout(self.cooling_readout_box)
         self.cooling_readout_table = self.QtWidgets.QTableWidget(0, 3)
@@ -220,19 +219,20 @@ class HeatTransferSimulationTab:
         self.heating_readout_tree.itemSelectionChanged.connect(self._handle_heating_tree_selection)
         heating_layout.addWidget(self.heating_readout_tree)
         readout_layout.addWidget(self.heating_readout_box)
-        sensor_layout.addLayout(readout_layout, 2)
-        self._build_readout_parameter_editor(sensor_layout)
         self.sensor_readout_box.setVisible(False)
         form.addRow(self.sensor_readout_box)
         self.legend_label = self.QtWidgets.QLabel(self._legend_text())
         self.legend_label.setWordWrap(True)
         form.addRow(self.legend_label)
 
+        self._build_readout_parameter_editor()
         self.viewer = GraphPyVistaWidget(
             self.widget,
             on_pick_node=self._handle_pick,
             tooltip_for_node=self._tooltip_for_node,
         )
+        viewer_panel = self.QtWidgets.QWidget(self.widget)
+        viewer_layout = self.QtWidgets.QVBoxLayout(viewer_panel)
         toggles = self.QtWidgets.QHBoxLayout()
         self.show_heaters = self._checkbox("Heaters", True, self._handle_marker_toggle)
         self.show_sensors = self._checkbox("Sensors", True, self._handle_marker_toggle)
@@ -256,7 +256,7 @@ class HeatTransferSimulationTab:
         self.depth_width_slider = self._view_slider(1, 100, 12, self._handle_visual_control_changed)
         toggles.addWidget(self.depth_width_slider)
         toggles.addStretch(1)
-        layout.addLayout(toggles)
+        viewer_layout.addLayout(toggles)
         self.viewer.set_toggles(
             False,
             False,
@@ -265,7 +265,9 @@ class HeatTransferSimulationTab:
             self.show_coolers.isChecked(),
         )
         self._sync_view_controls_to_viewer()
-        layout.addWidget(self.viewer.interactor, 1)
+        viewer_layout.addWidget(self.viewer.interactor, 1)
+        layout.addWidget(self.readout_editor_box, 0, self.QtCore.Qt.AlignTop)
+        layout.addWidget(viewer_panel, 1)
 
     def _add_parameter_controls(self, form: Any) -> None:
         run_box, run_form = self._section("Run")
@@ -395,10 +397,15 @@ class HeatTransferSimulationTab:
         diag_form.addRow("result", self.stepper_diagnostic_status_label)
         form.addRow(box)
 
-    def _build_readout_parameter_editor(self, parent_layout: Any) -> None:
+    def _build_readout_parameter_editor(self) -> None:
         self.readout_editor_box = self.QtWidgets.QGroupBox("Parameters")
         self.readout_editor_box.setVisible(False)
         self.readout_editor_box.setMinimumWidth(260)
+        self.readout_editor_box.setMaximumWidth(340)
+        self.readout_editor_box.setSizePolicy(
+            self.QtWidgets.QSizePolicy.Fixed,
+            self.QtWidgets.QSizePolicy.Preferred,
+        )
         layout = self.QtWidgets.QVBoxLayout(self.readout_editor_box)
         self.readout_editor_title = self.QtWidgets.QLabel("Select a readout row.")
         self.readout_editor_title.setWordWrap(True)
@@ -444,7 +451,6 @@ class HeatTransferSimulationTab:
             cooling_form.addRow(label, widget)
         layout.addWidget(self.readout_cooling_editor)
         layout.addStretch(1)
-        parent_layout.addWidget(self.readout_editor_box, 1)
 
     def _add_enabled_io_controls(self, form: Any) -> None:
         box, layout = self._section("Enabled Simulation I/O")
