@@ -431,6 +431,17 @@ class GraphVisualizerApp:
         heater_form.addRow("pair", self.heater_pair_label)
         heater_form.addRow("deposition nodes", self.heater_deposition_label)
         heater_form.addRow("attachment", self.heater_valid_label)
+        self.inputs["sensor_mode_manual"] = self.QtWidgets.QRadioButton("Manual")
+        self.inputs["sensor_mode_mimo"] = self.QtWidgets.QRadioButton("MIMO PID")
+        self.sensor_mode_group = self.QtWidgets.QButtonGroup(self.window)
+        self.sensor_mode_group.setExclusive(True)
+        self.sensor_mode_group.addButton(self.inputs["sensor_mode_manual"])
+        self.sensor_mode_group.addButton(self.inputs["sensor_mode_mimo"])
+        self.inputs["sensor_mode_manual"].setChecked(True)
+        self.inputs["sensor_mode_manual"].toggled.connect(self._handle_sensor_mode_change)
+        self.inputs["sensor_mode_mimo"].toggled.connect(self._handle_sensor_mode_change)
+        heater_form.addRow("control", self.inputs["sensor_mode_manual"])
+        heater_form.addRow("", self.inputs["sensor_mode_mimo"])
         self.inputs["controller_setpoint_K"] = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
         self.inputs["controller_weight"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
         self.inputs["sensor_manual_power_W"] = self._double_spin(0.0, 1.0e9, 0.0, 1.0)
@@ -444,8 +455,22 @@ class GraphVisualizerApp:
         self.inputs["controller_lambda_order"] = self._double_spin(0.0, 2.0, 1.0, 0.05)
         self.inputs["controller_mu_order"] = self._double_spin(0.0, 2.0, 1.0, 0.05)
         self.inputs["sensor_settling_time_s"].setToolTip(
-            "MIMO sensor settling time used for lag compensation. For a first-order sensor, settling time is roughly 5*tau."
+            "MIMO sensor settling time used by this heater controller for lag compensation."
         )
+        heater_form.addRow("manual power W", self.inputs["sensor_manual_power_W"])
+        for label, key in (
+            ("sensor weight", "controller_weight"),
+            ("settling time s", "sensor_settling_time_s"),
+            ("coarse kP", "controller_kp_coarse"),
+            ("coarse kI", "controller_ki_coarse"),
+            ("coarse kD", "controller_kd_coarse"),
+            ("hold kP", "controller_kp_hold"),
+            ("hold kI", "controller_ki_hold"),
+            ("hold kD", "controller_kd_hold"),
+            ("lambda", "controller_lambda_order"),
+            ("mu", "controller_mu_order"),
+        ):
+            heater_form.addRow(label, self.inputs[key])
 
         self.inputs["is_sensor"] = self._checkbox("is sensor", False, self._update_optional_sections)
         self.inputs["is_sensor"].setVisible(False)
@@ -463,6 +488,7 @@ class GraphVisualizerApp:
             ("noise std K", "sensor_noise_std_K"),
             ("bias K", "sensor_bias_K"),
             ("time constant tau s", "sensor_time_constant_s"),
+            ("setpoint K", "controller_setpoint_K"),
         ):
             sensor_form.addRow(label, self.inputs[key])
         self.sensor_assigned_heater_label = self.QtWidgets.QLabel("")
@@ -471,32 +497,6 @@ class GraphVisualizerApp:
         sensor_form.addRow("assigned heater", self.sensor_assigned_heater_label)
         sensor_form.addRow("connected nodes", self.sensor_connected_count_label)
         sensor_form.addRow("status", self.sensor_monitor_label)
-        self.inputs["sensor_mode_manual"] = self.QtWidgets.QRadioButton("Manual")
-        self.inputs["sensor_mode_mimo"] = self.QtWidgets.QRadioButton("MIMO PID")
-        self.sensor_mode_group = self.QtWidgets.QButtonGroup(self.window)
-        self.sensor_mode_group.setExclusive(True)
-        self.sensor_mode_group.addButton(self.inputs["sensor_mode_manual"])
-        self.sensor_mode_group.addButton(self.inputs["sensor_mode_mimo"])
-        self.inputs["sensor_mode_manual"].setChecked(True)
-        self.inputs["sensor_mode_manual"].toggled.connect(self._handle_sensor_mode_change)
-        self.inputs["sensor_mode_mimo"].toggled.connect(self._handle_sensor_mode_change)
-        sensor_form.addRow("control", self.inputs["sensor_mode_manual"])
-        sensor_form.addRow("", self.inputs["sensor_mode_mimo"])
-        sensor_form.addRow("manual power W", self.inputs["sensor_manual_power_W"])
-        for label, key in (
-            ("setpoint K", "controller_setpoint_K"),
-            ("sensor weight", "controller_weight"),
-            ("settling time s", "sensor_settling_time_s"),
-            ("coarse kP", "controller_kp_coarse"),
-            ("coarse kI", "controller_ki_coarse"),
-            ("coarse kD", "controller_kd_coarse"),
-            ("hold kP", "controller_kp_hold"),
-            ("hold kI", "controller_ki_hold"),
-            ("hold kD", "controller_kd_hold"),
-            ("lambda", "controller_lambda_order"),
-            ("mu", "controller_mu_order"),
-        ):
-            sensor_form.addRow(label, self.inputs[key])
 
         self.controller_gain_box = self._group_box("MIMO Controller G Row")
         self.controller_gain_form = self.QtWidgets.QFormLayout(self.controller_gain_box)
@@ -785,6 +785,18 @@ class GraphVisualizerApp:
             target.heater_attached = bool(template.heater_attached)
             target.heater_valid = bool(template.heater_valid)
             target.heater_warning = str(template.heater_warning or "")
+            target.sensor_control_mode = template.sensor_control_mode
+            target.sensor_manual_power_W = template.sensor_manual_power_W
+            target.controller_weight = template.controller_weight
+            target.sensor_settling_time_s = template.sensor_settling_time_s
+            target.controller_kp_coarse = template.controller_kp_coarse
+            target.controller_ki_coarse = template.controller_ki_coarse
+            target.controller_kp_hold = template.controller_kp_hold
+            target.controller_ki_hold = template.controller_ki_hold
+            target.controller_kd_coarse = template.controller_kd_coarse
+            target.controller_kd_hold = template.controller_kd_hold
+            target.controller_lambda_order = template.controller_lambda_order
+            target.controller_mu_order = template.controller_mu_order
         else:
             target.heater_control.reset_pid_state()
             target.assigned_sensor_id = None
@@ -793,15 +805,26 @@ class GraphVisualizerApp:
             target.heater_attached = True
             target.heater_valid = True
             target.heater_warning = ""
+            target.sensor_control_mode = "manual"
+            target.sensor_manual_power_W = 0.0
+            target.controller_weight = 0.0
+            target.sensor_settling_time_s = 0.0
+            target.controller_kp_coarse = 0.0
+            target.controller_ki_coarse = 0.0
+            target.controller_kp_hold = 0.0
+            target.controller_ki_hold = 0.0
+            target.controller_kd_coarse = 0.0
+            target.controller_kd_hold = 0.0
+            target.controller_lambda_order = 1.0
+            target.controller_mu_order = 1.0
         if target.is_sensor:
             target.sensor = deepcopy(template.sensor)
             if target_id != self.selected_node_id:
                 target.sensor.sensor_id = existing_sensor_id
-            target.sensor_control_mode = template.sensor_control_mode
-            target.sensor_manual_power_W = template.sensor_manual_power_W
             target.readout_node_ids = [int(value) for value in template.readout_node_ids]
             target.readout_weights = [float(value) for value in template.readout_weights]
             target.sensor_connected_node_ids = [int(value) for value in template.sensor_connected_node_ids]
+            target.controller_setpoint_K = template.controller_setpoint_K
         else:
             target.assigned_heater_id = None
             target.assigned_heater_ids = []
@@ -810,18 +833,8 @@ class GraphVisualizerApp:
             target.sensor_connected_node_ids = []
             target.sensor_monitor_only = False
             target.sensor_valid = True
+            target.controller_setpoint_K = 293.15
         target.has_cryocooler = bool(template.has_cryocooler)
-        target.controller_setpoint_K = template.controller_setpoint_K
-        target.controller_weight = template.controller_weight
-        target.sensor_settling_time_s = template.sensor_settling_time_s
-        target.controller_kp_coarse = template.controller_kp_coarse
-        target.controller_ki_coarse = template.controller_ki_coarse
-        target.controller_kp_hold = template.controller_kp_hold
-        target.controller_ki_hold = template.controller_ki_hold
-        target.controller_kd_coarse = template.controller_kd_coarse
-        target.controller_kd_hold = template.controller_kd_hold
-        target.controller_lambda_order = template.controller_lambda_order
-        target.controller_mu_order = template.controller_mu_order
         target.notes = template.notes
         target.initial_temperature_K = template.initial_temperature_K
 
@@ -1473,21 +1486,23 @@ class GraphVisualizerApp:
                 sensor_bias_K=float(self.inputs["sensor_bias_K"].value()),
                 sensor_time_constant_s=float(self.inputs["sensor_time_constant_s"].value()),
             ),
-            assigned_sensor_id=self._selected_assigned_sensor_id(),
-            sensor_control_mode="mimo" if self.inputs["sensor_mode_mimo"].isChecked() else "manual",
-            sensor_manual_power_W=float(self.inputs["sensor_manual_power_W"].value()),
+            assigned_sensor_id=self._selected_assigned_sensor_id() if is_heater else None,
+            sensor_control_mode=(
+                "mimo" if is_heater and self.inputs["sensor_mode_mimo"].isChecked() else "manual"
+            ),
+            sensor_manual_power_W=float(self.inputs["sensor_manual_power_W"].value()) if is_heater else 0.0,
             has_cryocooler=has_cryocooler,
-            controller_setpoint_K=float(self.inputs["controller_setpoint_K"].value()),
-            controller_weight=float(self.inputs["controller_weight"].value()),
-            sensor_settling_time_s=float(self.inputs["sensor_settling_time_s"].value()),
-            controller_kp_coarse=float(self.inputs["controller_kp_coarse"].value()),
-            controller_ki_coarse=float(self.inputs["controller_ki_coarse"].value()),
-            controller_kp_hold=float(self.inputs["controller_kp_hold"].value()),
-            controller_ki_hold=float(self.inputs["controller_ki_hold"].value()),
-            controller_kd_coarse=float(self.inputs["controller_kd_coarse"].value()),
-            controller_kd_hold=float(self.inputs["controller_kd_hold"].value()),
-            controller_lambda_order=float(self.inputs["controller_lambda_order"].value()),
-            controller_mu_order=float(self.inputs["controller_mu_order"].value()),
+            controller_setpoint_K=float(self.inputs["controller_setpoint_K"].value()) if is_sensor else 293.15,
+            controller_weight=float(self.inputs["controller_weight"].value()) if is_heater else 0.0,
+            sensor_settling_time_s=float(self.inputs["sensor_settling_time_s"].value()) if is_heater else 0.0,
+            controller_kp_coarse=float(self.inputs["controller_kp_coarse"].value()) if is_heater else 0.0,
+            controller_ki_coarse=float(self.inputs["controller_ki_coarse"].value()) if is_heater else 0.0,
+            controller_kp_hold=float(self.inputs["controller_kp_hold"].value()) if is_heater else 0.0,
+            controller_ki_hold=float(self.inputs["controller_ki_hold"].value()) if is_heater else 0.0,
+            controller_kd_coarse=float(self.inputs["controller_kd_coarse"].value()) if is_heater else 0.0,
+            controller_kd_hold=float(self.inputs["controller_kd_hold"].value()) if is_heater else 0.0,
+            controller_lambda_order=float(self.inputs["controller_lambda_order"].value()) if is_heater else 1.0,
+            controller_mu_order=float(self.inputs["controller_mu_order"].value()) if is_heater else 1.0,
             notes=self.inputs["notes"].toPlainText(),
         )
         if not node.C_manual_override:
@@ -1612,12 +1627,15 @@ class GraphVisualizerApp:
     def _sync_heater_control_enabled(self) -> None:
         if "sensor_mode_mimo" not in self.inputs:
             return
+        heater_active = self.inputs["is_heater"].isChecked()
         sensor_active = self.inputs["is_sensor"].isChecked()
-        mimo_active = sensor_active and self.inputs["sensor_mode_mimo"].isChecked()
-        manual_active = sensor_active and self.inputs["sensor_mode_manual"].isChecked()
+        self.inputs["sensor_mode_manual"].setEnabled(heater_active)
+        self.inputs["sensor_mode_mimo"].setEnabled(heater_active)
+        mimo_active = heater_active and self.inputs["sensor_mode_mimo"].isChecked()
+        manual_active = heater_active and self.inputs["sensor_mode_manual"].isChecked()
         self.inputs["sensor_manual_power_W"].setEnabled(manual_active)
+        self.inputs["controller_setpoint_K"].setEnabled(sensor_active)
         for key in (
-            "controller_setpoint_K",
             "controller_weight",
             "sensor_settling_time_s",
             "controller_kp_coarse",

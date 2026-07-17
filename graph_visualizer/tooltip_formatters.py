@@ -59,6 +59,18 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"deposition nodes: {len(getattr(attrs, 'power_deposition_node_ids', []) or [])}",
                 f"attached: {'yes' if getattr(attrs, 'heater_attached', True) else 'no'}",
                 f"valid: {'yes' if getattr(attrs, 'heater_valid', True) else 'no'}",
+                f"control mode: {getattr(attrs, 'sensor_control_mode', '?')}",
+                f"manual power: {_fmt(getattr(attrs, 'sensor_manual_power_W', None))} W",
+                f"weight: {_fmt(getattr(attrs, 'controller_weight', None))}",
+                f"settling: {_fmt(getattr(attrs, 'sensor_settling_time_s', None))} s",
+                f"coarse kP: {_fmt(getattr(attrs, 'controller_kp_coarse', None))}",
+                f"coarse kI: {_fmt(getattr(attrs, 'controller_ki_coarse', None))}",
+                f"coarse kD: {_fmt(getattr(attrs, 'controller_kd_coarse', None))}",
+                f"hold kP: {_fmt(getattr(attrs, 'controller_kp_hold', None))}",
+                f"hold kI: {_fmt(getattr(attrs, 'controller_ki_hold', None))}",
+                f"hold kD: {_fmt(getattr(attrs, 'controller_kd_hold', None))}",
+                f"MIMO lambda: {_fmt(getattr(attrs, 'controller_lambda_order', None))}",
+                f"MIMO mu: {_fmt(getattr(attrs, 'controller_mu_order', None))}",
             ]
         )
         warning = str(getattr(attrs, "heater_warning", "") or "")
@@ -79,19 +91,7 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"readout nodes: {len(getattr(attrs, 'readout_node_ids', []) or getattr(attrs, 'sensor_connected_node_ids', []) or [])}",
                 f"monitor-only: {'yes' if getattr(attrs, 'sensor_monitor_only', False) else 'no'}",
                 f"valid: {'yes' if getattr(attrs, 'sensor_valid', True) else 'no'}",
-                f"control mode: {getattr(attrs, 'sensor_control_mode', '?')}",
-                f"manual power: {_fmt(getattr(attrs, 'sensor_manual_power_W', None))} W",
                 f"setpoint: {_fmt(getattr(attrs, 'controller_setpoint_K', None))} K",
-                f"weight: {_fmt(getattr(attrs, 'controller_weight', None))}",
-                f"settling: {_fmt(getattr(attrs, 'sensor_settling_time_s', None))} s",
-                f"coarse kP: {_fmt(getattr(attrs, 'controller_kp_coarse', None))}",
-                f"coarse kI: {_fmt(getattr(attrs, 'controller_ki_coarse', None))}",
-                f"coarse kD: {_fmt(getattr(attrs, 'controller_kd_coarse', None))}",
-                f"hold kP: {_fmt(getattr(attrs, 'controller_kp_hold', None))}",
-                f"hold kI: {_fmt(getattr(attrs, 'controller_ki_hold', None))}",
-                f"hold kD: {_fmt(getattr(attrs, 'controller_kd_hold', None))}",
-                f"MIMO lambda: {_fmt(getattr(attrs, 'controller_lambda_order', None))}",
-                f"MIMO mu: {_fmt(getattr(attrs, 'controller_mu_order', None))}",
             ]
         )
     return "\n".join(lines)

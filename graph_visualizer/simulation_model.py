@@ -944,6 +944,8 @@ class PreparedSimulation:
             sensor = self.model.nodes.get(sensor_id)
             if sensor is None or not _node_is_mimo_sensor(sensor):
                 continue
+            if _heater_controller_mode(heater, sensor) != "mimo":
+                continue
             if not _node_id_enabled(enabled_sensor_ids, sensor_id):
                 continue
             active_sensor_ids.add(sensor_id)
@@ -1002,11 +1004,25 @@ class PreparedSimulation:
             if update_state:
                 self.controller_last_power_by_heater = {}
             return powers
+        heaters_by_sensor: dict[int, list[int]] = {int(sensor_id): [] for sensor_id in sensor_ids}
+        for heater_id in heater_ids:
+            heater = self.model.nodes[int(heater_id)]
+            sensor_id = getattr(heater, "assigned_sensor_id", None)
+            if sensor_id is None and heater.is_sensor:
+                sensor_id = int(heater_id)
+            if sensor_id is not None and int(sensor_id) in heaters_by_sensor:
+                heaters_by_sensor[int(sensor_id)].append(int(heater_id))
         y = np.array([float(readout) for _sensor_id, readout in valid_pairs], dtype=float)
         estimates = []
         for sensor_id, measured in zip(sensor_ids, y):
-            node = self.model.nodes[sensor_id]
-            settling_time = max(0.0, float(getattr(node, "sensor_settling_time_s", 0.0)))
+            settling_time = _heater_controller_average(
+                self.model,
+                heaters_by_sensor.get(int(sensor_id), []),
+                "sensor_settling_time_s",
+                0.0,
+                sensor_id=int(sensor_id),
+                clamp_min=0.0,
+            )
             tau = settling_time / 5.0 if settling_time > 0.0 else 0.0
             previous = self.controller_y_prev.get(sensor_id)
             if previous is None or tau <= 0.0:
@@ -1026,7 +1042,14 @@ class PreparedSimulation:
         errors = setpoints - T_hat
         weights = np.array(
             [
-                _controller_sensor_weight(self.model.nodes[sensor_id])
+                _heater_controller_average(
+                    self.model,
+                    heaters_by_sensor.get(int(sensor_id), []),
+                    "controller_weight",
+                    0.0,
+                    sensor_id=int(sensor_id),
+                    clamp_min=0.0,
+                )
                 for sensor_id in sensor_ids
             ],
             dtype=float,
@@ -1038,14 +1061,28 @@ class PreparedSimulation:
         dt = max(float(self.params.dt_s), 1.0e-12)
         lambda_orders = np.array(
             [
-                max(0.0, float(getattr(self.model.nodes[sensor_id], "controller_lambda_order", 1.0)))
+                _heater_controller_average(
+                    self.model,
+                    heaters_by_sensor.get(int(sensor_id), []),
+                    "controller_lambda_order",
+                    1.0,
+                    sensor_id=int(sensor_id),
+                    clamp_min=0.0,
+                )
                 for sensor_id in sensor_ids
             ],
             dtype=float,
         )
         mu_orders = np.array(
             [
-                max(0.0, float(getattr(self.model.nodes[sensor_id], "controller_mu_order", 1.0)))
+                _heater_controller_average(
+                    self.model,
+                    heaters_by_sensor.get(int(sensor_id), []),
+                    "controller_mu_order",
+                    1.0,
+                    sensor_id=int(sensor_id),
+                    clamp_min=0.0,
+                )
                 for sensor_id in sensor_ids
             ],
             dtype=float,
@@ -1093,15 +1130,45 @@ class PreparedSimulation:
             ki_key = "controller_ki_coarse"
             kd_key = "controller_kd_coarse"
         Kp = np.array(
-            [max(0.0, float(getattr(self.model.nodes[sensor_id], kp_key, 0.0))) for sensor_id in sensor_ids],
+            [
+                _heater_controller_average(
+                    self.model,
+                    heaters_by_sensor.get(int(sensor_id), []),
+                    kp_key,
+                    0.0,
+                    sensor_id=int(sensor_id),
+                    clamp_min=0.0,
+                )
+                for sensor_id in sensor_ids
+            ],
             dtype=float,
         )
         Ki = np.array(
-            [max(0.0, float(getattr(self.model.nodes[sensor_id], ki_key, 0.0))) for sensor_id in sensor_ids],
+            [
+                _heater_controller_average(
+                    self.model,
+                    heaters_by_sensor.get(int(sensor_id), []),
+                    ki_key,
+                    0.0,
+                    sensor_id=int(sensor_id),
+                    clamp_min=0.0,
+                )
+                for sensor_id in sensor_ids
+            ],
             dtype=float,
         )
         Kd = np.array(
-            [max(0.0, float(getattr(self.model.nodes[sensor_id], kd_key, 0.0))) for sensor_id in sensor_ids],
+            [
+                _heater_controller_average(
+                    self.model,
+                    heaters_by_sensor.get(int(sensor_id), []),
+                    kd_key,
+                    0.0,
+                    sensor_id=int(sensor_id),
+                    clamp_min=0.0,
+                )
+                for sensor_id in sensor_ids
+            ],
             dtype=float,
         )
         v_cmd = Kp * errors + Ki * eta + Kd * error_derivative
@@ -1447,11 +1514,11 @@ def prepare_simulation(
     elif params.input_mode != "zero":
         warnings.append(f"Unknown input mode {params.input_mode!r}; using zero input.")
     if params.input_mode == "heater_inputs" and any(
-        str(getattr(model.nodes[int(node_id)], "sensor_control_mode", "manual")) == "mimo"
+        _heater_controller_mode(model.nodes[int(node_id)]) == "mimo"
         for node_id in node_ids
-        if model.nodes[int(node_id)].is_sensor
+        if model.nodes[int(node_id)].is_heater
     ) and not has_mimo_controller:
-        warnings.append("MIMO sensor control is selected, but no valid paired MIMO sensor/heater set is available.")
+        warnings.append("MIMO heater control is selected, but no valid paired MIMO sensor/heater set is available.")
 
     sparse_stepper = n > 512 or issparse(L)
     if sparse_stepper:
@@ -1974,9 +2041,10 @@ def _controlled_heater_power_vector(
             continue
         if not _node_id_enabled(enabled_sensors, sensor_id):
             continue
-        if str(getattr(sensor, "sensor_control_mode", "manual")) in skipped_modes:
+        heater_mode = _heater_controller_mode(heater, sensor)
+        if heater_mode in skipped_modes:
             continue
-        if str(getattr(sensor, "sensor_control_mode", "manual")) != "manual":
+        if heater_mode != "manual":
             continue
         heater_row = node_index.get(int(heater_id))
         if heater is None or heater_row is None or not heater.is_heater:
@@ -1984,7 +2052,7 @@ def _controlled_heater_power_vector(
         if not bool(getattr(heater, "heater_valid", True)) or not getattr(heater, "power_deposition_node_ids", []):
             continue
         max_power = max(0.0, float(heater.heater.heater_max_power_W) * float(heater.heater.heater_efficiency))
-        command = min(max(float(getattr(sensor, "sensor_manual_power_W", 0.0)), 0.0), max_power)
+        command = min(max(_heater_controller_value(heater, sensor, "sensor_manual_power_W", 0.0), 0.0), max_power)
         _deposit_heater_command_power(powers, model, node_index, int(heater_id), command)
     return powers
 
@@ -2037,12 +2105,13 @@ def _controlled_heater_command_by_node(
             continue
         if not _node_id_enabled(enabled_sensors, sensor_id):
             continue
-        if str(getattr(sensor, "sensor_control_mode", "manual")) in skipped_modes:
+        heater_mode = _heater_controller_mode(heater, sensor)
+        if heater_mode in skipped_modes:
             continue
-        if str(getattr(sensor, "sensor_control_mode", "manual")) != "manual":
+        if heater_mode != "manual":
             continue
         max_power = max(0.0, float(heater.heater.heater_max_power_W) * float(heater.heater.heater_efficiency))
-        commands[int(heater_id)] = min(max(float(getattr(sensor, "sensor_manual_power_W", 0.0)), 0.0), max_power)
+        commands[int(heater_id)] = min(max(_heater_controller_value(heater, sensor, "sensor_manual_power_W", 0.0), 0.0), max_power)
     return commands
 
 
@@ -2121,6 +2190,36 @@ def _controller_sensor_weight(node: Any) -> float:
     return 0.5
 
 
+def _heater_controller_average(
+    model: ThermalGraphModel,
+    heater_ids: Sequence[int],
+    field: str,
+    default: float,
+    *,
+    sensor_id: int | None = None,
+    clamp_min: float | None = None,
+) -> float:
+    sensor = model.nodes.get(int(sensor_id)) if sensor_id is not None else None
+    values: list[float] = []
+    for heater_id in heater_ids:
+        heater = model.nodes.get(int(heater_id))
+        if heater is None:
+            continue
+        try:
+            value = float(_heater_controller_value(heater, sensor, field, default))
+        except (TypeError, ValueError):
+            continue
+        if clamp_min is not None:
+            value = max(float(clamp_min), value)
+        values.append(value)
+    if not values:
+        return max(float(clamp_min), float(default)) if clamp_min is not None else float(default)
+    average = float(np.mean(values))
+    if field == "controller_weight" and average <= 0.0:
+        return 0.5
+    return average
+
+
 def _controller_heater_max_power(node: Any, params: SimulationParameters) -> float:
     heater = getattr(node, "heater", None)
     max_power = (
@@ -2148,6 +2247,55 @@ def _node_id_enabled(enabled_ids: set[int] | None, node_id: int) -> bool:
     return enabled_ids is None or int(node_id) in enabled_ids
 
 
+_HEATER_CONTROLLER_DEFAULTS = {
+    "sensor_control_mode": "manual",
+    "sensor_manual_power_W": 0.0,
+    "controller_weight": 0.0,
+    "sensor_settling_time_s": 0.0,
+    "controller_kp_coarse": 0.0,
+    "controller_ki_coarse": 0.0,
+    "controller_kd_coarse": 0.0,
+    "controller_kp_hold": 0.0,
+    "controller_ki_hold": 0.0,
+    "controller_kd_hold": 0.0,
+    "controller_lambda_order": 1.0,
+    "controller_mu_order": 1.0,
+}
+
+
+def _heater_controller_mode(heater: Any, sensor: Any | None = None) -> str:
+    mode = str(getattr(heater, "sensor_control_mode", "manual")).strip().lower()
+    legacy_heater_mode = str(getattr(getattr(heater, "heater_control", None), "mode", "")).strip().lower()
+    if mode == "mimo" or legacy_heater_mode == "mimo":
+        return "mimo"
+    if sensor is not None and _heater_controller_is_default(heater):
+        legacy_mode = str(getattr(sensor, "sensor_control_mode", "manual")).strip().lower()
+        if legacy_mode == "mimo":
+            return "mimo"
+    return "manual"
+
+
+def _heater_controller_value(heater: Any, sensor: Any | None, field: str, default: float) -> float:
+    if sensor is not None and _heater_controller_is_default(heater):
+        return float(getattr(sensor, field, getattr(heater, field, default)))
+    return float(getattr(heater, field, default))
+
+
+def _heater_controller_is_default(heater: Any) -> bool:
+    for field, default in _HEATER_CONTROLLER_DEFAULTS.items():
+        value = getattr(heater, field, default)
+        if field == "sensor_control_mode":
+            if str(value or "manual").strip().lower() == "mimo":
+                return False
+            continue
+        try:
+            if abs(float(value) - float(default)) > 1.0e-12:
+                return False
+        except (TypeError, ValueError):
+            continue
+    return True
+
+
 def _node_has_mimo_controller_tags(node: Any) -> bool:
     return _node_is_mimo_sensor(node) or _node_is_mimo_heater(node)
 
@@ -2157,6 +2305,7 @@ def _node_is_mimo_heater(node: Any) -> bool:
         bool(getattr(node, "is_heater", False))
         and bool(getattr(node, "heater_valid", True))
         and bool(getattr(node, "power_deposition_node_ids", [1]))
+        and _heater_controller_mode(node) == "mimo"
     ) and (
         getattr(node, "assigned_sensor_id", None) is not None
         or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
@@ -2169,15 +2318,6 @@ def _node_is_mimo_sensor(node: Any) -> bool:
         and bool(getattr(node, "sensor_valid", True))
         and not bool(getattr(node, "sensor_monitor_only", False))
         and bool(getattr(node, "readout_node_ids", None) or getattr(node, "sensor_connected_node_ids", None) or getattr(node, "is_heater", False))
-        and (
-            str(getattr(node, "sensor_control_mode", "manual")) == "mimo"
-            or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
-        )
-        and (
-            bool(getattr(node, "assigned_heater_ids", []) or [])
-            or getattr(node, "assigned_heater_id", None) is not None
-            or bool(getattr(node, "is_heater", False))
-        )
     )
 
 
@@ -2227,6 +2367,7 @@ def _heater_has_active_mimo_sensor(
     sensor = model.nodes.get(int(sensor_id))
     return bool(
         sensor is not None
+        and _heater_controller_mode(heater, sensor) == "mimo"
         and _node_is_mimo_sensor(sensor)
         and _node_id_enabled(enabled_sensor_ids, int(sensor_id))
     )

@@ -77,8 +77,10 @@ _LIGHTWEIGHT_RUNTIME_PARAMETER_FIELDS = {
 }
 _NONBLOCKING_PARAMETER_FIELDS = _LIGHTWEIGHT_RUNTIME_PARAMETER_FIELDS | _DISPLAY_PARAMETER_FIELDS
 _READOUT_SENSOR_CONTROLLER_FIELDS = (
-    "sensor_manual_power_W",
     "controller_setpoint_K",
+)
+_READOUT_HEATER_CONTROLLER_FIELDS = (
+    "sensor_manual_power_W",
     "controller_weight",
     "sensor_settling_time_s",
     "controller_kp_coarse",
@@ -266,7 +268,7 @@ class HeatTransferSimulationTab:
         )
         self._sync_view_controls_to_viewer()
         viewer_layout.addWidget(self.viewer.interactor, 1)
-        layout.addWidget(self.readout_editor_box, 0, self.QtCore.Qt.AlignTop)
+        layout.addWidget(self.readout_editor_box, 0, self.QtCore.Qt.AlignBottom)
         layout.addWidget(viewer_panel, 1)
 
     def _add_parameter_controls(self, form: Any) -> None:
@@ -413,14 +415,21 @@ class HeatTransferSimulationTab:
 
         self.readout_sensor_editor = self.QtWidgets.QWidget()
         sensor_form = self.QtWidgets.QFormLayout(self.readout_sensor_editor)
+        widget = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
+        widget.valueChanged.connect(lambda *_args: self._apply_readout_sensor_editor_change("controller_setpoint_K"))
+        self.readout_editor_inputs["controller_setpoint_K"] = widget
+        sensor_form.addRow("setpoint K", widget)
+        layout.addWidget(self.readout_sensor_editor)
+
+        self.readout_heater_editor = self.QtWidgets.QWidget()
+        heater_form = self.QtWidgets.QFormLayout(self.readout_heater_editor)
         mode = self.QtWidgets.QComboBox()
         mode.addItems(["manual", "mimo"])
-        mode.currentTextChanged.connect(lambda *_: self._apply_readout_sensor_editor_change("sensor_control_mode"))
+        mode.currentTextChanged.connect(lambda *_: self._apply_readout_heater_editor_change("sensor_control_mode"))
         self.readout_editor_inputs["sensor_control_mode"] = mode
-        sensor_form.addRow("mode", mode)
+        heater_form.addRow("mode", mode)
         for name, label, minimum, maximum, step in (
             ("sensor_manual_power_W", "manual power W", 0.0, 1.0e9, 1.0),
-            ("controller_setpoint_K", "setpoint K", 0.0, 1.0e6, 1.0),
             ("controller_weight", "weight", 0.0, 1.0e9, 0.1),
             ("sensor_settling_time_s", "settling time s", 0.0, 1.0e9, 1.0),
             ("controller_kp_coarse", "coarse kP", 0.0, 1.0e9, 0.1),
@@ -433,10 +442,10 @@ class HeatTransferSimulationTab:
             ("controller_mu_order", "mu", 0.0, 1.0e9, 0.1),
         ):
             widget = self._double_spin(minimum, maximum, 0.0, step)
-            widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_sensor_editor_change(field))
+            widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_heater_editor_change(field))
             self.readout_editor_inputs[name] = widget
-            sensor_form.addRow(label, widget)
-        layout.addWidget(self.readout_sensor_editor)
+            heater_form.addRow(label, widget)
+        layout.addWidget(self.readout_heater_editor)
 
         self.readout_cooling_editor = self.QtWidgets.QWidget()
         cooling_form = self.QtWidgets.QFormLayout(self.readout_cooling_editor)
@@ -2232,6 +2241,10 @@ class HeatTransferSimulationTab:
         heater_powers: dict[int, float],
         node_index: dict[int, int],
     ) -> None:
+        selected_kind = self._readout_editor_kind if self._readout_editor_kind in {"sensor", "heater"} else None
+        selected_node_id = self._readout_editor_node_id if selected_kind is not None else None
+        restore_item = None
+        self.heating_readout_tree.blockSignals(True)
         self.heating_readout_tree.clear()
         for sensor in sorted(heating_sensors, key=lambda item: item.node_id):
             sensor_id = int(sensor.node_id)
@@ -2248,6 +2261,8 @@ class HeatTransferSimulationTab:
                 ]
             )
             sensor_item.setData(1, self.QtCore.Qt.UserRole, sensor_id)
+            if selected_kind == "sensor" and selected_node_id == sensor_id:
+                restore_item = sensor_item
             font = sensor_item.font(0)
             font.setBold(True)
             for column in range(6):
@@ -2271,9 +2286,14 @@ class HeatTransferSimulationTab:
                 )
                 heater_item.setData(1, self.QtCore.Qt.UserRole, int(heater_id))
                 sensor_item.addChild(heater_item)
+                if selected_kind == "heater" and selected_node_id == int(heater_id):
+                    restore_item = heater_item
             sensor_item.setExpanded(True)
         for column in range(6):
             self.heating_readout_tree.resizeColumnToContents(column)
+        if restore_item is not None:
+            self.heating_readout_tree.setCurrentItem(restore_item)
+        self.heating_readout_tree.blockSignals(False)
 
     def _heater_readout_power_for_sensor_heater(
         self,
@@ -2291,14 +2311,18 @@ class HeatTransferSimulationTab:
             return 0.0
         if not self._sensor_enabled_for_simulation(int(sensor_id)) or not self._heater_enabled_for_simulation(int(heater_id)):
             return 0.0
-        if str(getattr(sensor, "sensor_control_mode", "manual")) != "manual":
+        heater_mode = str(getattr(heater, "sensor_control_mode", "manual"))
+        if heater_mode != "manual":
             return 0.0
         max_power = max(
             0.0,
             float(getattr(getattr(heater, "heater", None), "heater_max_power_W", 0.0))
             * float(getattr(getattr(heater, "heater", None), "heater_efficiency", 1.0)),
         )
-        return min(max(float(getattr(sensor, "sensor_manual_power_W", 0.0)), 0.0), max_power)
+        manual_power = float(getattr(heater, "sensor_manual_power_W", 0.0))
+        if manual_power == 0.0 and _readout_heater_controller_is_default(heater):
+            manual_power = float(getattr(sensor, "sensor_manual_power_W", 0.0))
+        return min(max(manual_power, 0.0), max_power)
 
     def _show_readout_sensor_editor(self, sensor_id: int, *, selected_node_id: int | None = None) -> None:
         if self.model is None or int(sensor_id) not in self.model.nodes:
@@ -2312,18 +2336,45 @@ class HeatTransferSimulationTab:
             self._readout_editor_node_id = int(selected_node_id if selected_node_id is not None else sensor_id)
             self.readout_editor_box.setVisible(True)
             self.readout_sensor_editor.setVisible(True)
+            self.readout_heater_editor.setVisible(False)
             self.readout_cooling_editor.setVisible(False)
-            title = f"Sensor {int(sensor_id)}"
-            if selected_node_id is not None and int(selected_node_id) != int(sensor_id):
-                title = f"Heater {int(selected_node_id)} controlled by sensor {int(sensor_id)}"
-            self.readout_editor_title.setText(title)
-            mode = "mimo" if str(getattr(sensor, "sensor_control_mode", "manual")) == "mimo" else "manual"
-            self.readout_editor_inputs["sensor_control_mode"].setCurrentText(mode)
+            self.readout_editor_title.setText(f"Sensor {int(sensor_id)}")
             for field in _READOUT_SENSOR_CONTROLLER_FIELDS:
                 widget = self.readout_editor_inputs.get(field)
                 if widget is not None:
                     widget.setValue(float(getattr(sensor, field, 0.0)))
-            self._sync_readout_sensor_editor_enabled()
+        finally:
+            self._readout_editor_syncing = False
+
+    def _show_readout_heater_editor(self, heater_id: int) -> None:
+        if self.model is None or int(heater_id) not in self.model.nodes:
+            self._hide_readout_parameter_editor()
+            return
+        heater = self.model.nodes[int(heater_id)]
+        self._readout_editor_syncing = True
+        try:
+            self._readout_editor_kind = "heater"
+            self._readout_editor_node_id = int(heater_id)
+            self._readout_editor_sensor_id = (
+                int(getattr(heater, "assigned_sensor_id"))
+                if getattr(heater, "assigned_sensor_id", None) is not None
+                else None
+            )
+            self.readout_editor_box.setVisible(True)
+            self.readout_sensor_editor.setVisible(False)
+            self.readout_heater_editor.setVisible(True)
+            self.readout_cooling_editor.setVisible(False)
+            title = f"Heater {int(heater_id)}"
+            if self._readout_editor_sensor_id is not None:
+                title = f"Heater {int(heater_id)} controlled by sensor {self._readout_editor_sensor_id}"
+            self.readout_editor_title.setText(title)
+            mode = "mimo" if str(getattr(heater, "sensor_control_mode", "manual")) == "mimo" else "manual"
+            self.readout_editor_inputs["sensor_control_mode"].setCurrentText(mode)
+            for field in _READOUT_HEATER_CONTROLLER_FIELDS:
+                widget = self.readout_editor_inputs.get(field)
+                if widget is not None:
+                    widget.setValue(float(getattr(heater, field, 0.0)))
+            self._sync_readout_heater_editor_enabled()
         finally:
             self._readout_editor_syncing = False
 
@@ -2335,6 +2386,7 @@ class HeatTransferSimulationTab:
             self._readout_editor_sensor_id = None
             self.readout_editor_box.setVisible(True)
             self.readout_sensor_editor.setVisible(False)
+            self.readout_heater_editor.setVisible(False)
             self.readout_cooling_editor.setVisible(True)
             self.readout_editor_title.setText(f"Cryocooler cell {int(node_id)}")
             for field in ("Kp_cooler", "P_cooler_max", "T_cooler_setpoint"):
@@ -2350,19 +2402,24 @@ class HeatTransferSimulationTab:
         self._readout_editor_sensor_id = None
         if hasattr(self, "readout_editor_box"):
             self.readout_editor_box.setVisible(False)
+        if hasattr(self, "readout_heater_editor"):
+            self.readout_heater_editor.setVisible(False)
 
     def _sync_readout_sensor_editor_enabled(self) -> None:
+        widget = self.readout_editor_inputs.get("controller_setpoint_K")
+        if widget is not None:
+            widget.setEnabled(True)
+
+    def _sync_readout_heater_editor_enabled(self) -> None:
         mode_widget = self.readout_editor_inputs.get("sensor_control_mode")
         mode = mode_widget.currentText() if mode_widget is not None else "manual"
         manual = str(mode) == "manual"
-        for field in _READOUT_SENSOR_CONTROLLER_FIELDS:
+        for field in _READOUT_HEATER_CONTROLLER_FIELDS:
             widget = self.readout_editor_inputs.get(field)
             if widget is None:
                 continue
             if field == "sensor_manual_power_W":
                 widget.setEnabled(manual)
-            elif field == "controller_setpoint_K":
-                widget.setEnabled(True)
             else:
                 widget.setEnabled(not manual)
 
@@ -2375,12 +2432,7 @@ class HeatTransferSimulationTab:
         widget = self.readout_editor_inputs.get(field)
         if widget is None:
             return
-        if field == "sensor_control_mode":
-            value = "mimo" if widget.currentText() == "mimo" else "manual"
-            sensor.sensor_control_mode = value
-            self._sync_readout_sensor_editor_enabled()
-        else:
-            setattr(sensor, field, float(widget.value()))
+        setattr(sensor, field, float(widget.value()))
         if self.prepared is not None:
             self.prepared.mark_controller_stale()
             self.prepared.reset_controller_integrators()
@@ -2392,6 +2444,30 @@ class HeatTransferSimulationTab:
             selected_node_id=self._readout_editor_node_id,
         )
         self._status(f"Updated controller parameters for sensor {int(sensor.node_id)}.")
+
+    def _apply_readout_heater_editor_change(self, field: str) -> None:
+        if self._readout_editor_syncing or self.model is None or self._readout_editor_node_id is None:
+            return
+        heater = self.model.nodes.get(int(self._readout_editor_node_id))
+        if heater is None:
+            return
+        widget = self.readout_editor_inputs.get(field)
+        if widget is None:
+            return
+        if field == "sensor_control_mode":
+            value = "mimo" if widget.currentText() == "mimo" else "manual"
+            heater.sensor_control_mode = value
+            self._sync_readout_heater_editor_enabled()
+        else:
+            setattr(heater, field, float(widget.value()))
+        if self.prepared is not None:
+            self.prepared.mark_controller_stale()
+            self.prepared.reset_controller_integrators()
+        self._simulation_reinitialize_pending = False
+        self._refresh_stats()
+        self._refresh_sensor_readouts()
+        self._show_readout_heater_editor(int(heater.node_id))
+        self._status(f"Updated controller parameters for heater {int(heater.node_id)}.")
 
     def _apply_readout_cooling_editor_change(self, field: str) -> None:
         if self._readout_editor_syncing:
@@ -2492,15 +2568,7 @@ class HeatTransferSimulationTab:
         if item.text(0) == "sensor":
             self._show_readout_sensor_editor(int(node_id))
             return
-        if self.model is None:
-            self._hide_readout_parameter_editor()
-            return
-        heater = self.model.nodes.get(int(node_id))
-        sensor_id = getattr(heater, "assigned_sensor_id", None) if heater is not None else None
-        if sensor_id is None:
-            self._hide_readout_parameter_editor()
-            return
-        self._show_readout_sensor_editor(int(sensor_id), selected_node_id=int(node_id))
+        self._show_readout_heater_editor(int(node_id))
 
 
     def _handle_visual_toggle(self, *_: Any) -> None:
@@ -2754,6 +2822,35 @@ def _format_live_step_profile(profile: dict[str, float], steps_completed: int, m
     )
 
 
+def _readout_heater_controller_is_default(heater: Any) -> bool:
+    defaults = {
+        "sensor_control_mode": "manual",
+        "sensor_manual_power_W": 0.0,
+        "controller_weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "controller_kp_coarse": 0.0,
+        "controller_ki_coarse": 0.0,
+        "controller_kd_coarse": 0.0,
+        "controller_kp_hold": 0.0,
+        "controller_ki_hold": 0.0,
+        "controller_kd_hold": 0.0,
+        "controller_lambda_order": 1.0,
+        "controller_mu_order": 1.0,
+    }
+    for field, default in defaults.items():
+        value = getattr(heater, field, default)
+        if field == "sensor_control_mode":
+            if str(value or "manual").strip().lower() == "mimo":
+                return False
+            continue
+        try:
+            if abs(float(value) - float(default)) > 1.0e-12:
+                return False
+        except (TypeError, ValueError):
+            continue
+    return True
+
+
 def _format_temperature(value_K: float) -> str:
     try:
         value = float(value_K)
@@ -2956,13 +3053,18 @@ def _node_uses_mimo_controller(
     heater_enabled: bool = True,
     sensor_enabled: bool = True,
 ) -> bool:
+    if bool(getattr(node, "is_heater", False)):
+        return (
+            bool(heater_enabled)
+            and str(getattr(node, "sensor_control_mode", "manual")) == "mimo"
+            and (
+                getattr(node, "assigned_sensor_id", None) is not None
+                or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
+            )
+        )
     if bool(getattr(node, "is_sensor", False)):
         return (
             bool(sensor_enabled)
-            and (
-                str(getattr(node, "sensor_control_mode", "manual")) == "mimo"
-                or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
-            )
             and (
                 bool(getattr(node, "assigned_heater_ids", []) or [])
                 or getattr(node, "assigned_heater_id", None) is not None
@@ -2970,10 +3072,5 @@ def _node_uses_mimo_controller(
             )
             and bool(getattr(node, "sensor_valid", True))
             and not bool(getattr(node, "sensor_monitor_only", False))
-        )
-    if bool(getattr(node, "is_heater", False)):
-        return bool(heater_enabled) and (
-            getattr(node, "assigned_sensor_id", None) is not None
-            or str(getattr(getattr(node, "heater_control", None), "mode", "")) == "mimo"
         )
     return False

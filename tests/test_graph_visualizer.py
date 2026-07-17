@@ -702,6 +702,35 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertGreater(float(prepared.temperatures_K[0]), 300.0)
 
+    def test_paired_manual_heater_power_is_read_from_heater_not_sensor(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="manual_heater_per_actuator"))
+        sensor = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        sensor.C_J_K = 10.0
+        sensor.initial_temperature_K = 300.0
+        sensor.is_sensor = True
+        sensor.assigned_heater_ids = [2]
+        sensor.sensor_manual_power_W = 100.0
+        heater = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        heater.C_J_K = 10.0
+        heater.initial_temperature_K = 300.0
+        heater.is_heater = True
+        heater.assigned_sensor_id = 1
+        heater.heater.heater_max_power_W = 20.0
+        heater.sensor_control_mode = "manual"
+        heater.sensor_manual_power_W = 7.0
+        model.add_node(sensor)
+        model.add_node(heater)
+        matrices = {
+            "node_ids": np.array([1, 2], dtype=int),
+            "C": np.array([10.0, 10.0]),
+            "L": np.zeros((2, 2)),
+            "G_rad": np.array([0.0, 0.0]),
+        }
+
+        prepared = prepare_simulation(model, matrices, SimulationParameters(dt_s=1.0, input_mode="heater_inputs"))
+
+        self.assertEqual(prepared.heater_power_by_node(), {2: 7.0})
+
     def test_cryocooler_removes_heat_above_setpoint_only(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="cryocooler"))
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
@@ -2032,7 +2061,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         tab.enabled_heater_node_ids = {20, 30}
         tab._readout_editor_syncing = False
         tab._readout_editor_sensor_id = 10
-        tab._readout_editor_node_id = 10
+        tab._readout_editor_node_id = 20
         tab._simulation_reinitialize_pending = False
 
         class Spin:
@@ -2054,18 +2083,19 @@ class GraphVisualizerModelTests(unittest.TestCase):
         tab.prepared = Prepared()
         tab._refresh_stats = lambda: None
         tab._refresh_sensor_readouts = lambda: None
-        tab._show_readout_sensor_editor = lambda sensor_id, selected_node_id=None: None
+        tab._show_readout_heater_editor = lambda heater_id: None
         tab._status = lambda message, error=False: None
 
         sensors = tab._heating_sensor_nodes()
         heater_ids = tab._associated_heater_ids_for_sensor(10)
         manual_power = tab._heater_readout_power_for_sensor_heater(10, 20, {})
-        tab._apply_readout_sensor_editor_change("sensor_manual_power_W")
+        tab._apply_readout_heater_editor_change("sensor_manual_power_W")
 
         self.assertEqual([node.node_id for node in sensors], [10])
         self.assertEqual(heater_ids, [20, 30])
         self.assertAlmostEqual(manual_power, 100.0)
-        self.assertAlmostEqual(model.nodes[10].sensor_manual_power_W, 77.0)
+        self.assertAlmostEqual(model.nodes[10].sensor_manual_power_W, 100.0)
+        self.assertAlmostEqual(model.nodes[20].sensor_manual_power_W, 77.0)
         self.assertTrue(tab.prepared.marked)
         self.assertTrue(tab.prepared.reset)
 

@@ -938,6 +938,7 @@ class ThermalGraphModel:
                 model.set_edge(edge.source, edge.target, edge.Gij_W_K, edge.source_metadata)
         model.controller_gain_matrix = _parse_controller_gain_matrix(data.get("controller_gain_matrix"))
         model.prune_controller_gain_matrix()
+        migrate_legacy_sensor_controller_fields_to_heaters(model)
         return model
 
     @classmethod
@@ -983,6 +984,7 @@ class ThermalGraphModel:
                     warnings=edge.warnings,
                 )
         model.prune_controller_gain_matrix()
+        migrate_legacy_sensor_controller_fields_to_heaters(model)
         model.touch()
         return model
 
@@ -1092,6 +1094,74 @@ def _int_list(values: Any) -> list[int]:
 def _normalize_sensor_control_mode(value: Any) -> str:
     mode = str(value or "manual").strip().lower()
     return "mimo" if mode in {"mimo", "mimo_pid", "pid"} else "manual"
+
+
+_LEGACY_HEATER_CONTROLLER_DEFAULTS = {
+    "sensor_control_mode": "manual",
+    "sensor_manual_power_W": 0.0,
+    "controller_weight": 0.0,
+    "sensor_settling_time_s": 0.0,
+    "controller_kp_coarse": 0.0,
+    "controller_ki_coarse": 0.0,
+    "controller_kd_coarse": 0.0,
+    "controller_kp_hold": 0.0,
+    "controller_ki_hold": 0.0,
+    "controller_kd_hold": 0.0,
+    "controller_lambda_order": 1.0,
+    "controller_mu_order": 1.0,
+}
+
+
+def migrate_legacy_sensor_controller_fields_to_heaters(model: ThermalGraphModel) -> None:
+    """Move old sensor-level heater controller settings onto default paired heaters."""
+    for sensor in list(model.nodes.values()):
+        if not bool(getattr(sensor, "is_sensor", False)):
+            continue
+        source_values = {
+            field: getattr(sensor, field)
+            for field in _LEGACY_HEATER_CONTROLLER_DEFAULTS
+            if hasattr(sensor, field)
+        }
+        if not _has_nondefault_controller_values(source_values):
+            continue
+        heater_ids = [
+            int(value)
+            for value in getattr(sensor, "assigned_heater_ids", []) or []
+            if int(value) in model.nodes
+        ]
+        if getattr(sensor, "assigned_heater_id", None) is not None:
+            heater_ids.append(int(getattr(sensor, "assigned_heater_id")))
+        for heater in model.nodes.values():
+            if bool(getattr(heater, "is_heater", False)) and getattr(heater, "assigned_sensor_id", None) == int(sensor.node_id):
+                heater_ids.append(int(heater.node_id))
+        for heater_id in sorted(set(heater_ids)):
+            heater = model.nodes.get(int(heater_id))
+            if heater is None or not bool(getattr(heater, "is_heater", False)):
+                continue
+            heater_values = {
+                field: getattr(heater, field)
+                for field in _LEGACY_HEATER_CONTROLLER_DEFAULTS
+                if hasattr(heater, field)
+            }
+            if _has_nondefault_controller_values(heater_values):
+                continue
+            for field, value in source_values.items():
+                setattr(heater, field, value)
+
+
+def _has_nondefault_controller_values(values: dict[str, Any]) -> bool:
+    for field, default in _LEGACY_HEATER_CONTROLLER_DEFAULTS.items():
+        value = values.get(field, default)
+        if field == "sensor_control_mode":
+            if _normalize_sensor_control_mode(value) != default:
+                return True
+            continue
+        try:
+            if abs(float(value) - float(default)) > 1.0e-12:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _safe_coord_tuple(
