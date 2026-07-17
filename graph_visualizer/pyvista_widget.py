@@ -620,25 +620,35 @@ class GraphPyVistaWidget:
             )
 
     def _draw_role_interface_overlays(self, model: ThermalGraphModel, visible: set[int]) -> None:
+        outline_groups: dict[tuple[str, float], list[int]] = {}
+        pair_lines: list[tuple[Any, Any]] = []
+
+        def queue_outline(node_id: int, color: str, opacity: float) -> None:
+            outline_groups.setdefault((color, float(opacity)), []).append(int(node_id))
+
         if self.show_heaters:
             for heater in model.nodes.values():
                 if not bool(getattr(heater, "is_heater", False)):
                     continue
                 for body_id in getattr(heater, "power_deposition_node_ids", []) or []:
-                    self._add_node_outline(model, int(body_id), visible, "#f97316", 0.45)
+                    queue_outline(int(body_id), "#f97316", 0.45)
                 sensor_id = getattr(heater, "assigned_sensor_id", None)
                 if sensor_id is not None and int(sensor_id) in model.nodes:
-                    self._add_pair_line(heater, model.nodes[int(sensor_id)])
+                    pair_lines.append((heater, model.nodes[int(sensor_id)]))
                 if has_role_warning(heater):
-                    self._add_node_outline(model, int(heater.node_id), visible, "#ef4444", 0.75)
+                    queue_outline(int(heater.node_id), "#ef4444", 0.75)
         if self.show_sensors:
             for sensor in model.nodes.values():
                 if not bool(getattr(sensor, "is_sensor", False)):
                     continue
                 for body_id in (getattr(sensor, "readout_node_ids", []) or getattr(sensor, "sensor_connected_node_ids", []) or []):
-                    self._add_node_outline(model, int(body_id), visible, "#14b8a6", 0.38)
+                    queue_outline(int(body_id), "#14b8a6", 0.38)
                 if has_role_warning(sensor):
-                    self._add_node_outline(model, int(sensor.node_id), visible, "#ef4444", 0.75)
+                    queue_outline(int(sensor.node_id), "#ef4444", 0.75)
+
+        for (color, opacity), node_ids in outline_groups.items():
+            self._add_node_outlines(model, node_ids, visible, color, opacity)
+        self._add_pair_lines(pair_lines)
 
     def _add_node_outline(
         self,
@@ -671,6 +681,63 @@ class GraphPyVistaWidget:
         )
         self._role_overlay_actors.append(actor)
 
+    def _add_node_outlines(
+        self,
+        model: ThermalGraphModel,
+        node_ids: list[int],
+        visible: set[int],
+        color: str,
+        opacity: float,
+    ) -> None:
+        points: list[list[float]] = []
+        faces: list[int] = []
+        face_template = (
+            (0, 1, 3, 2),
+            (4, 6, 7, 5),
+            (0, 4, 5, 1),
+            (2, 3, 7, 6),
+            (0, 2, 6, 4),
+            (1, 5, 7, 3),
+        )
+        for node_id in node_ids:
+            if int(node_id) not in visible or int(node_id) not in model.nodes:
+                continue
+            geometry = _safe_node_cube_geometry(model.nodes[int(node_id)])
+            if geometry is None:
+                continue
+            center, lengths = geometry
+            inflated = tuple(max(float(length) * 1.06, float(length) + 1.0e-6) for length in lengths)
+            half = np.array(inflated, dtype=float) * 0.5
+            base = len(points)
+            for signs in (
+                (-1, -1, -1),
+                (1, -1, -1),
+                (-1, 1, -1),
+                (1, 1, -1),
+                (-1, -1, 1),
+                (1, -1, 1),
+                (-1, 1, 1),
+                (1, 1, 1),
+            ):
+                points.append((center + half * np.array(signs, dtype=float)).tolist())
+            for face in face_template:
+                faces.extend([4, *(base + index for index in face)])
+        if not points:
+            return
+        mesh = self.pv.PolyData(
+            np.asarray(points, dtype=float),
+            np.asarray(faces, dtype=np.int64),
+        )
+        actor = self.plotter.add_mesh(
+            mesh,
+            color=color,
+            style="wireframe",
+            line_width=2,
+            opacity=float(opacity),
+            pickable=False,
+        )
+        self._role_overlay_actors.append(actor)
+
     def _add_pair_line(self, heater: Any, sensor: Any) -> None:
         try:
             p0 = np.asarray(heater.center, dtype=float)
@@ -684,6 +751,35 @@ class GraphPyVistaWidget:
         color = "#eab308" if distance is not None and float(distance) > 0.0 else "#22c55e"
         actor = self.plotter.add_mesh(line, color=color, line_width=4, opacity=0.8, pickable=False)
         self._role_overlay_actors.append(actor)
+
+    def _add_pair_lines(self, pairs: list[tuple[Any, Any]]) -> None:
+        if not pairs:
+            return
+        grouped: dict[str, tuple[list[list[float]], list[int]]] = {}
+        for heater, sensor in pairs:
+            try:
+                p0 = np.asarray(heater.center, dtype=float)
+                p1 = np.asarray(sensor.center, dtype=float)
+            except Exception:
+                continue
+            if not np.all(np.isfinite(p0)) or not np.all(np.isfinite(p1)):
+                continue
+            distance = getattr(heater, "sensor_pair_distance_mm", None)
+            color = "#eab308" if distance is not None and float(distance) > 0.0 else "#22c55e"
+            points, lines = grouped.setdefault(color, ([], []))
+            base = len(points)
+            points.append(p0.tolist())
+            points.append(p1.tolist())
+            lines.extend([2, base, base + 1])
+        for color, (points, lines) in grouped.items():
+            if not points:
+                continue
+            mesh = self.pv.PolyData(
+                np.asarray(points, dtype=float),
+                lines=np.asarray(lines, dtype=np.int64),
+            )
+            actor = self.plotter.add_mesh(mesh, color=color, line_width=4, opacity=0.8, pickable=False)
+            self._role_overlay_actors.append(actor)
 
     @staticmethod
     def _set_actor_visible(actor: Any, visible: bool) -> None:

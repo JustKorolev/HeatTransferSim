@@ -1841,6 +1841,67 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(widget.depth_focus_fraction, 0.25)
         self.assertAlmostEqual(widget.depth_focus_width, 0.4)
 
+    def test_role_interface_overlays_batch_outlines_by_style(self) -> None:
+        import sys
+        import types
+
+        matplotlib_stubbed = "matplotlib" not in sys.modules
+        if matplotlib_stubbed:
+            sys.modules["matplotlib"] = types.SimpleNamespace(colormaps={})
+        try:
+            from graph_visualizer.pyvista_widget import GraphPyVistaWidget
+        finally:
+            if matplotlib_stubbed:
+                sys.modules.pop("matplotlib", None)
+
+        class FakePV:
+            @staticmethod
+            def PolyData(points, faces=None, lines=None):
+                return {"points": points, "faces": faces, "lines": lines}
+
+        class FakePlotter:
+            def __init__(self):
+                self.calls = []
+
+            def add_mesh(self, mesh, **kwargs):
+                self.calls.append((mesh, kwargs))
+                return object()
+
+        model = ThermalGraphModel()
+        for node_id, coord in ((1, (0, 0, 0)), (2, (1, 0, 0))):
+            node = NodeProperties.with_material(node_id, coord, material="copper")
+            node.center_mm = tuple(float(value) for value in coord)
+            node.size_mm = (1.0, 1.0, 1.0)
+            model.add_node(node)
+        heater = NodeProperties.with_material(10, (2, 0, 0), material="copper")
+        heater.center_mm = (2.0, 0.0, 0.0)
+        heater.size_mm = (1.0, 1.0, 1.0)
+        heater.is_heater = True
+        heater.power_deposition_node_ids = [1, 2]
+        heater.assigned_sensor_id = 20
+        model.add_node(heater)
+        sensor = NodeProperties.with_material(20, (3, 0, 0), material="copper")
+        sensor.center_mm = (3.0, 0.0, 0.0)
+        sensor.size_mm = (1.0, 1.0, 1.0)
+        sensor.is_sensor = True
+        sensor.readout_node_ids = [2]
+        model.add_node(sensor)
+
+        widget = object.__new__(GraphPyVistaWidget)
+        widget.show_heaters = True
+        widget.show_sensors = True
+        widget.pv = FakePV()
+        widget.plotter = FakePlotter()
+        widget._role_overlay_actors = []
+
+        widget._draw_role_interface_overlays(model, set(model.nodes))
+
+        self.assertEqual(len(widget.plotter.calls), 3)
+        wireframe_calls = [kwargs for _mesh, kwargs in widget.plotter.calls if kwargs.get("style") == "wireframe"]
+        self.assertEqual(len(wireframe_calls), 2)
+        line_calls = [mesh for mesh, kwargs in widget.plotter.calls if kwargs.get("line_width") == 4]
+        self.assertEqual(len(line_calls), 1)
+
     def test_editor_view_controls_do_not_redraw_voxel_geometry(self) -> None:
         try:
             from graph_visualizer.app import GraphVisualizerApp
