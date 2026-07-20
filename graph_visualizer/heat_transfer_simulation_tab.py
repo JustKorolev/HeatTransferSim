@@ -859,6 +859,8 @@ class HeatTransferSimulationTab:
             self._status(str(exc), True)
 
     def play(self) -> None:
+        if not self._simulation_worker_active():
+            self._apply_pending_runtime_changes()
         if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
         if self.prepared is None:
@@ -968,6 +970,7 @@ class HeatTransferSimulationTab:
             self.pause()
             self._status("Simulation worker is stopping; reset after the current compute step finishes.")
             return
+        self._apply_pending_runtime_changes()
         if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
             return
@@ -977,6 +980,8 @@ class HeatTransferSimulationTab:
         self._status("Simulation reset to initial temperatures.")
 
     def step_forward(self) -> None:
+        if not self._simulation_worker_active():
+            self._apply_pending_runtime_changes()
         if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
             return
@@ -2172,13 +2177,19 @@ class HeatTransferSimulationTab:
                 diagnostics = self.prepared.controller_allocator_diagnostics
                 allocation_text = ""
                 if diagnostics:
+                    b_sources = diagnostics.get("B_s_source", []) or []
+                    source_text = ",".join(sorted({str(source) for source in b_sources if str(source)})) or "?"
                     allocation_text = (
                         f"\nthermal-rate QP: sensors={diagnostics.get('active_sensor_count', '?')}, "
                         f"heaters={diagnostics.get('active_heater_count', '?')}, "
                         f"||v_cmd||={float(diagnostics.get('rate_command_norm', 0.0)):.4g} K/s, "
+                        f"||u_ff||={float(diagnostics.get('feedforward_hold_power_norm', 0.0)):.4g} W, "
                         f"||u||={float(diagnostics.get('heater_command_norm', 0.0)):.4g}, "
-                        f"rate_resid={float(diagnostics.get('predicted_dTdt_residual_norm', 0.0)):.4g} K/s"
+                        f"rate_resid={float(diagnostics.get('predicted_dTdt_residual_norm', 0.0)):.4g} K/s, "
+                        f"B_s={source_text}"
                     )
+                    if diagnostics.get("v_cmd_clipped"):
+                        allocation_text += ", v_cmd clipped"
                     if diagnostics.get("bounds_active"):
                         allocation_text += ", bounds active"
                 self.controller_status_label.setText(

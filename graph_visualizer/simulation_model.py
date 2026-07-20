@@ -1129,52 +1129,53 @@ class PreparedSimulation:
             kp_key = "controller_kp_coarse"
             ki_key = "controller_ki_coarse"
             kd_key = "controller_kd_coarse"
-        Kp = np.array(
-            [
-                _heater_controller_average(
-                    self.model,
-                    heaters_by_sensor.get(int(sensor_id), []),
-                    kp_key,
-                    0.0,
-                    sensor_id=int(sensor_id),
-                    clamp_min=0.0,
-                )
-                for sensor_id in sensor_ids
-            ],
-            dtype=float,
-        )
-        Ki = np.array(
-            [
-                _heater_controller_average(
-                    self.model,
-                    heaters_by_sensor.get(int(sensor_id), []),
-                    ki_key,
-                    0.0,
-                    sensor_id=int(sensor_id),
-                    clamp_min=0.0,
-                )
-                for sensor_id in sensor_ids
-            ],
-            dtype=float,
-        )
-        Kd = np.array(
-            [
-                _heater_controller_average(
-                    self.model,
-                    heaters_by_sensor.get(int(sensor_id), []),
-                    kd_key,
-                    0.0,
-                    sensor_id=int(sensor_id),
-                    clamp_min=0.0,
-                )
-                for sensor_id in sensor_ids
-            ],
-            dtype=float,
-        )
-        v_cmd = Kp * errors + Ki * eta + Kd * error_derivative
+        sensor_row_by_id = {int(sensor_id): row for row, sensor_id in enumerate(sensor_ids)}
+        heater_sensor_rows = np.full(len(heater_ids), -1, dtype=int)
+        per_heater_rate_cmd = np.zeros(len(heater_ids), dtype=float)
+        for heater_col, heater_id in enumerate(heater_ids):
+            heater = self.model.nodes[int(heater_id)]
+            assigned_sensor_id = getattr(heater, "assigned_sensor_id", None)
+            if assigned_sensor_id is None and heater.is_sensor:
+                assigned_sensor_id = int(heater_id)
+            row = sensor_row_by_id.get(int(assigned_sensor_id)) if assigned_sensor_id is not None else None
+            if row is None:
+                continue
+            sensor = self.model.nodes[int(sensor_ids[int(row)])]
+            try:
+                kp = max(0.0, float(_heater_controller_value(heater, sensor, kp_key, 0.0)))
+            except (TypeError, ValueError):
+                kp = 0.0
+            try:
+                ki = max(0.0, float(_heater_controller_value(heater, sensor, ki_key, 0.0)))
+            except (TypeError, ValueError):
+                ki = 0.0
+            try:
+                kd = max(0.0, float(_heater_controller_value(heater, sensor, kd_key, 0.0)))
+            except (TypeError, ValueError):
+                kd = 0.0
+            if _heater_controller_is_default(heater):
+                inherited_count = max(1, len(heaters_by_sensor.get(int(sensor_ids[int(row)]), [])))
+                kp /= float(inherited_count)
+                ki /= float(inherited_count)
+                kd /= float(inherited_count)
+            heater_sensor_rows[int(heater_col)] = int(row)
+            per_heater_rate_cmd[int(heater_col)] = (
+                kp * float(errors[int(row)])
+                + ki * float(eta[int(row)])
+                + kd * float(error_derivative[int(row)])
+            )
+        v_cmd_unclipped = np.zeros(len(sensor_ids), dtype=float)
+        for heater_col, row in enumerate(heater_sensor_rows):
+            if int(row) >= 0:
+                v_cmd_unclipped[int(row)] += float(per_heater_rate_cmd[int(heater_col)])
+        v_cmd = v_cmd_unclipped.copy()
         v_abs_max = max(0.0, float(getattr(self.params, "mimo_v_cmd_abs_max_K_per_s", 0.25)))
         if v_abs_max > 0.0:
             v_cmd = np.clip(v_cmd, -v_abs_max, v_abs_max)
+            for row, (raw, clipped) in enumerate(zip(v_cmd_unclipped, v_cmd)):
+                if abs(float(raw)) <= float(v_abs_max) or abs(float(raw)) <= 1.0e-15:
+                    continue
+                per_heater_rate_cmd[heater_sensor_rows == int(row)] *= float(clipped) / float(raw)
 
         maxima = np.array(
             [_controller_heater_max_power(self.model.nodes[heater_id], self.params) for heater_id in heater_ids],
@@ -1206,6 +1207,15 @@ class PreparedSimulation:
         )
         u_ff = np.asarray(hold_result.u, dtype=float).reshape(-1)
         u_ff = np.clip(np.where(np.isfinite(u_ff), u_ff, 0.0), 0.0, maxima)
+        u_ref = u_ff.copy()
+        for heater_col, row in enumerate(heater_sensor_rows):
+            if int(row) < 0:
+                continue
+            authority = float(B_s[int(row), int(heater_col)])
+            if not np.isfinite(authority) or abs(authority) <= 1.0e-15:
+                continue
+            u_ref[int(heater_col)] += float(per_heater_rate_cmd[int(heater_col)]) / authority
+        u_ref = np.clip(np.where(np.isfinite(u_ref), u_ref, 0.0), 0.0, maxima)
         drift_for_qp = passive_dTdt + B_s @ u_prev
         allocation = allocate_thermal_rate_qp(
             B_s,
@@ -1217,7 +1227,7 @@ class PreparedSimulation:
             float(getattr(self.params, "mimo_lambda_u", 1.0e-3)),
             float(getattr(self.params, "mimo_rho_du", 0.0)),
             max_delta_power,
-            u_ff,
+            u_ref,
         )
         u = np.asarray(allocation.u, dtype=float).reshape(-1)
         u = np.clip(np.where(np.isfinite(u), u, 0.0), 0.0, maxima)
@@ -1250,6 +1260,7 @@ class PreparedSimulation:
                 for heater_id in heater_ids
             },
             "rate_command_norm": float(np.linalg.norm(v_cmd)),
+            "rate_command_unclipped_norm": float(np.linalg.norm(v_cmd_unclipped)),
             "heater_command_norm": float(np.linalg.norm(u)),
             "measured_drift_dTdt_norm": float(np.linalg.norm(dTdt_hat)),
             "passive_drift_dTdt_norm": float(np.linalg.norm(passive_dTdt)),
@@ -1270,19 +1281,24 @@ class PreparedSimulation:
             "slew_delta_limit_W": float(slew_rate * dt) if slew_rate > 0.0 else 0.0,
             "v_cmd_min_K_per_s": float(np.min(v_cmd)) if v_cmd.size else 0.0,
             "v_cmd_max_K_per_s": float(np.max(v_cmd)) if v_cmd.size else 0.0,
+            "v_cmd_clipped": bool(v_abs_max > 0.0 and np.any(np.abs(v_cmd_unclipped - v_cmd) > 1.0e-12)),
             "raw_dTdt_s": [float(value) for value in raw_dTdt],
             "filtered_dTdt_hat_s": [float(value) for value in dTdt_hat],
             "passive_dTdt_s": [float(value) for value in passive_dTdt],
             "drift_for_qp_dTdt_s": [float(value) for value in drift_for_qp],
             "B_s": [[float(value) for value in row] for row in B_s],
+            "B_s_source": list((self.controller_dynamic_gain_cache or {}).get("sources", [])),
             "average_inverse_C_s": list((self.controller_dynamic_gain_cache or {}).get("average_inverse_C_s", [])),
             "B_s_delta_u_dTdt_s": [float(value) for value in heater_delta_dTdt],
             "B_s_u_dTdt_s": [float(value) for value in heater_total_dTdt],
             "v_cmd_s": [float(value) for value in v_cmd],
+            "v_cmd_unclipped_s": [float(value) for value in v_cmd_unclipped],
+            "per_heater_rate_cmd_s": [float(value) for value in per_heater_rate_cmd],
             "predicted_dTdt_s": [float(value) for value in predicted_dTdt],
             "achieved_predicted_dTdt_s": [float(value) for value in predicted_dTdt],
             "residual_s": [float(value) for value in residual],
             "feedforward_hold_power_W": [float(value) for value in u_ff],
+            "heater_reference_power_W": [float(value) for value in u_ref],
             "heater_commands_W": [float(value) for value in u],
             "u_prev_W": [float(value) for value in u_prev],
             "heater_at_lower_bound": [bool(value <= 1.0e-9) for value in u],
@@ -1417,10 +1433,19 @@ class PreparedSimulation:
                     rows_for_sensor.append((node_id, round(float(inv_C[int(row)]), 12)))
                 connected_rows.append(tuple(rows_for_sensor))
             connected_key = tuple(connected_rows)
+        gain_key: tuple[tuple[float, ...], ...]
+        if self.model is None:
+            gain_key = tuple()
+        else:
+            gain_key = tuple(
+                tuple(float(self.model.controller_gain(int(sensor_id), int(heater_id))) for heater_id in heater_ids)
+                for sensor_id in sensor_ids
+            )
         key = (
             tuple(int(value) for value in sensor_ids),
             tuple(int(value) for value in heater_ids),
             connected_key,
+            gain_key,
             float(getattr(self.params, "heater_sensor_pair_alpha", 1.0)),
         )
         cache = self.controller_dynamic_gain_cache
@@ -1434,10 +1459,12 @@ class PreparedSimulation:
         heater_col_by_id = {int(heater_id): col for col, heater_id in enumerate(heater_ids)}
         warnings: list[str] = []
         average_inverse_C_s: list[float] = []
+        sources: list[str] = []
         alpha = max(0.0, float(getattr(self.params, "heater_sensor_pair_alpha", 1.0)))
         for sensor_index, sensor_id in enumerate(sensor_ids):
             if self.model is None:
                 average_inverse_C_s.append(0.0)
+                sources.append("none")
                 continue
             sensor = self.model.nodes[int(sensor_id)]
             average_inverse_C, valid_node_ids = average_inverse_capacitance_for_sensor(
@@ -1447,6 +1474,12 @@ class PreparedSimulation:
                 int(sensor_id),
             )
             average_inverse_C_s.append(float(average_inverse_C))
+            source = "none"
+            for heater_id, heater_col in heater_col_by_id.items():
+                explicit_gain = float(self.model.controller_gain(int(sensor_id), int(heater_id)))
+                if np.isfinite(explicit_gain) and abs(explicit_gain) > 0.0:
+                    B_dyn[sensor_index, heater_col] = explicit_gain
+                    source = "G_ctrl"
             paired_heater_cols = [
                 col
                 for heater_id, col in heater_col_by_id.items()
@@ -1458,17 +1491,23 @@ class PreparedSimulation:
                 )
             ]
             if not paired_heater_cols:
-                warnings.append(f"MIMO sensor {int(sensor_id)} has no active paired heater; B_s row set to zero.")
+                if not np.any(np.abs(B_dyn[sensor_index, :]) > 0.0):
+                    warnings.append(f"MIMO sensor {int(sensor_id)} has no active paired heater; B_s row set to zero.")
+                sources.append(source)
                 continue
             if np.isfinite(average_inverse_C) and average_inverse_C > 0.0:
                 for heater_col in paired_heater_cols:
-                    B_dyn[sensor_index, heater_col] = alpha * float(average_inverse_C)
-            else:
+                    if abs(float(B_dyn[sensor_index, heater_col])) <= 0.0:
+                        B_dyn[sensor_index, heater_col] = alpha * float(average_inverse_C)
+                        if source == "none":
+                            source = "capacitance"
+            elif not np.any(np.abs(B_dyn[sensor_index, :]) > 0.0):
                 warnings.append(
                     f"MIMO sensor {int(sensor_id)} has no valid connected-node capacitance; B_s row set to zero."
                 )
-            if not valid_node_ids:
+            if not valid_node_ids and not np.any(np.abs(B_dyn[sensor_index, :]) > 0.0):
                 warnings.append(f"MIMO sensor {int(sensor_id)} has no valid connected nodes for average inverse C.")
+            sources.append(source)
         for sensor_index, sensor_id in enumerate(sensor_ids):
             sensor = self.model.nodes[int(sensor_id)] if self.model is not None else None
             if sensor is not None and _controller_sensor_weight(sensor) > 0.0 and not np.any(np.abs(B_dyn[sensor_index, :]) > 0.0):
@@ -1481,6 +1520,7 @@ class PreparedSimulation:
             "B_dyn": B_dyn.copy(),
             "warnings": tuple(warnings),
             "average_inverse_C_s": [float(value) for value in average_inverse_C_s],
+            "sources": tuple(sources),
         }
         return B_dyn
 
