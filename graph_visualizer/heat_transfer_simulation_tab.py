@@ -6,6 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -20,6 +21,7 @@ except Exception:  # pragma: no cover
 from .diagnostics import log_event, log_exception
 from .graph_io import has_generated_role_contact_edges, load_graph_folder, save_graph_folder
 from .matrix_builder import build_matrices, refresh_geometry_edges, refresh_radiation_from_exposed_faces
+from .modal_reduction import design_modal_controller
 from .models import EdgeMode, ThermalGraphModel
 from .pyvista_widget import GraphPyVistaWidget
 from .role_pairing import sensor_readout_temperature_K
@@ -45,7 +47,15 @@ _REINITIALIZE_PARAMETER_FIELDS = {
     "dt_s",
     "use_ambient_radiation",
     "T_env_K",
+    "interior_environment_temperature_K",
+    "use_radiative_coupling",
     "input_mode",
+    "cryocooler_max_power_W",
+    "cryocooler_capacity_scale",
+    "cryocooler_enabled",
+    "use_temperature_dependent_properties",
+    "use_midpoint_property_coupling",
+    "copper_rrr",
 }
 _DISPLAY_PARAMETER_FIELDS = {
     "autoscale_temperature",
@@ -53,9 +63,6 @@ _DISPLAY_PARAMETER_FIELDS = {
     "color_max_K",
 }
 _CONTROLLER_PARAMETER_FIELDS = {
-    "Kp_cooler",
-    "P_cooler_max",
-    "T_cooler_setpoint",
     "mimo_controller_enabled",
     "mimo_hold_threshold_K",
     "mimo_coarse_threshold_K",
@@ -89,8 +96,6 @@ _READOUT_HEATER_CONTROLLER_FIELDS = (
     "controller_kp_hold",
     "controller_ki_hold",
     "controller_kd_hold",
-    "controller_lambda_order",
-    "controller_mu_order",
 )
 _READOUT_HEATER_HARDWARE_FIELDS = (
     "heater_id",
@@ -146,9 +151,21 @@ class HeatTransferSimulationTab:
         self.simulation_future: Future[dict[str, Any]] | None = None
         self.simulation_cancel_event: threading.Event | None = None
         self._simulation_worker_mode: str | None = None
+        # Render throttle + cached role-node lists so the GUI thread stays light
+        # while the solver worker runs (keeps the parameter window responsive).
+        self._last_render_end_s: float = 0.0
+        self._last_render_duration_s: float = 0.0
+        self._role_cache_model_id: int | None = None
+        self._cooling_nodes_cache: list[Any] = []
+        self._heating_sensor_nodes_cache: list[Any] = []
+        self._heaters_by_sensor_cache: dict[int, set[int]] = {}
         self.stepper_diagnostic_future: Future[dict[str, Any]] | None = None
         self.stepper_diagnostic_timer = self.QtCore.QTimer(self.widget)
         self.stepper_diagnostic_timer.timeout.connect(self._poll_stepper_diagnostic_worker)
+        self.modal_design_future: Future[Any] | None = None
+        self.modal_design_timer = self.QtCore.QTimer(self.widget)
+        self.modal_design_timer.timeout.connect(self._poll_modal_design_worker)
+        self._modal_design_progress: dict[str, str] = {"message": ""}
         self._readout_editor_syncing = False
         self._readout_editor_kind: str | None = None
         self._readout_editor_node_id: int | None = None
@@ -197,20 +214,22 @@ class HeatTransferSimulationTab:
         self._add_component_temperature_controls(form)
 
         self.warning_label = self.QtWidgets.QLabel("")
-        self.warning_label.setWordWrap(True)
+        self._pin_two_line_label(self.warning_label)
         form.addRow(self.warning_label)
         self.stats_label = self.QtWidgets.QLabel("No simulation initialized.")
         self.stats_label.setWordWrap(True)
         form.addRow(self.stats_label)
         self.controller_status_label = self.QtWidgets.QLabel("")
-        self.controller_status_label.setWordWrap(True)
+        self._pin_two_line_label(self.controller_status_label)
         form.addRow(self.controller_status_label)
         self.sensor_readout_box = self.QtWidgets.QGroupBox("Thermal I/O Readouts")
         readout_layout = self.QtWidgets.QVBoxLayout(self.sensor_readout_box)
         self.cooling_readout_box = self.QtWidgets.QGroupBox("Cooling")
         cooling_layout = self.QtWidgets.QVBoxLayout(self.cooling_readout_box)
-        self.cooling_readout_table = self.QtWidgets.QTableWidget(0, 3)
-        self.cooling_readout_table.setHorizontalHeaderLabels(["cell/node", "temperature", "cryocooler power"])
+        self.cooling_readout_table = self.QtWidgets.QTableWidget(0, 7)
+        self.cooling_readout_table.setHorizontalHeaderLabels(
+            ["cryocooler", "cold-tip temperature", "base capacity", "scale", "applied cooling", "receiving nodes", "enabled"]
+        )
         self.cooling_readout_table.verticalHeader().setVisible(False)
         self.cooling_readout_table.setEditTriggers(self.QtWidgets.QAbstractItemView.NoEditTriggers)
         self.cooling_readout_table.setSelectionBehavior(self.QtWidgets.QAbstractItemView.SelectRows)
@@ -265,6 +284,26 @@ class HeatTransferSimulationTab:
         toggles.addWidget(self.depth_width_slider)
         toggles.addStretch(1)
         viewer_layout.addLayout(toggles)
+        cross_section_row = self.QtWidgets.QHBoxLayout()
+        self.cross_section_toggle = self._checkbox("Cross section", False, self._handle_visual_control_changed)
+        self.cross_section_toggle.setToolTip("Clip away cells below a movable axis-aligned plane.")
+        cross_section_row.addWidget(self.cross_section_toggle)
+        cross_section_row.addWidget(self.QtWidgets.QLabel("Axis"))
+        self.cross_section_axis_combo = self.QtWidgets.QComboBox()
+        self.cross_section_axis_combo.addItems(["X", "Y", "Z"])
+        self.cross_section_axis_combo.setCurrentText("Z")
+        self.cross_section_axis_combo.currentTextChanged.connect(self._handle_visual_control_changed)
+        cross_section_row.addWidget(self.cross_section_axis_combo)
+        cross_section_row.addWidget(self.QtWidgets.QLabel("Cut"))
+        self.cross_section_slider = self._view_slider(0, 100, 50, self._handle_visual_control_changed)
+        self.cross_section_slider.setToolTip("Move the cut from the minimum to maximum axis coordinate.")
+        self.cross_section_slider.setFixedWidth(220)
+        cross_section_row.addWidget(self.cross_section_slider)
+        self.cross_section_value_label = self.QtWidgets.QLabel("50%")
+        self.cross_section_value_label.setMinimumWidth(110)
+        cross_section_row.addWidget(self.cross_section_value_label)
+        cross_section_row.addStretch(1)
+        viewer_layout.addLayout(cross_section_row)
         self.viewer.set_toggles(
             False,
             False,
@@ -299,36 +338,165 @@ class HeatTransferSimulationTab:
         self.input_mode.setCurrentText(self.params.input_mode)
         self.input_mode.currentTextChanged.connect(lambda *_: self._handle_parameter_change("input_mode"))
         run_form.addRow("input mode", self.input_mode)
+        self._controller_scheme_labels = {
+            "pid_qp": "PID + QP allocator",
+            "modal_lqr": "Modal LQR (reduced-model)",
+        }
+        self.controller_scheme_combo = self.QtWidgets.QComboBox()
+        self.controller_scheme_combo.addItems(list(self._controller_scheme_labels.values()))
+        current_scheme = str(getattr(self.params, "mimo_controller_scheme", "pid_qp"))
+        self.controller_scheme_combo.setCurrentText(
+            self._controller_scheme_labels.get(current_scheme, "PID + QP allocator")
+        )
+        self.controller_scheme_combo.setToolTip(
+            "Heater controller for 'heater_inputs' mode.\n"
+            "- PID + QP allocator: the standard controller.\n"
+            "- Modal LQR (reduced-model): reduced-order LQR + regularized static state estimate; "
+            "needs 'modal_controller.npz' for this graph (build it with the 'Modal LQR Design' panel "
+            "below, or tools/analyze_plant_modes.py). "
+            "Falls back to PID+QP if the artifact is missing or built for a different graph."
+        )
+        self.controller_scheme_combo.currentTextChanged.connect(
+            lambda *_: self._handle_parameter_change("mimo_controller_scheme")
+        )
+        run_form.addRow("controller", self.controller_scheme_combo)
         form.addRow(run_box)
 
         environment_box, environment_form = self._section("Environment")
-        self._add_double_parameter(environment_form, "T_env_K", "ambient T K", 0.0, 1.0e6, 1.0)
+        self._add_double_parameter(environment_form, "T_env_K", "exterior / ambient T K", 0.0, 1.0e6, 1.0)
+        self.inputs["T_env_K"].setToolTip(
+            "Radiative background for the OUTSIDE of the assembly (room / ambient surroundings)."
+        )
+        self._add_double_parameter(
+            environment_form, "interior_environment_temperature_K", "interior (cryo) T K", 0.0, 1.0e6, 1.0
+        )
+        self.inputs["interior_environment_temperature_K"].setToolTip(
+            "Radiative background for the INSIDE of the assembly (cryocooled vacuum enclosure). "
+            "Inward-facing surfaces radiate to this once view-factor classification assigns them."
+        )
         self.inputs["use_ambient_radiation"] = self._checkbox(
             "Use ambient radiation",
             self.params.use_ambient_radiation,
             lambda *_: self._handle_parameter_change("use_ambient_radiation"),
         )
         environment_form.addRow(self.inputs["use_ambient_radiation"])
+        self.inputs["use_radiative_coupling"] = self._checkbox(
+            "Surface-to-surface radiative coupling (ray-traced)",
+            getattr(self.params, "use_radiative_coupling", False),
+            lambda *_: self._handle_parameter_change("use_radiative_coupling"),
+        )
+        self.inputs["use_radiative_coupling"].setToolTip(
+            "Ray-trace view factors over the exposed faces so parts exchange radiation with "
+            "each other (a hot part can warm a cold part), not just with the background. "
+            "One-time precompute when the simulation is prepared; skipped for very large graphs."
+        )
+        environment_form.addRow(self.inputs["use_radiative_coupling"])
+        # Bulk initial-temperature control: set initial_temperature_K on EVERY
+        # component at once (the state the simulation starts from / resets to).
+        self.initial_temperature_all_spin = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
+        set_all_initial = self.QtWidgets.QPushButton("Set all components")
+        set_all_initial.setToolTip(
+            "Set the initial temperature of EVERY component to this value. Updates the loaded "
+            "graph; if a simulation is already initialized it resets to this immediately, "
+            "otherwise it takes effect on the next Initialize."
+        )
+        set_all_initial.clicked.connect(self._set_all_initial_temperatures)
+        initial_temp_container = self.QtWidgets.QWidget()
+        initial_temp_layout = self.QtWidgets.QHBoxLayout(initial_temp_container)
+        initial_temp_layout.setContentsMargins(0, 0, 0, 0)
+        initial_temp_layout.addWidget(self.initial_temperature_all_spin, 1)
+        initial_temp_layout.addWidget(set_all_initial)
+        environment_form.addRow("initial T (all) K", initial_temp_container)
+        # Testing helper: assign each sensor a random controller SETPOINT (desired
+        # temperature) = center +/- a random mK-scale spread (e.g. ~50 K +/- tens of mK).
+        self.sensor_random_center_spin = self._double_spin(0.0, 1.0e6, 50.0, 1.0)
+        self.sensor_random_spread_mK_spin = self._double_spin(0.0, 1.0e6, 50.0, 1.0)
+        randomize_setpoints = self.QtWidgets.QPushButton("Randomize setpoints")
+        randomize_setpoints.setToolTip(
+            "Assign each sensor a random controller setpoint (desired temperature) = center +/- a "
+            "uniform random offset within the spread (mK). For testing how the controller drives "
+            "the sensors to distinct targets. Applied live (the controller reads setpoints each step)."
+        )
+        randomize_setpoints.clicked.connect(self._randomize_sensor_setpoints)
+        rand_container = self.QtWidgets.QWidget()
+        rand_layout = self.QtWidgets.QHBoxLayout(rand_container)
+        rand_layout.setContentsMargins(0, 0, 0, 0)
+        rand_layout.addWidget(self.sensor_random_center_spin, 1)
+        rand_layout.addWidget(self.QtWidgets.QLabel("K  ±"))
+        rand_layout.addWidget(self.sensor_random_spread_mK_spin, 1)
+        rand_layout.addWidget(self.QtWidgets.QLabel("mK"))
+        rand_layout.addWidget(randomize_setpoints)
+        environment_form.addRow("randomize setpoints", rand_container)
         form.addRow(environment_box)
 
+        properties_box, properties_form = self._section("Material Properties")
+        self.inputs["use_temperature_dependent_properties"] = self._checkbox(
+            "Temperature-dependent cp(T)/k(T)",
+            self.params.use_temperature_dependent_properties,
+            lambda *_: self._handle_parameter_change("use_temperature_dependent_properties"),
+        )
+        self.inputs["use_temperature_dependent_properties"].setToolTip(
+            "Recompute per-node C(T)=m*cp(T) and conduction/contact from NIST cryogenic "
+            "curves each step, instead of using constant room-temperature properties."
+        )
+        properties_form.addRow(self.inputs["use_temperature_dependent_properties"])
+        self._add_int_parameter(properties_form, "copper_rrr", "Copper RRR", 1, 100000, 10)
+        self.inputs["copper_rrr"].setToolTip(
+            "Residual resistivity ratio for OFHC copper thermal conductivity k(T). "
+            "NIST fits exist for 50/100/150/300/500 (the nearest is used). "
+            "Only affects runs with temperature-dependent properties enabled."
+        )
+        self.inputs["use_midpoint_property_coupling"] = self._checkbox(
+            "Midpoint property/radiation coupling",
+            getattr(self.params, "use_midpoint_property_coupling", True),
+            lambda *_: self._handle_parameter_change("use_midpoint_property_coupling"),
+        )
+        self.inputs["use_midpoint_property_coupling"].setToolTip(
+            "Evaluate the temperature-dependent properties and radiation at a "
+            "predicted midpoint (2nd-order-in-dt splitting) instead of the "
+            "step-start temperature. More accurate during fast transients; adds "
+            "one operator rebuild per step and only when those terms are active."
+        )
+        properties_form.addRow(self.inputs["use_midpoint_property_coupling"])
+        form.addRow(properties_box)
+
         cooler_box, cooler_form = self._section("Cryocooler")
+        cooler_model = self.QtWidgets.QLabel("PT60 measured lift curve")
+        cooler_form.addRow("Model", cooler_model)
         for name, label, minimum, maximum, step in (
-            ("Kp_cooler", "Kp cooler W/K", 0.0, 1.0e9, 0.1),
-            ("P_cooler_max", "max cooling W", 0.0, 1.0e9, 1.0),
-            ("T_cooler_setpoint", "setpoint K", 0.0, 1.0e6, 1.0),
+            ("cryocooler_max_power_W", "Maximum cooling power W", 0.0, 1.0e9, 1.0),
+            ("cryocooler_capacity_scale", "Capacity scale", 0.0, 1.0e9, 0.05),
         ):
             self._add_double_parameter(cooler_form, name, label, minimum, maximum, step)
+        self.inputs["cryocooler_enabled"] = self._checkbox(
+            "Enabled",
+            self.params.cryocooler_enabled,
+            lambda *_: self._handle_parameter_change("cryocooler_enabled"),
+        )
+        cooler_form.addRow(self.inputs["cryocooler_enabled"])
         form.addRow(cooler_box)
+
+        # Global controller limits: enforced by BOTH the PID+QP and modal-LQR
+        # schemes (absolute heater-power clamp + hard slew rate). "max rate cmd"
+        # additionally bounds the PID+QP rate command; it is inert for modal-LQR
+        # (which has no rate command) but kept here as a global controller knob.
+        controller_box, controller_form = self._section("Controller (global limits)")
+        for name, label, minimum, maximum, step in (
+            ("mimo_default_heater_max_power_W", "max heater power W", 0.0, 1.0e9, 1.0),
+            ("mimo_heater_slew_rate_W_per_s", "hard slew W/s", 0.0, 1.0e9, 1.0),
+            ("mimo_v_cmd_abs_max_K_per_s", "max rate cmd K/s", 0.0, 1.0e9, 0.01),
+        ):
+            self._add_double_parameter(controller_form, name, label, minimum, maximum, step)
+        form.addRow(controller_box)
+
+        self._build_modal_design_controls(form)
 
         mimo_box, mimo_form = self._section("MIMO Thermal-Rate QP")
         for name, label, minimum, maximum, step in (
             ("mimo_hold_threshold_K", "enter hold below K", 0.0, 1.0e6, 0.1),
             ("mimo_coarse_threshold_K", "return coarse above K", 0.0, 1.0e6, 0.1),
-            ("mimo_default_heater_max_power_W", "default heater max W", 0.0, 1.0e9, 1.0),
             ("mimo_lambda_u", "lambda_u heater effort", 0.0, 1.0e9, 0.001),
             ("mimo_rho_du", "rho_du power change", 0.0, 1.0e9, 0.01),
-            ("mimo_heater_slew_rate_W_per_s", "hard slew W/s", 0.0, 1.0e9, 1.0),
-            ("mimo_v_cmd_abs_max_K_per_s", "max rate cmd K/s", 0.0, 1.0e9, 0.01),
             ("heater_sensor_pair_alpha", "pair alpha", 0.0, 1.0e9, 0.01),
             ("role_contact_tolerance_mm", "role contact tol mm", 0.0, 1.0e9, 1.0e-6),
             ("role_contact_tolerance_max_mm", "role contact max mm", 0.0, 1.0e9, 0.1),
@@ -458,8 +626,6 @@ class HeatTransferSimulationTab:
             ("controller_kp_hold", "hold kP", 0.0, 1.0e9, 0.1),
             ("controller_ki_hold", "hold kI", 0.0, 1.0e9, 0.1),
             ("controller_kd_hold", "hold kD", 0.0, 1.0e9, 0.1),
-            ("controller_lambda_order", "lambda", 0.0, 1.0e9, 0.1),
-            ("controller_mu_order", "mu", 0.0, 1.0e9, 0.1),
         ):
             widget = self._double_spin(minimum, maximum, 0.0, step)
             widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_heater_editor_change(field))
@@ -469,15 +635,22 @@ class HeatTransferSimulationTab:
 
         self.readout_cooling_editor = self.QtWidgets.QWidget()
         cooling_form = self.QtWidgets.QFormLayout(self.readout_cooling_editor)
+        cooling_form.addRow("Model", self.QtWidgets.QLabel("PT60 measured lift curve"))
         for name, label, minimum, maximum, step in (
-            ("Kp_cooler", "Kp cooler W/K", 0.0, 1.0e9, 0.1),
-            ("P_cooler_max", "max cooling W", 0.0, 1.0e9, 1.0),
-            ("T_cooler_setpoint", "setpoint K", 0.0, 1.0e6, 1.0),
+            ("cryocooler_max_power_W", "Maximum cooling power W", 0.0, 1.0e9, 1.0),
+            ("cryocooler_capacity_scale", "Capacity scale", 0.0, 1.0e9, 0.05),
         ):
             widget = self._double_spin(minimum, maximum, float(getattr(self.params, name)), step)
             widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_cooling_editor_change(field))
             self.readout_editor_inputs[name] = widget
             cooling_form.addRow(label, widget)
+        enabled_widget = self._checkbox(
+            "Enabled",
+            self.params.cryocooler_enabled,
+            lambda *_args: self._apply_readout_cooling_editor_change("cryocooler_enabled"),
+        )
+        self.readout_editor_inputs["cryocooler_enabled"] = enabled_widget
+        cooling_form.addRow(enabled_widget)
         layout.addWidget(self.readout_cooling_editor)
         layout.addStretch(1)
 
@@ -858,6 +1031,81 @@ class HeatTransferSimulationTab:
         except Exception as exc:
             self._status(str(exc), True)
 
+    def _set_all_initial_temperatures(self) -> None:
+        """Set initial_temperature_K on EVERY component to the spin-box value.
+
+        Updates the loaded graph (the source of truth for the next Initialize) and,
+        if a simulation is already prepared and idle, applies it live by resetting
+        to the new uniform initial state."""
+        value = float(self.initial_temperature_all_spin.value())
+        if self.model is None:
+            self.use_current_graph()
+        if self.model is None:
+            self._status("Load a graph before setting initial temperatures.", True)
+            return
+        # Stop any running (or blowing-up) simulation first. Otherwise the worker
+        # owns the live state and the new temperature would be silently ignored,
+        # leaving the run at the old temperature when the controller next steps.
+        worker_was_active = self._simulation_worker_active()
+        if worker_was_active:
+            self.pause()
+        for node in self.model.nodes.values():
+            node.initial_temperature_K = value
+        count = len(self.model.nodes)
+        # Keep any cached initial-temperature vector on the matrices consistent so a
+        # later prepare/reset agrees with the model.
+        if isinstance(self.matrices, dict) and "initial_temperature_K" in self.matrices:
+            shape = np.asarray(self.matrices["initial_temperature_K"], dtype=float).shape
+            self.matrices["initial_temperature_K"] = np.full(shape, value, dtype=float)
+        applied_live = False
+        if self.prepared is not None and not worker_was_active:
+            # Idle prepared sim: reset its live state in place (cheap and exact),
+            # so the current state is authoritative at the set temperature.
+            self.prepared.initial_temperatures_K[:] = value
+            self.prepared.reset()
+            self.temperature_by_node = {int(node_id): value for node_id in self.prepared.node_ids}
+            self._reset_time_slider()
+            self._refresh_initialized_view()
+            self._refresh_stats()
+            applied_live = True
+        else:
+            # No prepared sim yet, or we just stopped a worker (don't race the
+            # still-finishing thread by mutating its state). Force a clean
+            # re-initialize from the model on the next run so the simulation is
+            # GUARANTEED to start at the set temperature before the controller
+            # takes its first step.
+            self._simulation_reinitialize_pending = True
+        if worker_was_active:
+            suffix = " (stopped the run; it re-initializes to this on the next Play)"
+        elif applied_live:
+            suffix = " (reset the prepared simulation to this state)"
+        else:
+            suffix = " (initializes to this on the next Play)"
+        self._status(f"Set initial temperature of all {count} components to {value:g} K{suffix}.")
+
+    def _randomize_sensor_setpoints(self) -> None:
+        """Assign each sensor a random controller setpoint (desired temperature) =
+        center +/- a uniform mK-scale offset. Testing helper; applies live because
+        the controller reads controller_setpoint_K each step (no re-init needed)."""
+        center = float(self.sensor_random_center_spin.value())
+        spread_K = float(self.sensor_random_spread_mK_spin.value()) * 1.0e-3
+        if self.model is None:
+            self.use_current_graph()
+        if self.model is None:
+            self._status("Load a graph before randomizing sensor setpoints.", True)
+            return
+        rng = np.random.default_rng()
+        sensors = [node for node in self.model.nodes.values() if bool(getattr(node, "is_sensor", False))]
+        for sensor in sensors:
+            offset = float(rng.uniform(-spread_K, spread_K)) if spread_K > 0.0 else 0.0
+            sensor.controller_setpoint_K = float(center + offset)
+        if self.prepared is not None:
+            self.prepared.mark_controller_stale()
+        self._status(
+            f"Randomized {len(sensors)} sensor setpoint(s) around {center:g} K "
+            f"+/- {spread_K * 1.0e3:g} mK (applied live)."
+        )
+
     def play(self) -> None:
         if not self._simulation_worker_active():
             self._apply_pending_runtime_changes()
@@ -1073,6 +1321,176 @@ class HeatTransferSimulationTab:
             self._status(f"Solver diagnostic failed: {exc}", True)
             log_exception("solver diagnostic failed", exc)
 
+    def _build_modal_design_controls(self, form: Any) -> None:
+        box, design_form = self._section("Modal LQR Design")
+        self.modal_temp_spin = self._double_spin(0.0, 1.0e6, self._default_modal_operating_temperature_K(), 1.0)
+        self.modal_temp_spin.setToolTip(
+            "Operating temperature to linearize the plant about. The controller offsets its "
+            "measurements and setpoints from this."
+        )
+        design_form.addRow("operating T K", self.modal_temp_spin)
+        self.modal_modes_spin = self._int_spin(2, 100000, 120, 1)
+        self.modal_modes_spin.setToolTip(
+            "Number of slowest thermal modes solved in stage 1 (before balanced truncation). "
+            "Clamped to fit the graph."
+        )
+        design_form.addRow("slow modes", self.modal_modes_spin)
+        self.modal_order_spin = self._int_spin(1, 100000, 40, 1)
+        self.modal_order_spin.setToolTip(
+            "Reduced model order r after balanced truncation -- the controller's state dimension "
+            "(kept small so it runs on the microcontroller)."
+        )
+        design_form.addRow("reduced order r", self.modal_order_spin)
+        self.modal_effort_spin = self._double_spin(1.0e-9, 1.0e9, 1.0, 0.1)
+        self.modal_effort_spin.setToolTip(
+            "LQR control-effort weight rho (R = rho*I, Q = C^T C). Larger rho = gentler, less "
+            "aggressive heating; smaller = faster, higher-power response."
+        )
+        design_form.addRow("LQR effort weight", self.modal_effort_spin)
+        self.modal_integral_spin = self._double_spin(0.0, 1.0e9, float(getattr(self.params, "modal_integral_gain", 0.0)), 0.01)
+        self.modal_integral_spin.setToolTip(
+            "Offset-free integral gain the modal controller uses to supply the operating holding "
+            "power the linearized model omits."
+        )
+        design_form.addRow("integral gain", self.modal_integral_spin)
+        self.modal_design_button = self.QtWidgets.QPushButton("Build && Use Modal Controller")
+        self.modal_design_button.setToolTip(
+            "Reduce the CURRENT graph to a reduced-order LQR controller and load it into the "
+            "modal-LQR scheme automatically (saved as modal_controller.npz in the graph folder). "
+            "Runs in the background."
+        )
+        self.modal_design_button.clicked.connect(self.build_modal_controller)
+        design_form.addRow(self.modal_design_button)
+        self.modal_design_status_label = self.QtWidgets.QLabel("Idle.")
+        self._pin_two_line_label(self.modal_design_status_label)
+        design_form.addRow("status", self.modal_design_status_label)
+        form.addRow(box)
+
+    def _default_modal_operating_temperature_K(self) -> float:
+        """Median initial temperature of the sensor cells (else all cells) as a
+        sensible default operating point; falls back to room temperature."""
+        if self.model is None:
+            return 293.15
+        sensor_temps = [
+            float(node.initial_temperature_K)
+            for node in self.model.nodes.values()
+            if bool(getattr(node, "is_sensor", False))
+        ]
+        temps = sensor_temps or [float(node.initial_temperature_K) for node in self.model.nodes.values()]
+        return float(np.median(temps)) if temps else 293.15
+
+    def _modal_design_worker_active(self) -> bool:
+        future = getattr(self, "modal_design_future", None)
+        return future is not None and not future.done()
+
+    def build_modal_controller(self) -> None:
+        """Run the modal/balanced-truncation reduction + LQR design on the current
+        graph in the background, then load the result into the modal-LQR scheme."""
+        if self._simulation_worker_active():
+            self.pause()
+            self._status("Simulation worker is stopping; build the modal controller after the current step finishes.")
+            return
+        if self._modal_design_worker_active():
+            self._status("Modal controller build is already running.", True)
+            return
+        if self.sys_id_state is not None:
+            self._status("Finish or cancel G_ctrl sys ID before building the modal controller.", True)
+            return
+        if self.model is None:
+            self._status("Load a graph before building the modal controller.", True)
+            return
+        try:
+            if getattr(self, "matrices", None) is None:
+                self.matrices = build_matrices(self.model)
+            matrices = self.matrices
+            if "L" not in matrices or "C" not in matrices or "node_ids" not in matrices:
+                self._status("Loaded graph is missing the operator matrices needed for reduction.", True)
+                return
+            out_path = self._modal_controller_output_path()
+            args = (
+                np.asarray(matrices["C"], dtype=float).copy(),
+                matrices["L"],
+                np.asarray(matrices.get("G_rad", np.zeros(len(matrices["C"]))), dtype=float).copy(),
+                np.asarray(matrices["node_ids"], dtype=int).copy(),
+                self.model,
+                float(self.modal_temp_spin.value()),
+                int(self.modal_modes_spin.value()),
+                int(self.modal_order_spin.value()),
+                float(self.modal_effort_spin.value()),
+                float(self.modal_integral_spin.value()),
+                str(out_path),
+                str(getattr(self.model.metadata, "graph_name", "") or ""),
+                self._modal_design_progress,
+            )
+            self._modal_design_progress["message"] = "Starting reduction…"
+            self.modal_design_status_label.setText("Starting reduction…")
+            self.modal_design_button.setEnabled(False)
+            executor = getattr(self, "simulation_executor", None)
+            if executor is None:  # headless / no executor: run inline
+                result = _run_modal_design_worker(*args)
+                self._apply_modal_design_result(result)
+                return
+            self.modal_design_future = executor.submit(_run_modal_design_worker, *args)
+            self.modal_design_timer.start(150)
+            self._status("Modal controller build running in background.")
+        except Exception as exc:  # noqa: BLE001 - surface to the panel
+            self.modal_design_button.setEnabled(True)
+            self.modal_design_status_label.setText(f"Failed: {exc}")
+            self._status(f"Modal controller build failed: {exc}", True)
+            log_exception("modal controller build failed", exc)
+
+    def _modal_controller_output_path(self) -> Path:
+        # Save next to the graph so _modal_controller_path_value auto-discovers it;
+        # otherwise fall back to the scratch/session temp dir.
+        if self.folder is not None:
+            return self.folder / "modal_controller.npz"
+        return Path(tempfile.gettempdir()) / "modal_controller.npz"
+
+    def _poll_modal_design_worker(self) -> None:
+        future = getattr(self, "modal_design_future", None)
+        if future is None:
+            self.modal_design_timer.stop()
+            return
+        # Reflect the worker's latest progress message while it runs.
+        message = self._modal_design_progress.get("message", "")
+        if message:
+            self.modal_design_status_label.setText(message)
+        if not future.done():
+            return
+        self.modal_design_timer.stop()
+        self.modal_design_future = None
+        self.modal_design_button.setEnabled(True)
+        try:
+            result = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.modal_design_status_label.setText(f"Failed: {exc}")
+            self._status(f"Modal controller build failed: {exc}", True)
+            log_exception("modal controller build failed", exc)
+            return
+        self._apply_modal_design_result(result)
+
+    def _apply_modal_design_result(self, result: Any) -> None:
+        self.modal_design_button.setEnabled(True)
+        self.modal_design_status_label.setText(result.summary())
+        # Wire the freshly-built artifact into the modal-LQR scheme and switch to it.
+        self.params = replace(
+            self.params,
+            mimo_controller_scheme="modal_lqr",
+            modal_controller_path=result.path,
+            modal_integral_gain=float(self.modal_integral_spin.value()),
+        )
+        combo = getattr(self, "controller_scheme_combo", None)
+        if combo is not None:
+            combo.blockSignals(True)
+            combo.setCurrentText(self._controller_scheme_labels.get("modal_lqr", combo.currentText()))
+            combo.blockSignals(False)
+        # Rebuild the prepared simulation so the controller picks up the artifact.
+        if self.model is not None:
+            self.sync_from_editor(self.model, self.folder, reinitialize=self.prepared is not None)
+        self._status(
+            f"Modal LQR controller built and loaded (order r={result.reduced_order}). {result.summary()}"
+        )
+
     def _stepper_diagnostic_output_dir(self) -> Path | None:
         if self.folder is None:
             return None
@@ -1194,8 +1612,29 @@ class HeatTransferSimulationTab:
             return
         profile = result.get("profile")
         profile = profile if isinstance(profile, dict) else None
+        payload = result.get("readout") if isinstance(result.get("readout"), dict) else {}
+        # Throttle the (main-thread, VTK) render/readout while playing so the Qt
+        # event loop stays responsive between frames. Stepping/paused always
+        # renders. Skipped frames still advance state cheaply.
+        now = time.perf_counter()
+        # Render throttle. While playing, require at least as much idle time as the
+        # last render took (>=50% duty cycle) AND the configured display interval,
+        # so the Qt event loop (parameter window, camera) stays responsive even
+        # when a single 3D redraw is expensive. Stepping/paused always renders.
+        render_floor_s = max(0.0, float(getattr(self.params, "display_update_interval_ms", 100.0))) / 1000.0
+        min_gap_s = max(render_floor_s, float(getattr(self, "_last_render_duration_s", 0.0)))
+        render_due = (not self.timer.isActive()) or (now - float(getattr(self, "_last_render_end_s", 0.0))) >= min_gap_s
         ui_start = time.perf_counter()
-        self._after_worker_state_change(profile)
+        if render_due:
+            render_start = time.perf_counter()
+            self._after_worker_state_change(profile, payload)
+            self._last_render_end_s = time.perf_counter()
+            self._last_render_duration_s = self._last_render_end_s - render_start
+        else:
+            temperature_by_node = payload.get("temperature_by_node") if isinstance(payload, dict) else None
+            if temperature_by_node:
+                self.temperature_by_node = temperature_by_node
+            self._sync_time_slider_to_history()
         if profile is not None:
             profile["total_ms"] = float(profile.get("step_loop_ms", 0.0)) + (time.perf_counter() - ui_start) * 1000.0
         max_delta_K = float(result.get("max_delta_K", 0.0))
@@ -1222,12 +1661,13 @@ class HeatTransferSimulationTab:
     def _live_step_profiling_enabled(self) -> bool:
         return True
 
-    def _after_worker_state_change(self, profile: dict[str, float] | None) -> None:
-        if profile is None:
-            self._after_state_change()
-            return
+    def _after_worker_state_change(
+        self,
+        profile: dict[str, float] | None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         try:
-            self._after_state_change(profile)
+            self._after_state_change(profile, payload)
         except TypeError:
             callback = getattr(self, "_after_state_change", None)
             if getattr(callback, "__name__", "") == "<lambda>":
@@ -1257,8 +1697,10 @@ class HeatTransferSimulationTab:
             nodes=0 if self.prepared is None else int(len(self.prepared.node_ids)),
             max_delta_K=f"{float(max_delta_K):.6g}",
         )
+        # Record the per-step breakdown to the diagnostics log only. It is
+        # intentionally NOT pushed to the on-screen status so the status stays
+        # on the "Playing simulation" line rather than being overwritten.
         log_event("simulation live step profile", **fields)
-        self._status(_format_live_step_profile(profile, steps_completed, max_delta_K))
 
     def save_current_trajectory(self) -> None:
         if self._simulation_worker_active():
@@ -1303,6 +1745,7 @@ class HeatTransferSimulationTab:
         folder: Path | None,
         reinitialize: bool = False,
     ) -> None:
+        self._invalidate_role_caches()
         if self._simulation_worker_active():
             self.pause()
             self._status("Simulation worker is stopping; sync the editor graph after the current compute step finishes.")
@@ -1329,6 +1772,7 @@ class HeatTransferSimulationTab:
 
     def refresh_live_readouts_from_editor(self, model: ThermalGraphModel, folder: Path | None) -> None:
         """Refresh cheap editor-driven readouts without rebuilding matrices or restarting playback."""
+        self._invalidate_role_caches()
         if self._simulation_worker_active():
             return
         if self.sys_id_state is not None:
@@ -1337,6 +1781,29 @@ class HeatTransferSimulationTab:
             self.folder = folder
             self._sync_enabled_io_table()
             if self.prepared is not None:
+                self.prepared.mark_controller_stale()
+            self._refresh_sensor_readouts()
+
+    def refresh_cryocoolers_from_editor(self, model: ThermalGraphModel, folder: Path | None) -> None:
+        """Apply a cryocooler (re)assignment without rebuilding matrices/radiation.
+
+        A cryocooler is a runtime heat-sink source, so only the prepared sim's
+        cryocooler devices need rebuilding -- a ~30 ms operation vs. a multi-second
+        full re-prepare on a large graph. Falls back to the standard reinitialise
+        path when the worker is mid-step (mutating the prepared sim then is unsafe)."""
+        self._invalidate_role_caches()
+        if self._simulation_worker_active():
+            # Can't safely touch the prepared sim mid-step; use the existing safe
+            # (deferred/pause) reinitialise path instead.
+            self.sync_from_editor(model, folder, reinitialize=True)
+            return
+        if self.sys_id_state is not None:
+            self.cancel_sys_id("Graph changed while sys ID was running; run cancelled.")
+        if self.model is model:
+            self.folder = folder
+            self._sync_enabled_io_table()
+            if self.prepared is not None:
+                self.prepared.refresh_cryocoolers()
                 self.prepared.mark_controller_stale()
             self._refresh_sensor_readouts()
 
@@ -1751,22 +2218,34 @@ class HeatTransferSimulationTab:
         self._refresh_stats()
         self._refresh_sensor_readouts()
 
-    def _after_state_change(self, profile: dict[str, float] | None = None) -> None:
+    def _after_state_change(
+        self,
+        profile: dict[str, float] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         assert self.prepared is not None
+        payload = payload or {}
         start = time.perf_counter()
-        self.temperature_by_node = {
-            int(node_id): float(temp)
-            for node_id, temp in zip(self.prepared.node_ids, self.prepared.temperatures_K)
-        }
+        temperature_by_node = payload.get("temperature_by_node")
+        if not temperature_by_node:
+            # Non-worker paths (step back, initialize) recompute on the main thread.
+            temperature_by_node = {
+                int(node_id): float(temp)
+                for node_id, temp in zip(self.prepared.node_ids, self.prepared.temperatures_K)
+            }
+        self.temperature_by_node = temperature_by_node
         _record_profile_ms(profile, "temperature_map_ms", start)
         start = time.perf_counter()
         self._update_colors()
         _record_profile_ms(profile, "color_update_render_ms", start)
         start = time.perf_counter()
-        self._refresh_stats()
+        self._refresh_stats(power_balance=payload.get("power_balance"))
         _record_profile_ms(profile, "stats_refresh_ms", start)
         start = time.perf_counter()
-        self._refresh_sensor_readouts()
+        self._refresh_sensor_readouts(
+            heater_powers=payload.get("heater_powers"),
+            cryocooler_diagnostics=payload.get("cryocooler_diagnostics"),
+        )
         _record_profile_ms(profile, "sensor_readouts_ms", start)
         start = time.perf_counter()
         self._sync_time_slider_to_history()
@@ -1928,48 +2407,39 @@ class HeatTransferSimulationTab:
         self._save_params_to_folder()
 
     def _read_params(self) -> SimulationParameters:
-        return SimulationParameters(
+        # Start from the current params and override ONLY the fields the UI exposes.
+        # This guarantees every selected setting is applied on Run AND that any
+        # param without a widget (e.g. solver knobs, colormap, passive-drift source,
+        # or fields added later) is carried through rather than silently reset to a
+        # dataclass default.
+        return replace(
+            self.params,
             dt_s=float(self.inputs["dt_s"].value()),
             t_final_s=float(self.inputs["t_final_s"].value()),
             playback_speed=float(self.inputs["playback_speed"].value()),
             use_ambient_radiation=bool(self.inputs["use_ambient_radiation"].isChecked()),
             T_env_K=float(self.inputs["T_env_K"].value()),
+            interior_environment_temperature_K=float(
+                self.inputs["interior_environment_temperature_K"].value()
+            ),
+            use_radiative_coupling=bool(self.inputs["use_radiative_coupling"].isChecked()),
             input_mode=self.input_mode.currentText(),
-            Kp_cooler=float(self.inputs["Kp_cooler"].value()),
-            P_cooler_max=float(self.inputs["P_cooler_max"].value()),
-            T_cooler_setpoint=float(self.inputs["T_cooler_setpoint"].value()),
+            cryocooler_max_power_W=float(self.inputs["cryocooler_max_power_W"].value()),
+            cryocooler_capacity_scale=float(self.inputs["cryocooler_capacity_scale"].value()),
+            cryocooler_enabled=bool(self.inputs["cryocooler_enabled"].isChecked()),
             autoscale_temperature=bool(self.inputs["autoscale_temperature"].isChecked()),
             color_min_K=float(self.inputs["color_min_K"].value()),
             color_max_K=float(self.inputs["color_max_K"].value()),
             loop_playback=bool(self.inputs["loop_playback"].isChecked()),
-            save_trajectory=bool(getattr(self.params, "save_trajectory", False)),
-            gpu_simulation_enabled=True,
-            gpu_simulation_max_substeps=int(getattr(self.params, "gpu_simulation_max_substeps", 128)),
-            gpu_simulation_safety_factor=float(getattr(self.params, "gpu_simulation_safety_factor", 0.2)),
-            fast_sparse_simulation_enabled=True,
-            fast_sparse_simulation_max_substeps=int(getattr(self.params, "fast_sparse_simulation_max_substeps", 128)),
-            fast_sparse_simulation_safety_factor=float(getattr(self.params, "fast_sparse_simulation_safety_factor", 0.2)),
-            implicit_sparse_simulation_enabled=True,
-            implicit_sparse_simulation_method=str(getattr(self.params, "implicit_sparse_simulation_method", "tr_bdf2")),
-            implicit_sparse_simulation_rtol=float(getattr(self.params, "implicit_sparse_simulation_rtol", 1.0e-6)),
-            implicit_sparse_simulation_maxiter=int(getattr(self.params, "implicit_sparse_simulation_maxiter", 300)),
-            implicit_sparse_adaptive_substeps_enabled=bool(
-                getattr(self.params, "implicit_sparse_adaptive_substeps_enabled", True)
+            use_temperature_dependent_properties=bool(
+                self.inputs["use_temperature_dependent_properties"].isChecked()
             ),
-            implicit_sparse_adaptive_target_delta_K=float(
-                getattr(self.params, "implicit_sparse_adaptive_target_delta_K", 1.0)
+            use_midpoint_property_coupling=bool(
+                self.inputs["use_midpoint_property_coupling"].isChecked()
             ),
-            implicit_sparse_adaptive_max_substeps=int(
-                getattr(self.params, "implicit_sparse_adaptive_max_substeps", 4)
-            ),
-            implicit_sparse_residual_check_enabled=bool(
-                getattr(self.params, "implicit_sparse_residual_check_enabled", True)
-            ),
+            copper_rrr=int(self.inputs["copper_rrr"].value()),
             simulation_history_limit=int(self.inputs["simulation_history_limit"].value()),
             live_step_profiling_enabled=True,
-            live_step_profile_threshold_ms=float(getattr(self.params, "live_step_profile_threshold_ms", 1000.0)),
-            browser_simulation_size_warning=int(getattr(self.params, "browser_simulation_size_warning", 1000)),
-            display_update_interval_ms=float(getattr(self.params, "display_update_interval_ms", 100.0)),
             mimo_controller_enabled=self._mimo_controller_should_run(),
             mimo_hold_threshold_K=float(self.inputs["mimo_hold_threshold_K"].value()),
             mimo_coarse_threshold_K=float(self.inputs["mimo_coarse_threshold_K"].value()),
@@ -1996,7 +2466,27 @@ class HeatTransferSimulationTab:
                 if self._enabled_io_initialized
                 else None
             ),
+            mimo_controller_scheme=self._controller_scheme_value(),
+            modal_controller_path=self._modal_controller_path_value(),
         )
+
+    def _controller_scheme_value(self) -> str:
+        combo = getattr(self, "controller_scheme_combo", None)
+        if combo is None:
+            return str(getattr(self.params, "mimo_controller_scheme", "pid_qp"))
+        label = combo.currentText()
+        for key, text in self._controller_scheme_labels.items():
+            if text == label:
+                return key
+        return "pid_qp"
+
+    def _modal_controller_path_value(self) -> str:
+        # The modal controller artifact travels with the graph folder.
+        if self.folder is not None:
+            candidate = self.folder / "modal_controller.npz"
+            if candidate.exists():
+                return str(candidate)
+        return str(getattr(self.params, "modal_controller_path", "") or "")
 
     def _mimo_controller_should_run(self) -> bool:
         if self.input_mode.currentText() != "heater_inputs" or self.model is None:
@@ -2070,6 +2560,12 @@ class HeatTransferSimulationTab:
         self.input_mode.blockSignals(True)
         self.input_mode.setCurrentText(self.params.input_mode)
         self.input_mode.blockSignals(False)
+        combo = getattr(self, "controller_scheme_combo", None)
+        if combo is not None:
+            scheme = str(getattr(self.params, "mimo_controller_scheme", "pid_qp"))
+            combo.blockSignals(True)
+            combo.setCurrentText(self._controller_scheme_labels.get(scheme, "PID + QP allocator"))
+            combo.blockSignals(False)
 
     def _draw_current(self, reset_camera: bool) -> None:
         if self.model is None:
@@ -2097,6 +2593,7 @@ class HeatTransferSimulationTab:
             scalar_clim=self._temperature_clim(),
             scalar_bar_title="Temperature [K]",
         )
+        self._update_cross_section_value_label()
         log_event("simulation draw_current viewer.draw complete")
         self._refresh_stats()
         self._refresh_sensor_readouts()
@@ -2152,7 +2649,7 @@ class HeatTransferSimulationTab:
                 cmax = cmin + 1.0
         return (cmin, cmax)
 
-    def _refresh_stats(self) -> None:
+    def _refresh_stats(self, power_balance: dict[str, float] | None = None) -> None:
         values = np.array(list((self.temperature_by_node or {}).values()), dtype=float)
         if values.size == 0 and self.model is not None:
             values = np.array([node.initial_temperature_K for node in self.model.nodes.values()], dtype=float)
@@ -2161,11 +2658,25 @@ class HeatTransferSimulationTab:
             self._refresh_sensor_readouts()
             return
         time_s = self.prepared.time_s if self.prepared is not None else 0.0
+        power_text = ""
+        if self.prepared is not None:
+            try:
+                balance = power_balance if power_balance is not None else self.prepared.power_balance_W()
+                power_in = balance["heater_W"] + max(0.0, balance["radiation_W"])
+                power_out = balance["cryocooler_W"] + max(0.0, -balance["radiation_W"])
+                power_text = (
+                    f"\npower in = {power_in:.3g} W  |  out = {power_out:.3g} W  |  net = {balance['net_W']:+.3g} W"
+                    f"\n  heaters {balance['heater_W']:.3g} W · cryo {balance['cryocooler_W']:.3g} W · "
+                    f"radiation {balance['radiation_W']:+.3g} W"
+                )
+            except Exception:
+                power_text = ""
         self.stats_label.setText(
             f"t = {time_s:.3g} s\n"
             f"min = {np.min(values):.3f} K / {np.min(values) - 273.15:.3f} C\n"
             f"max = {np.max(values):.3f} K / {np.max(values) - 273.15:.3f} C\n"
             f"mean = {np.mean(values):.3f} K / {np.mean(values) - 273.15:.3f} C"
+            + power_text
         )
         if self.prepared is not None and self._mimo_controller_should_run():
             if self.sys_id_state is not None:
@@ -2212,57 +2723,121 @@ class HeatTransferSimulationTab:
             for heater_id in state.get("heaters", [])
         }
 
-    def _refresh_sensor_readouts(self) -> None:
+    def _rebuild_role_caches(self) -> None:
+        self._role_cache_model_id = id(self.model) if self.model is not None else None
+        if self.model is None:
+            self._cooling_nodes_cache = []
+            self._heating_sensor_nodes_cache = []
+            self._heaters_by_sensor_cache = {}
+            return
+        self._cooling_nodes_cache = [node for node in self.model.nodes.values() if node.has_cryocooler]
+        self._heating_sensor_nodes_cache = self._heating_sensor_nodes()
+        # Reverse map sensor_id -> {heater_ids that target it}, built in ONE pass so
+        # the per-sensor readout lookup is O(1) instead of scanning every node (that
+        # per-sensor-per-frame O(N) scan was the dominant live-step cost at ~471k nodes).
+        heaters_by_sensor: dict[int, set[int]] = {}
+        for node in self.model.nodes.values():
+            if not bool(getattr(node, "is_heater", False)):
+                continue
+            assigned = getattr(node, "assigned_sensor_id", None)
+            if assigned is not None:
+                heaters_by_sensor.setdefault(int(assigned), set()).add(int(node.node_id))
+        self._heaters_by_sensor_cache = heaters_by_sensor
+
+    def _invalidate_role_caches(self) -> None:
+        self._role_cache_model_id = None
+
+    def _cached_cooling_nodes(self) -> list[Any]:
+        if self._role_cache_model_id != (id(self.model) if self.model is not None else None):
+            self._rebuild_role_caches()
+        return self._cooling_nodes_cache
+
+    def _cached_heating_sensor_nodes(self) -> list[Any]:
+        if self._role_cache_model_id != (id(self.model) if self.model is not None else None):
+            self._rebuild_role_caches()
+        return self._heating_sensor_nodes_cache
+
+    def _cached_heaters_by_sensor(self) -> dict[int, set[int]]:
+        if getattr(self, "_role_cache_model_id", None) != (id(self.model) if self.model is not None else None):
+            self._rebuild_role_caches()
+        return self._heaters_by_sensor_cache
+
+    def _refresh_sensor_readouts(
+        self,
+        heater_powers: dict[int, float] | None = None,
+        cryocooler_diagnostics: list[dict[str, Any]] | None = None,
+    ) -> None:
         if self.model is None:
             self.sensor_readout_box.setVisible(False)
             self.cooling_readout_table.setRowCount(0)
             self.heating_readout_tree.clear()
             return
-        cooling_nodes = [
-            node
-            for node in self.model.nodes.values()
-            if node.has_cryocooler
-        ]
-        heating_sensors = self._heating_sensor_nodes()
+        # Role-node lists are cached (they change only on model/role edits), and
+        # heater powers / cryocooler diagnostics are supplied by the worker when
+        # available so this method does no per-frame O(N) work on the GUI thread.
+        cooling_nodes = self._cached_cooling_nodes()
+        heating_sensors = self._cached_heating_sensor_nodes()
         self.sensor_readout_box.setVisible(bool(cooling_nodes or heating_sensors))
         self.cooling_readout_box.setVisible(bool(cooling_nodes))
         self.heating_readout_box.setVisible(bool(heating_sensors))
         temperatures = self._temperature_values()
         sys_id_heater_powers = self._sys_id_readout_heater_powers()
-        heater_powers = (
-            sys_id_heater_powers
-            if sys_id_heater_powers is not None
-            else self.prepared.heater_actuator_power_by_node()
-            if self.prepared is not None
-            else {}
-        )
-        cryocooler_powers = self.prepared.cryocooler_power_by_node() if self.prepared is not None else {}
+        if sys_id_heater_powers is not None:
+            heater_powers = sys_id_heater_powers
+        elif heater_powers is None:
+            heater_powers = self.prepared.heater_actuator_power_by_node() if self.prepared is not None else {}
+        if cryocooler_diagnostics is None:
+            cryocooler_diagnostics = self.prepared.cryocooler_diagnostics() if self.prepared is not None else []
         node_index = (
-            {int(node_id): row for row, node_id in enumerate(self.prepared.node_ids)}
-            if self.prepared is not None
-            else {}
+            self.prepared.node_index_by_id
+            if self.prepared is not None and self.prepared.node_index_by_id
+            else (
+                {int(node_id): row for row, node_id in enumerate(self.prepared.node_ids)}
+                if self.prepared is not None
+                else {}
+            )
         )
-        self._refresh_cooling_readouts(cooling_nodes, temperatures, cryocooler_powers)
+        self._refresh_cooling_readouts(cooling_nodes, cryocooler_diagnostics)
         self._refresh_heating_readouts(heating_sensors, temperatures, heater_powers, node_index)
 
     def _refresh_cooling_readouts(
         self,
         cooling_nodes: list[Any],
-        temperatures: dict[int, float],
-        cryocooler_powers: dict[int, float],
+        diagnostics: list[dict[str, Any]],
     ) -> None:
-        self.cooling_readout_table.setRowCount(len(cooling_nodes))
-        for row, node in enumerate(sorted(cooling_nodes, key=lambda item: item.node_id)):
-            temperature = float(temperatures.get(int(node.node_id), node.initial_temperature_K))
-            id_item = self.QtWidgets.QTableWidgetItem(str(node.node_id))
-            id_item.setData(self.QtCore.Qt.UserRole, int(node.node_id))
+        if not diagnostics and cooling_nodes:
+            diagnostics = [
+                {
+                    "cryocooler_id": str(getattr(node, "cryocooler_id", "") or node.component_name or node.node_id),
+                    "source_node_ids": [int(node.node_id)],
+                    "representative_temperature_K": None,
+                    "base_curve_capacity_W": 0.0,
+                    "capacity_scale": float(self.params.cryocooler_capacity_scale),
+                    "applied_cooling_W": 0.0,
+                    "receiving_node_count": 0,
+                    "enabled": bool(self.params.cryocooler_enabled and getattr(node, "cryocooler_enabled", True)),
+                }
+                for node in sorted(cooling_nodes, key=lambda item: item.node_id)
+            ]
+        self.cooling_readout_table.setRowCount(len(diagnostics))
+        for row, diagnostic in enumerate(diagnostics):
+            source_ids = [int(value) for value in diagnostic.get("source_node_ids", []) or []]
+            id_item = self.QtWidgets.QTableWidgetItem(str(diagnostic.get("cryocooler_id", "?")))
+            if source_ids:
+                id_item.setData(self.QtCore.Qt.UserRole, int(source_ids[0]))
             self.cooling_readout_table.setItem(row, 0, id_item)
-            self.cooling_readout_table.setItem(row, 1, self.QtWidgets.QTableWidgetItem(_format_temperature(temperature)))
-            self.cooling_readout_table.setItem(
-                row,
-                2,
-                self.QtWidgets.QTableWidgetItem(_format_power(float(cryocooler_powers.get(int(node.node_id), 0.0)))),
+            tip = diagnostic.get("representative_temperature_K")
+            tip_text = _format_temperature(float(tip)) if tip is not None else "invalid"
+            values = (
+                tip_text,
+                _format_power(float(diagnostic.get("base_curve_capacity_W", 0.0))),
+                f"{float(diagnostic.get('capacity_scale', 1.0)):.3f}",
+                _format_power(float(diagnostic.get("applied_cooling_W", 0.0))),
+                str(int(diagnostic.get("receiving_node_count", 0))),
+                "yes" if bool(diagnostic.get("enabled", False)) else "no",
             )
+            for column, text in enumerate(values, start=1):
+                self.cooling_readout_table.setItem(row, column, self.QtWidgets.QTableWidgetItem(text))
         self.cooling_readout_table.resizeColumnsToContents()
 
     def _refresh_heating_readouts(
@@ -2429,11 +3004,16 @@ class HeatTransferSimulationTab:
             self.readout_sensor_editor.setVisible(False)
             self.readout_heater_editor.setVisible(False)
             self.readout_cooling_editor.setVisible(True)
-            self.readout_editor_title.setText(f"Cryocooler cell {int(node_id)}")
-            for field in ("Kp_cooler", "P_cooler_max", "T_cooler_setpoint"):
+            identifier = str(getattr(self.model.nodes.get(int(node_id)), "cryocooler_id", "") or "").strip()
+            if not identifier and self.model.nodes.get(int(node_id)) is not None:
+                identifier = str(getattr(self.model.nodes[int(node_id)], "component_name", "") or int(node_id))
+            self.readout_editor_title.setText(f"Cryocooler {identifier}")
+            for field in ("cryocooler_max_power_W", "cryocooler_capacity_scale", "cryocooler_enabled"):
                 widget = self.readout_editor_inputs.get(field)
-                if widget is not None:
+                if widget is not None and hasattr(widget, "setValue"):
                     widget.setValue(float(getattr(self.params, field)))
+                elif widget is not None and hasattr(widget, "setChecked"):
+                    widget.setChecked(bool(getattr(self.params, field)))
         finally:
             self._readout_editor_syncing = False
 
@@ -2525,14 +3105,20 @@ class HeatTransferSimulationTab:
         if widget is None or not hasattr(self.params, field):
             return
         linked = self.inputs.get(field)
-        if linked is not None and hasattr(linked, "setValue"):
+        if linked is not None and hasattr(linked, "setValue") and hasattr(widget, "value"):
             linked.blockSignals(True)
             linked.setValue(float(widget.value()))
             linked.blockSignals(False)
             self._handle_parameter_change(field)
+        elif linked is not None and hasattr(linked, "setChecked") and hasattr(widget, "isChecked"):
+            linked.blockSignals(True)
+            linked.setChecked(bool(widget.isChecked()))
+            linked.blockSignals(False)
+            self._handle_parameter_change(field)
         else:
-            self.params = replace(self.params, **{field: float(widget.value())})
-            self._apply_controller_runtime_parameter_change({field})
+            value = bool(widget.isChecked()) if hasattr(widget, "isChecked") else float(widget.value())
+            self.params = replace(self.params, **{field: value})
+            self._save_params_to_folder()
         if self._readout_editor_node_id is not None:
             self._show_readout_cooling_editor(int(self._readout_editor_node_id))
 
@@ -2568,9 +3154,11 @@ class HeatTransferSimulationTab:
         }
         if getattr(sensor, "assigned_heater_id", None) is not None:
             heater_ids.add(int(getattr(sensor, "assigned_heater_id")))
-        for heater in self.model.nodes.values():
-            if bool(getattr(heater, "is_heater", False)) and getattr(heater, "assigned_sensor_id", None) == int(sensor_id):
-                heater_ids.add(int(heater.node_id))
+        # Heaters that target this sensor, from the precomputed reverse map (avoids
+        # rescanning every node once per sensor per frame).
+        for heater_id in self._cached_heaters_by_sensor().get(int(sensor_id), ()):
+            if int(heater_id) in self.model.nodes:
+                heater_ids.add(int(heater_id))
         return sorted(heater_ids)
 
     def _sensor_measured_temperature(
@@ -2638,6 +3226,23 @@ class HeatTransferSimulationTab:
             width=float(self.depth_width_slider.value()) / 100.0,
             render=False,
         )
+        self.viewer.set_cross_section(
+            self.cross_section_toggle.isChecked(),
+            float(self.cross_section_slider.value()) / 100.0,
+            axis=self.cross_section_axis_combo.currentText().lower(),
+            render=False,
+        )
+        self._update_cross_section_value_label()
+
+    def _update_cross_section_value_label(self) -> None:
+        if not hasattr(self, "cross_section_value_label"):
+            return
+        coordinate = self.viewer.cross_section_coordinate()
+        if coordinate is None:
+            self.cross_section_value_label.setText(f"{self.cross_section_slider.value()}%")
+        else:
+            axis = self.cross_section_axis_combo.currentText().upper()
+            self.cross_section_value_label.setText(f"{axis} = {coordinate:.4g} mm")
 
     def _handle_marker_toggle(self, *_: Any) -> None:
         self.viewer.update_io_marker_visibility(
@@ -2709,6 +3314,17 @@ class HeatTransferSimulationTab:
 
     def _legend_text(self) -> str:
         return "3D legend: jet colormap, bottom right."
+
+    def _pin_two_line_label(self, label: Any) -> None:
+        """Lock a status label to a fixed two-line height so runtime messages of
+        varying length can't change its size and shove the rest of the panel around.
+        Text longer than two lines wraps then clips (is cut off), not expands."""
+        label.setWordWrap(True)
+        label.setAlignment(self.QtCore.Qt.AlignTop | self.QtCore.Qt.AlignLeft)
+        # Two line-heights plus a little padding, from the label's own font metrics.
+        two_lines = label.fontMetrics().lineSpacing() * 2 + 6
+        label.setFixedHeight(int(two_lines))
+        label.setSizePolicy(self.QtWidgets.QSizePolicy.Preferred, self.QtWidgets.QSizePolicy.Fixed)
 
     def _status(self, message: str, error: bool = False) -> None:
         if self.on_status is not None:
@@ -2821,56 +3437,6 @@ def _accumulate_profile_ms(target: dict[str, float], source: Any) -> None:
             continue
 
 
-def _format_live_step_profile(profile: dict[str, float], steps_completed: int, max_delta_K: float) -> str:
-    labels = {
-        "step_loop_ms": "step loop",
-        "model_solve_ms": "solve/controller",
-        "controller_mode_check_ms": "controller check",
-        "controller_mimo_ms": "MIMO controller",
-        "controller_heater_power_ms": "heater controller",
-        "zero_power_vector_ms": "zero power vector",
-        "gpu_step_ms": "GPU step",
-        "cpu_sparse_implicit_step_ms": "TR-BDF2 sparse step",
-        "cpu_fast_sparse_step_ms": "fast sparse step",
-        "state_vector_update_ms": "state vector",
-        "radiation_source_ms": "radiation source",
-        "source_vector_build_ms": "source vector",
-        "affine_matrix_build_ms": "affine build",
-        "cpu_expm_multiply_ms": "CPU expm_multiply",
-        "dense_phi_matvec_ms": "dense Phi matvec",
-        "dense_affine_matrix_build_ms": "dense affine build",
-        "dense_expm_matvec_ms": "dense expm",
-        "state_copy_ms": "state copy",
-        "history_append_ms": "history",
-        "temperature_map_ms": "temp map",
-        "color_update_render_ms": "colors/render",
-        "stats_refresh_ms": "stats",
-        "sensor_readouts_ms": "sensors",
-        "time_slider_ms": "slider",
-        "seek_ms": "seek",
-    }
-    total_ms = float(profile.get("total_ms", 0.0))
-    parts = [
-        f"{label}={float(profile[key]):.1f} ms"
-        for key, label in labels.items()
-        if key in profile
-    ]
-    contributors = [
-        (labels.get(key, key[:-3].replace("_", " ")), float(value))
-        for key, value in profile.items()
-        if key.endswith("_ms") and key != "total_ms"
-    ]
-    contributors.sort(key=lambda item: item[1], reverse=True)
-    bottleneck = contributors[0][0] if contributors else "unknown"
-    detail = ", ".join(parts)
-    if detail:
-        detail = " " + detail
-    return (
-        f"Live step profile: total={total_ms:.1f} ms, steps={int(steps_completed)}, "
-        f"max dT={float(max_delta_K):.3e} K, largest={bottleneck}.{detail}"
-    )
-
-
 def _readout_heater_controller_is_default(heater: Any) -> bool:
     defaults = {
         "sensor_control_mode": "manual",
@@ -2883,8 +3449,6 @@ def _readout_heater_controller_is_default(heater: Any) -> bool:
         "controller_kp_hold": 0.0,
         "controller_ki_hold": 0.0,
         "controller_kd_hold": 0.0,
-        "controller_lambda_order": 1.0,
-        "controller_mu_order": 1.0,
     }
     for field, default in defaults.items():
         value = getattr(heater, field, default)
@@ -2928,6 +3492,35 @@ def _format_power(value_W: float) -> str:
     if not np.isfinite(value):
         return "invalid"
     return f"{value:.3f} W"
+
+
+def _run_modal_design_worker(
+    C: np.ndarray,
+    L: Any,
+    Grad: np.ndarray,
+    node_ids: np.ndarray,
+    model: ThermalGraphModel,
+    T_op_K: float,
+    n_modes: int,
+    r: int,
+    effort_weight: float,
+    integral_gain: float,
+    out_path: str,
+    graph_name: str,
+    progress_holder: dict[str, str],
+) -> Any:
+    """Background job: reduce the plant + design the modal-LQR controller artifact.
+    Writes progress messages into ``progress_holder`` (read by the poll timer)."""
+
+    def _progress(message: str) -> None:
+        progress_holder["message"] = message
+
+    return design_modal_controller(
+        C, L, Grad, node_ids, model,
+        T_op_K=float(T_op_K), n_modes=int(n_modes), r=int(r),
+        effort_weight=float(effort_weight), integral_gain=float(integral_gain),
+        out_path=out_path, graph_name=graph_name, progress=_progress,
+    )
 
 
 def _run_stepper_diagnostic_worker(
@@ -3038,18 +3631,8 @@ def _format_stepper_diagnostic_summary(result: dict[str, Any]) -> str:
 
 def _last_prepared_solver_name(prepared: PreparedSimulation) -> str:
     profile = getattr(prepared, "last_step_profile_ms", {}) or {}
-    if "gpu_step_ms" in profile:
-        return "gpu_sparse"
-    if "cpu_sparse_implicit_step_ms" in profile:
-        return "implicit_sparse_cpu"
-    if "cpu_fast_sparse_step_ms" in profile:
-        return "fast_sparse_cpu"
-    if "cpu_expm_multiply_ms" in profile:
-        return "expm_multiply"
-    if "dense_phi_matvec_ms" in profile:
-        return "dense_phi_matvec"
-    if "dense_expm_matvec_ms" in profile:
-        return "dense_expm_matvec"
+    if "implicit_step_ms" in profile:
+        return "implicit_gpu" if profile.get("implicit_backend_gpu", 0.0) >= 1.0 else "implicit_cpu"
     return "current"
 
 
@@ -3087,12 +3670,34 @@ def _run_simulation_worker_batch(
         if current_temperatures.size and previous_temperatures.size == current_temperatures.size
         else 0.0
     )
+    # Compute all per-frame numerics HERE (worker thread) so the GUI thread only
+    # has to draw and set labels. This includes the heavy readout work (MIMO
+    # re-run for actuator powers, cryocooler diagnostics) that previously ran on
+    # the main thread and blocked the parameter window.
+    readout: dict[str, Any] = {}
+    if steps_completed > 0 and not cancel_event.is_set():
+        readout_start = time.perf_counter()
+        try:
+            readout = {
+                "temperature_by_node": {
+                    int(node_id): float(temperature)
+                    for node_id, temperature in zip(prepared.node_ids, current_temperatures)
+                },
+                "power_balance": prepared.power_balance_W(),
+                "heater_powers": dict(prepared.heater_actuator_power_by_node()),
+                "cryocooler_diagnostics": prepared.cryocooler_diagnostics(),
+            }
+        except Exception:  # noqa: BLE001 - readout is best-effort; never fail the step
+            readout = {}
+        if profile is not None:
+            profile["worker_readout_ms"] = (time.perf_counter() - readout_start) * 1000.0
     return {
         "steps_completed": int(steps_completed),
         "max_delta_K": float(max_delta_K),
         "done": bool(prepared.time_s >= params.t_final_s and not loop_playback),
         "cancelled": bool(cancel_event.is_set()),
         "profile": profile,
+        "readout": readout,
     }
 
 

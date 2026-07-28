@@ -1,0 +1,9 @@
+{
+  "graph_name": "sandia_thermal_challenge__experimental",
+  "created_at": "2026-07-22T22:09:45+00:00",
+  "updated_at": "2026-07-22T22:09:45+00:00",
+  "T_sur_K": 293.15,
+  "edge_mode": "auto",
+  "app_version": "graph_visualizer 0.1",
+  "notes": ""
+}

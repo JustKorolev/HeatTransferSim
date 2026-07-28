@@ -11,6 +11,27 @@ from .diagnostics import log_event
 from .models import ThermalGraphModel
 from .role_warnings import has_role_warning
 
+# Cube corner sign pattern and quad-face vertex indices, shared by the batched
+# renderer's vectorized mesh construction.
+_CUBE_CORNER_SIGNS = (
+    (-1, -1, -1),
+    (1, -1, -1),
+    (-1, 1, -1),
+    (1, 1, -1),
+    (-1, -1, 1),
+    (1, -1, 1),
+    (-1, 1, 1),
+    (1, 1, 1),
+)
+_CUBE_FACE_TEMPLATE = (
+    (0, 1, 3, 2),
+    (4, 6, 7, 5),
+    (0, 4, 5, 1),
+    (2, 3, 7, 6),
+    (0, 2, 6, 4),
+    (1, 5, 7, 3),
+)
+
 
 class GraphPyVistaWidget:
     """Thin wrapper around QtInteractor that draws graph cells and edges."""
@@ -53,6 +74,11 @@ class GraphPyVistaWidget:
         self.depth_focus_axis = "z"
         self.depth_focus_fraction = 0.5
         self.depth_focus_width = 0.12
+        self.cross_section_enabled = False
+        self.cross_section_axis = "z"
+        self.cross_section_fraction = 0.5
+        self._cross_section_plane = self.VtkPlane()
+        self._cross_section_mapper_keys: set[str] = set()
         self._node_actors: dict[int, Any] = {}
         self._node_meshes: dict[int, Any] = {}
         self._actor_node_ids: dict[str, int] = {}
@@ -77,12 +103,16 @@ class GraphPyVistaWidget:
         self._last_model_nodes: dict[int, Any] = {}
         self._last_node_colors: dict[int, str] = {}
         self._last_committed_bounds: tuple[float, float, float, float, float, float] | None = None
+        self._last_cross_section_bounds: tuple[float, float, float, float, float, float] | None = None
+        self._label_actor_positions: list[tuple[Any, np.ndarray]] = []
+        self._marker_actor_positions: list[tuple[Any, np.ndarray, str]] = []
         self._closed = False
 
     def _load_dependencies(self) -> None:
         try:
             import pyvista as pv
             from pyvistaqt import QtInteractor
+            from vtkmodules.vtkCommonDataModel import vtkPlane
         except ImportError as exc:
             raise RuntimeError(
                 "graph_visualizer requires pyvista and pyvistaqt for the 3D view. "
@@ -94,6 +124,7 @@ class GraphPyVistaWidget:
             from qtpy import QtCore, QtGui, QtWidgets
         self.pv = pv
         self.QtInteractor = QtInteractor
+        self.VtkPlane = vtkPlane
         self.QtCore = QtCore
         self.QtGui = QtGui
         self.QtWidgets = QtWidgets
@@ -167,8 +198,9 @@ class GraphPyVistaWidget:
             ("sensor", self.show_sensors),
             ("cooler", self.show_coolers),
         ):
-            for actor in self._marker_actors_by_kind.get(kind, []):
-                self._set_actor_visible(actor, visible)
+            for actor, position, actor_kind in self._marker_actor_positions:
+                if actor_kind == kind:
+                    self._set_actor_visible(actor, visible and self._cross_section_keeps_point(position))
         return self.safe_render() if render else True
 
     def set_dark_mode(self, enabled: bool) -> None:
@@ -209,6 +241,34 @@ class GraphPyVistaWidget:
         self._apply_visual_controls_to_scene()
         return self.safe_render() if render else True
 
+    def set_cross_section(
+        self,
+        enabled: bool,
+        fraction: float | None = None,
+        axis: str | None = None,
+        render: bool = True,
+    ) -> bool:
+        """Clip the scene below a movable axis-aligned cutaway plane."""
+        self.cross_section_enabled = bool(enabled)
+        if fraction is not None:
+            self.cross_section_fraction = max(0.0, min(1.0, float(fraction)))
+        if axis is not None:
+            normalized_axis = str(axis).strip().lower()
+            if normalized_axis in {"x", "y", "z"}:
+                self.cross_section_axis = normalized_axis
+        self._apply_cross_section_to_scene()
+        return self.safe_render() if render else True
+
+    def cross_section_coordinate(self) -> float | None:
+        """Return the current cut coordinate in scene units, if bounds are known."""
+        bounds = self._last_cross_section_bounds
+        if bounds is None:
+            return None
+        axis_index = {"x": 0, "y": 1, "z": 2}.get(str(self.cross_section_axis).lower(), 2)
+        axis_min = float(bounds[axis_index * 2])
+        axis_max = float(bounds[axis_index * 2 + 1])
+        return axis_min + float(self.cross_section_fraction) * (axis_max - axis_min)
+
     def draw(
         self,
         model: ThermalGraphModel,
@@ -233,6 +293,7 @@ class GraphPyVistaWidget:
         self._last_model_nodes = dict(model.nodes)
         self._last_node_colors = dict(node_colors or {})
         self._last_committed_bounds = committed_bounds
+        self._last_cross_section_bounds = self._model_geometry_bounds(model)
         self.plotter.clear()
         self._node_actors = {}
         self._node_meshes = {}
@@ -246,6 +307,9 @@ class GraphPyVistaWidget:
         self._batched_mesh = None
         self._batched_node_geometry = {}
         self._batched_selected_actor = None
+        self._cross_section_mapper_keys = set()
+        self._label_actor_positions = []
+        self._marker_actor_positions = []
         visible = visible_node_ids if visible_node_ids is not None else set(model.ordered_node_ids())
         log_event("pyvista draw visible prepared", visible=len(visible))
         if len(visible) > 1200:
@@ -326,6 +390,7 @@ class GraphPyVistaWidget:
                     always_visible=True,
                 )
                 self._label_actors.append(label_actor)
+                self._label_actor_positions.append((label_actor, np.asarray(center, dtype=float)))
             self._add_io_markers_for_node(node, center, marker_side)
 
         if self.show_edges:
@@ -369,11 +434,7 @@ class GraphPyVistaWidget:
         if self._batched_actor is not None and self._batched_mesh is not None:
             try:
                 if "cell_rgb" in self._batched_mesh.cell_data and "node_id" in self._batched_mesh.cell_data:
-                    node_ids = np.asarray(self._batched_mesh.cell_data["node_id"], dtype=int)
-                    colors = np.asarray(
-                        [self._display_rgb_for_node(int(node_id)) for node_id in node_ids],
-                        dtype=np.uint8,
-                    )
+                    colors = self._cell_rgb_from_node_ids(self._batched_mesh.cell_data["node_id"])
                     self._update_actor_cell_rgb(self._batched_actor, self._batched_mesh, colors)
             except Exception:
                 pass
@@ -401,10 +462,8 @@ class GraphPyVistaWidget:
         """Update temperature scalars in-place without rebuilding axes or bounds."""
         if self._batched_actor is not None and self._batched_mesh is not None:
             try:
-                node_ids = np.asarray(self._batched_mesh.cell_data["node_id"], dtype=int)
-                scalars = np.array(
-                    [float(node_scalar_values.get(int(node_id), np.nan)) for node_id in node_ids],
-                    dtype=float,
+                scalars = self._cell_scalars_from_node_ids(
+                    self._batched_mesh.cell_data["node_id"], node_scalar_values
                 )
                 self._update_actor_cell_scalars(
                     self._batched_actor,
@@ -472,6 +531,7 @@ class GraphPyVistaWidget:
             actor = self._add_preview_mesh(mesh)
             self._exclude_actor_from_bounds(actor)
             self._preview_actors.append(actor)
+            self._apply_cross_section_to_actor(actor)
         self.safe_render()
 
     def clear_preview(self, render: bool = True) -> None:
@@ -577,6 +637,7 @@ class GraphPyVistaWidget:
         self._set_actor_visible(actor, visible)
         self._marker_actors.append(actor)
         self._marker_actors_by_kind.setdefault(kind, []).append(actor)
+        self._marker_actor_positions.append((actor, np.asarray(center, dtype=float), kind))
         label_actor = self.plotter.add_point_labels(
             np.array([center], dtype=float),
             [label],
@@ -588,6 +649,7 @@ class GraphPyVistaWidget:
         self._set_actor_visible(label_actor, visible)
         self._marker_actors.append(label_actor)
         self._marker_actors_by_kind.setdefault(kind, []).append(label_actor)
+        self._marker_actor_positions.append((label_actor, np.asarray(center, dtype=float), kind))
 
     def _add_io_markers_for_node(self, node: Any, center: np.ndarray, marker_side: float) -> None:
         if bool(getattr(node, "is_heater", False)):
@@ -1073,6 +1135,28 @@ class GraphPyVistaWidget:
         model: ThermalGraphModel,
     ) -> tuple[float, float, float, float, float, float] | None:
         """Bounds for real cells only; draw-mode preview cells must not affect the grid."""
+        geometry_bounds = GraphPyVistaWidget._model_geometry_bounds(model)
+        if geometry_bounds is None:
+            return None
+        mins = np.array([geometry_bounds[0], geometry_bounds[2], geometry_bounds[4]], dtype=float)
+        maxs = np.array([geometry_bounds[1], geometry_bounds[3], geometry_bounds[5]], dtype=float)
+        padding = np.maximum(0.5, 0.05 * np.maximum(maxs - mins, 1.0))
+        mins -= padding
+        maxs += padding
+        return (
+            float(mins[0]),
+            float(maxs[0]),
+            float(mins[1]),
+            float(maxs[1]),
+            float(mins[2]),
+            float(maxs[2]),
+        )
+
+    @staticmethod
+    def _model_geometry_bounds(
+        model: ThermalGraphModel,
+    ) -> tuple[float, float, float, float, float, float] | None:
+        """Tight bounds of real cell cubes, without camera/grid padding."""
         if not model.nodes:
             return None
         mins = np.array([np.inf, np.inf, np.inf], dtype=float)
@@ -1087,9 +1171,6 @@ class GraphPyVistaWidget:
             maxs = np.maximum(maxs, center + half)
         if not np.all(np.isfinite(mins)) or not np.all(np.isfinite(maxs)):
             return None
-        padding = np.maximum(0.5, 0.05 * np.maximum(maxs - mins, 1.0))
-        mins -= padding
-        maxs += padding
         return (
             float(mins[0]),
             float(maxs[0]),
@@ -1167,6 +1248,7 @@ class GraphPyVistaWidget:
             self.plotter.reset_camera()
         elif camera_position is not None:
             self.plotter.camera_position = camera_position
+        self._apply_cross_section_to_scene()
         self._enable_mesh_picking_once()
         self._enable_interaction_observers_once()
         self.safe_render()
@@ -1183,19 +1265,13 @@ class GraphPyVistaWidget:
         committed_bounds: tuple[float, float, float, float, float, float] | None = None,
     ) -> None:
         log_event("pyvista draw_batched build mesh start", visible=len(visible))
-        points: list[list[float]] = []
-        faces: list[int] = []
-        cell_node_ids: list[int] = []
-        cell_colors: list[list[int]] = []
-        cell_scalars: list[float] = []
-        face_template = (
-            (0, 1, 3, 2),
-            (4, 6, 7, 5),
-            (0, 4, 5, 1),
-            (2, 3, 7, 6),
-            (0, 2, 6, 4),
-            (1, 5, 7, 3),
-        )
+        # Gather visible-node geometry (dict lookups only); all point/face/color
+        # array construction below is vectorized with NumPy -- the per-node
+        # Python loops here previously dominated large-graph draw time.
+        node_ids_list: list[int] = []
+        centers_list: list[Any] = []
+        lengths_list: list[Any] = []
+        materials_list: list[Any] = []
         for node_id in model.ordered_node_ids():
             if node_id not in visible:
                 continue
@@ -1204,52 +1280,42 @@ class GraphPyVistaWidget:
             if geometry is None:
                 continue
             center, lengths = geometry
-            half = np.array(lengths, dtype=float) * 0.5
-            base = len(points)
-            for signs in (
-                (-1, -1, -1),
-                (1, -1, -1),
-                (-1, 1, -1),
-                (1, 1, -1),
-                (-1, -1, 1),
-                (1, -1, 1),
-                (-1, 1, 1),
-                (1, 1, 1),
-            ):
-                points.append((center + half * np.array(signs, dtype=float)).tolist())
-            color = (node_colors or {}).get(node_id, self._color_for_material(node.material))
-            depth_focused = self._node_in_depth_focus(center, committed_bounds)
-            rgb = self._depth_adjust_rgb(self._hex_to_uint8_rgb(color), depth_focused)
-            scalar_value = (
-                float(node_scalar_values[node_id])
-                if node_scalar_values is not None and node_id in node_scalar_values
-                else float("nan")
-            )
-            for face in face_template:
-                faces.extend([4, *(base + index for index in face)])
-                cell_node_ids.append(node_id)
-                if node_scalar_values is None:
-                    cell_colors.append(rgb)
-                else:
-                    cell_scalars.append(scalar_value)
+            node_ids_list.append(node_id)
+            centers_list.append(center)
+            lengths_list.append(lengths)
+            materials_list.append(node.material)
             self._batched_node_geometry[node_id] = (center, lengths)
-        if not points:
+        if not node_ids_list:
             log_event("pyvista draw_batched no valid points")
             return
-        log_event(
-            "pyvista draw_batched create PolyData",
-            points=len(points),
-            faces=len(cell_node_ids),
-        )
-        mesh = self.pv.PolyData(
-            np.asarray(points, dtype=float),
-            np.asarray(faces, dtype=np.int64),
-        )
-        mesh.cell_data["node_id"] = np.asarray(cell_node_ids, dtype=int)
+        node_ids_arr = np.asarray(node_ids_list, dtype=int)
+        centers = np.asarray(centers_list, dtype=float)
+        half = np.asarray(lengths_list, dtype=float) * 0.5
+        n = int(node_ids_arr.shape[0])
+        # Eight cube corners per node (broadcast), then flatten to points.
+        signs = np.array(_CUBE_CORNER_SIGNS, dtype=float)
+        points = (centers[:, None, :] + half[:, None, :] * signs[None, :, :]).reshape(n * 8, 3)
+        # Six quad faces per node in VTK "[4, i0, i1, i2, i3, ...]" layout.
+        face_template = np.array(_CUBE_FACE_TEMPLATE, dtype=np.int64)
+        base = (np.arange(n, dtype=np.int64) * 8)[:, None, None]
+        cell_faces = (base + face_template[None, :, :]).reshape(n * 6, 4)
+        faces = np.hstack(
+            [np.full((n * 6, 1), 4, dtype=np.int64), cell_faces]
+        ).reshape(-1)
+        cell_node_ids = np.repeat(node_ids_arr, 6)
+        log_event("pyvista draw_batched create PolyData", points=int(points.shape[0]), faces=int(cell_node_ids.shape[0]))
+        mesh = self.pv.PolyData(points, faces)
+        mesh.cell_data["node_id"] = cell_node_ids
         if node_scalar_values is not None:
-            mesh.cell_data["temperature_K"] = np.asarray(cell_scalars, dtype=float)
+            scalar_per_node = np.array(
+                [float(node_scalar_values.get(int(node_id), np.nan)) for node_id in node_ids_arr],
+                dtype=float,
+            )
+            mesh.cell_data["temperature_K"] = np.repeat(scalar_per_node, 6)
         else:
-            mesh.cell_data["cell_rgb"] = np.asarray(cell_colors, dtype=np.uint8)
+            per_node_rgb = self._batched_base_rgb(node_ids_arr, materials_list, node_colors)
+            per_node_rgb = self._depth_adjust_rgb_vectorized(per_node_rgb, centers, committed_bounds)
+            mesh.cell_data["cell_rgb"] = np.repeat(per_node_rgb, 6, axis=0)
         self._batched_mesh = mesh
         mesh_kwargs = {
             "opacity": self._cell_opacity(node_scalar_values is not None, False, True),
@@ -1288,22 +1354,30 @@ class GraphPyVistaWidget:
 
     def _draw_batched_edges(self, model: ThermalGraphModel, visible: set[int]) -> None:
         log_event("pyvista draw_batched_edges start", edges=len(model.edges), visible=len(visible))
-        points: list[list[float]] = []
-        lines: list[int] = []
+        source_centers: list[Any] = []
+        target_centers: list[Any] = []
         for edge in model.edges.values():
             if edge.source not in visible or edge.target not in visible:
                 continue
-            base = len(points)
-            points.append(list(model.nodes[edge.source].center))
-            points.append(list(model.nodes[edge.target].center))
-            lines.extend([2, base, base + 1])
-        if not points:
+            source_centers.append(model.nodes[edge.source].center)
+            target_centers.append(model.nodes[edge.target].center)
+        if not source_centers:
             log_event("pyvista draw_batched_edges no points")
             return
-        log_event("pyvista draw_batched_edges create PolyData", line_points=len(points))
+        # Interleave endpoints [s0, t0, s1, t1, ...] and build the VTK lines
+        # array [2, 0, 1, 2, 2, 3, ...] vectorized.
+        m = len(source_centers)
+        points = np.empty((2 * m, 3), dtype=float)
+        points[0::2] = np.asarray(source_centers, dtype=float)
+        points[1::2] = np.asarray(target_centers, dtype=float)
+        lines = np.empty((m, 3), dtype=np.int64)
+        lines[:, 0] = 2
+        lines[:, 1] = np.arange(0, 2 * m, 2, dtype=np.int64)
+        lines[:, 2] = np.arange(1, 2 * m, 2, dtype=np.int64)
+        log_event("pyvista draw_batched_edges create PolyData", line_points=int(points.shape[0]))
         mesh = self.pv.PolyData(
-            np.asarray(points, dtype=float),
-            lines=np.asarray(lines, dtype=np.int64),
+            points,
+            lines=lines.reshape(-1),
         )
         self._edge_actors.append(
             self.plotter.add_mesh(mesh, color=self._edge_color(), line_width=1, opacity=0.55)
@@ -1348,6 +1422,7 @@ class GraphPyVistaWidget:
             pickable=False,
             **self._lit_mesh_kwargs(),
         )
+        self._apply_cross_section_to_actor(self._batched_selected_actor)
 
     def _cell_opacity(self, scalar_active: bool, selected: bool, depth_focused: bool = True) -> float:
         if self.shader_mode_enabled:
@@ -1380,6 +1455,188 @@ class GraphPyVistaWidget:
         background = 24 if self.dark_mode else 238
         return [int(round(background + 0.28 * (int(value) - background))) for value in rgb]
 
+    def _batched_base_rgb(
+        self,
+        node_ids_arr: np.ndarray,
+        materials_list: list[Any],
+        node_colors: dict[int, str] | None,
+    ) -> np.ndarray:
+        """Per-node base RGB (uint8) from material color, with per-node overrides.
+
+        Materials are resolved once per distinct material (cached), so this is
+        O(unique materials) hex conversions rather than one per node.
+        """
+        node_colors = node_colors or {}
+        material_rgb_cache: dict[Any, tuple[int, int, int]] = {}
+        rgb = np.empty((int(node_ids_arr.shape[0]), 3), dtype=np.uint8)
+        for row in range(int(node_ids_arr.shape[0])):
+            override = node_colors.get(int(node_ids_arr[row]))
+            if override is not None:
+                rgb[row] = self._hex_to_uint8_rgb(override)
+                continue
+            material = materials_list[row]
+            cached = material_rgb_cache.get(material)
+            if cached is None:
+                cached = tuple(self._hex_to_uint8_rgb(self._color_for_material(material)))
+                material_rgb_cache[material] = cached
+            rgb[row] = cached
+        return rgb
+
+    def _depth_adjust_rgb_vectorized(
+        self,
+        rgb: np.ndarray,
+        centers: np.ndarray,
+        bounds: tuple[float, float, float, float, float, float] | None,
+    ) -> np.ndarray:
+        """Vectorized equivalent of _node_in_depth_focus + _depth_adjust_rgb."""
+        if not self.depth_focus_enabled or bounds is None:
+            return rgb
+        axis_index = {"x": 0, "y": 1, "z": 2}.get(str(self.depth_focus_axis).lower(), 2)
+        axis_min = float(bounds[axis_index * 2])
+        axis_max = float(bounds[axis_index * 2 + 1])
+        span = max(axis_max - axis_min, 1.0e-9)
+        depth = (centers[:, axis_index] - axis_min) / span
+        focused = np.abs(depth - float(self.depth_focus_fraction)) <= float(self.depth_focus_width) * 0.5
+        background = 24 if self.dark_mode else 238
+        dimmed = np.round(background + 0.28 * (rgb.astype(float) - background)).astype(np.uint8)
+        return np.where(focused[:, None], rgb, dimmed)
+
+    def _cell_rgb_from_node_ids(self, cell_node_ids: np.ndarray) -> np.ndarray:
+        """Per-cell RGB by resolving each distinct node once (6x fewer lookups)."""
+        cell_node_ids = np.asarray(cell_node_ids, dtype=int)
+        unique, inverse = np.unique(cell_node_ids, return_inverse=True)
+        unique_rgb = np.asarray(
+            [self._display_rgb_for_node(int(node_id)) for node_id in unique],
+            dtype=np.uint8,
+        )
+        return unique_rgb[inverse]
+
+    @staticmethod
+    def _cell_scalars_from_node_ids(
+        cell_node_ids: np.ndarray,
+        node_scalar_values: dict[int, float],
+    ) -> np.ndarray:
+        """Per-cell scalar values, resolving each distinct node once."""
+        cell_node_ids = np.asarray(cell_node_ids, dtype=int)
+        unique, inverse = np.unique(cell_node_ids, return_inverse=True)
+        unique_scalars = np.array(
+            [float(node_scalar_values.get(int(node_id), np.nan)) for node_id in unique],
+            dtype=float,
+        )
+        return unique_scalars[inverse]
+
+    def _cross_section_keeps_point(self, point: np.ndarray) -> bool:
+        if not self.cross_section_enabled:
+            return True
+        coordinate = self.cross_section_coordinate()
+        if coordinate is None:
+            return True
+        axis_index = {"x": 0, "y": 1, "z": 2}.get(str(self.cross_section_axis).lower(), 2)
+        try:
+            return float(point[axis_index]) >= float(coordinate) - 1.0e-9
+        except (IndexError, TypeError, ValueError):
+            return True
+
+    def _apply_cross_section_to_scene(self) -> None:
+        if self.cross_section_enabled:
+            self._update_cross_section_plane()
+            for actor in self._cross_section_scene_actors():
+                self._apply_cross_section_to_actor(actor)
+        else:
+            for actor in self._cross_section_scene_actors():
+                self._remove_cross_section_from_actor(actor)
+            self._cross_section_mapper_keys.clear()
+        self._update_cross_section_overlay_visibility()
+
+    def _update_cross_section_plane(self) -> None:
+        coordinate = self.cross_section_coordinate()
+        if coordinate is None:
+            coordinate = 0.0
+        axis_index = {"x": 0, "y": 1, "z": 2}.get(str(self.cross_section_axis).lower(), 2)
+        origin = [0.0, 0.0, 0.0]
+        normal = [0.0, 0.0, 0.0]
+        origin[axis_index] = float(coordinate)
+        normal[axis_index] = 1.0
+        try:
+            self._cross_section_plane.SetOrigin(*origin)
+            self._cross_section_plane.SetNormal(*normal)
+            self._cross_section_plane.Modified()
+        except Exception:
+            pass
+
+    def _cross_section_scene_actors(self) -> list[Any]:
+        actors = [
+            *self._node_actors.values(),
+            *self._edge_actors,
+            *self._role_overlay_actors,
+            *self._marker_actors,
+            *self._preview_actors,
+            self._batched_actor,
+            self._batched_selected_actor,
+        ]
+        unique: list[Any] = []
+        seen: set[str] = set()
+        for actor in actors:
+            if actor is None:
+                continue
+            key = self._actor_key(actor)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(actor)
+        return unique
+
+    def _apply_cross_section_to_actor(self, actor: Any) -> None:
+        if not self.cross_section_enabled:
+            return
+        mapper = self._actor_mapper(actor)
+        add_plane = getattr(mapper, "AddClippingPlane", None)
+        if mapper is None or add_plane is None:
+            return
+        mapper_key = self._actor_key(mapper)
+        if mapper_key not in self._cross_section_mapper_keys:
+            try:
+                add_plane(self._cross_section_plane)
+                self._cross_section_mapper_keys.add(mapper_key)
+            except Exception:
+                return
+        try:
+            mapper.Modified()
+        except Exception:
+            pass
+
+    def _remove_cross_section_from_actor(self, actor: Any) -> None:
+        mapper = self._actor_mapper(actor)
+        if mapper is None:
+            return
+        mapper_key = self._actor_key(mapper)
+        if mapper_key not in self._cross_section_mapper_keys:
+            return
+        try:
+            remove_plane = getattr(mapper, "RemoveClippingPlane", None)
+            if remove_plane is not None:
+                remove_plane(self._cross_section_plane)
+            else:
+                mapper.RemoveAllClippingPlanes()
+            mapper.Modified()
+        except Exception:
+            pass
+        self._cross_section_mapper_keys.discard(mapper_key)
+
+    def _update_cross_section_overlay_visibility(self) -> None:
+        for actor, position in self._label_actor_positions:
+            self._set_actor_visible(actor, self.show_labels and self._cross_section_keeps_point(position))
+        marker_visibility = {
+            "heater": self.show_heaters,
+            "sensor": self.show_sensors,
+            "cooler": self.show_coolers,
+        }
+        for actor, position, kind in self._marker_actor_positions:
+            self._set_actor_visible(
+                actor,
+                bool(marker_visibility.get(kind, True)) and self._cross_section_keeps_point(position),
+            )
+
     def _apply_visual_controls_to_scene(self) -> None:
         self._apply_shader_mode_to_scene()
         self._update_depth_focus_colors()
@@ -1389,11 +1646,7 @@ class GraphPyVistaWidget:
         if self._batched_actor is not None and self._batched_mesh is not None:
             try:
                 if "cell_rgb" in self._batched_mesh.cell_data and "node_id" in self._batched_mesh.cell_data:
-                    node_ids = np.asarray(self._batched_mesh.cell_data["node_id"], dtype=int)
-                    colors = np.asarray(
-                        [self._display_rgb_for_node(int(node_id)) for node_id in node_ids],
-                        dtype=np.uint8,
-                    )
+                    colors = self._cell_rgb_from_node_ids(self._batched_mesh.cell_data["node_id"])
                     updated = self._update_actor_cell_rgb(self._batched_actor, self._batched_mesh, colors) or updated
             except Exception:
                 pass

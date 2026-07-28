@@ -30,7 +30,7 @@ from .graph_builder import (
 )
 from .load_contact_report import load_contact_report
 from .load_gltf import GltfScene, load_gltf_scene
-from .materials import load_material_table
+from .materials import DEFAULT_ASSIGNED_MATERIAL_NAME, load_material_table
 from .matrix_builder import DENSE_MATRIX_NODE_LIMIT, build_matrices
 from .octree import OctreeCell, OctreeDiagnostics, OctreeParams, build_octree
 from .validation import format_validation_report, validate_graph
@@ -66,8 +66,15 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         scene = _filter_ignored_components(scene, args, warnings)
         _log_scene_memory_risk(scene, args, run_log, warnings)
         progress.phase("Loading materials")
-        material_lookup_path = _resolve_material_lookup_path(args.mesh_dir)
+        material_lookup_path = _resolve_material_lookup_path(args.mesh_dir, getattr(args, "material_lookup", None))
         contact_report = load_contact_report(material_lookup_path)
+        if not material_lookup_path:
+            warnings.append(
+                "No part->material lookup found (pass --material-lookup or place materials.xlsx in the mesh "
+                "directory). Materials will be inferred from GLB appearance names only, which cannot identify "
+                "engineering materials such as Invar or fiberglass -- those components will default to "
+                f"{DEFAULT_ASSIGNED_MATERIAL_NAME}."
+            )
         materials, material_warnings = load_material_table(args.materials)
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
@@ -161,6 +168,8 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         "octree_cells": [cell.__dict__ for cell in leaves],
         "graph_nodes": graph_result.nodes,
         "graph_edges": graph_result.edges,
+        "suppressed_contact_pairs": [[int(i), int(j)] for i, j in graph_result.suppressed_contact_pairs],
+        "gap_radiation_links": [[int(i), int(j), float(a)] for i, j, a in graph_result.gap_radiation_links],
         "warnings": graph_result.warnings,
         "heater_sensor_tags": {},
         "validation_results": {},
@@ -209,6 +218,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mesh-dir", required=True, help="Directory containing exactly one embedded .glb scene file.")
     parser.add_argument("--materials", default="materials.json")
+    parser.add_argument(
+        "--material-lookup",
+        default=None,
+        help="Excel part->material lookup sheet (part name -> material name). Overrides the default "
+        "auto-discovery of materials.xlsx in the mesh directory. Without a lookup, materials are "
+        "inferred from GLB appearance names only and cannot identify Invar/fiberglass parts.",
+    )
     parser.add_argument("--graph-name", required=True)
     parser.add_argument("--output-root", default="graphs")
     parser.add_argument(
@@ -402,10 +418,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--contains-backend",
         choices=("trimesh", "ray"),
-        default="ray",
+        default="trimesh",
         help=(
-            "Inside/outside backend for watertight meshes. Defaults to 'ray' to avoid native "
-            "trimesh.contains crashes on Windows; use 'trimesh' only when you need that backend."
+            "Inside/outside backend for watertight meshes. Defaults to 'trimesh', which uses a "
+            "BVH (Embree/rtree) and is much faster on high-triangle CAD; it falls back to 'ray' "
+            "automatically when those native deps are unavailable. Force 'ray' for the pure-NumPy "
+            "all-triangle test (portable but slow on complex meshes)."
+        ),
+    )
+    parser.add_argument(
+        "--contact-gap-tolerance-mm",
+        type=float,
+        default=0.05,
+        help=(
+            "Max CAD surface-to-surface distance still treated as physical contact between DIFFERENT "
+            "parts. When adjacent voxels of two parts touch but their CAD surfaces are farther apart than "
+            "this, the (spurious) conduction edge is suppressed and the faces are re-exposed for radiation. "
+            "Set 0 to disable. Prevents fake conductive shorts across gaps narrower than the voxel size."
         ),
     )
     parser.add_argument(
@@ -465,8 +494,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help=(
-            "Regex pattern for CAD component names/paths that should become heater nodes. "
-            "Repeat to add multiple patterns. No heater detection is performed unless a heater pattern or substring is provided."
+            "DEPRECATED and ignored: role detection uses substring matching only. "
+            "Accepted for backward compatibility; use --heater-name-substring instead."
         ),
     )
     parser.add_argument(
@@ -483,8 +512,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help=(
-            "Regex pattern for CAD component names/paths that should become sensor nodes. "
-            "Repeat to add multiple patterns. No sensor detection is performed unless a sensor pattern or substring is provided."
+            "DEPRECATED and ignored: role detection uses substring matching only. "
+            "Accepted for backward compatibility; use --sensor-name-substring instead."
         ),
     )
     parser.add_argument(
@@ -591,9 +620,19 @@ def _resolve_gltf_path(args: argparse.Namespace) -> Path:
     return candidates[0]
 
 
-def _resolve_material_lookup_path(mesh_dir: str | Path) -> Path | None:
-    path = Path(mesh_dir) / "materials.xlsx"
-    return path if path.is_file() else None
+def _resolve_material_lookup_path(mesh_dir: str | Path, override: str | Path | None = None) -> Path | None:
+    """Locate the part->material lookup sheet. An explicit --material-lookup path
+    wins; otherwise fall back to materials.xlsx alongside the mesh."""
+    if override:
+        candidate = Path(override)
+        return candidate if candidate.is_file() else None
+    directory = Path(mesh_dir)
+    # Case-insensitive: exporters name it "materials.xlsx" or "Materials.xlsx".
+    if directory.is_dir():
+        for entry in directory.iterdir():
+            if entry.is_file() and entry.name.lower() == "materials.xlsx":
+                return entry
+    return None
 
 
 def _build_graph_with_optional_fallback(
@@ -651,6 +690,9 @@ def _build_graph_with_optional_fallback(
             )
         ),
         contact_detection_distance_mm=contact_distance_mm,
+        contact_gap_tolerance_mm=float(getattr(args, "contact_gap_tolerance_mm", 0.05)),
+        mesh_objects=list(getattr(voxel_scene, "objects", []) or []),
+        contains_backend=str(getattr(args, "contains_backend", "trimesh")),
         component_bounds_mm=_component_bounds_mm(voxel_scene),
         role_components=getattr(args, "role_components", None),
         role_contact_tolerance_mm=args.role_contact_tolerance_mm,

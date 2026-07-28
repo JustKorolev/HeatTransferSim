@@ -7,6 +7,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from .cryocooler import PT60_MODEL_NAME, PT60LiftCurve
+
 
 @dataclass
 class SimulationParameters:
@@ -14,11 +18,22 @@ class SimulationParameters:
     t_final_s: float = 3600.0
     playback_speed: float = 1.0
     use_ambient_radiation: bool = True
+    # Radiative background temperatures. Exterior = the ambient surroundings the
+    # outside of the assembly radiates to (room temperature). Interior = the
+    # cryocooled vacuum enclosure the inner surfaces radiate to. Which surfaces
+    # see which background is assigned by the view-factor classification; until
+    # then every surface radiates to the exterior (T_env_K).
     T_env_K: float = 293.15
+    interior_environment_temperature_K: float = 4.0
+    # Surface-to-surface radiative coupling: ray-trace view factors over the
+    # exposed faces and let parts exchange radiation with each other (not just a
+    # background). One-time precompute at prepare; skipped for very large graphs.
+    use_radiative_coupling: bool = False
     input_mode: str = "zero"
-    Kp_cooler: float = 0.5
-    P_cooler_max: float = 10.0
-    T_cooler_setpoint: float = 270.0
+    cryocooler_model: str = PT60_MODEL_NAME
+    cryocooler_max_power_W: float = PT60LiftCurve.DEFAULT_MAX_POWER_W
+    cryocooler_capacity_scale: float = 1.0
+    cryocooler_enabled: bool = True
     mimo_controller_enabled: bool = False
     mimo_hold_threshold_K: float = 1.0
     mimo_coarse_threshold_K: float = 3.0
@@ -35,6 +50,26 @@ class SimulationParameters:
     derivative_dt_floor_s: float = 1.0e-9
     mimo_integral_abs_max: float = 1.0e6
     mimo_freeze_integral_when_saturated: bool = True
+    # Passive sensor-drift source for the MIMO feedforward. True (default): a
+    # disturbance observer -- estimate drift from the MEASURED sensor rate minus
+    # the commanded-heater effect (d = dT/dt_measured - B_s @ u_prev). This is what
+    # a real controller can do (no plant model on the MCU) and is reactive (needs a
+    # step of history). False: the model-based oracle (project the full thermal RHS
+    # with MIMO heating excluded) -- only available in simulation, kept for A/B.
+    mimo_passive_drift_from_measurement: bool = True
+    # Which heater controller runs in "heater_inputs" mode:
+    #   "pid_qp"    -> the standard PID + bounded QP allocator (default),
+    #   "modal_lqr" -> the reduced-model LQR + regularized static state estimate
+    #                  (needs a modal_controller.npz for the graph; see
+    #                  tools/analyze_plant_modes.py). Falls back to pid_qp if the
+    #                  artifact is missing or mismatched.
+    mimo_controller_scheme: str = "pid_qp"
+    # Path to the modal controller artifact; blank => look for
+    # "<graph_folder>/modal_controller.npz".
+    modal_controller_path: str = ""
+    # Integral gain for the modal controller (offset-free + supplies the operating
+    # holding power). Tunable; 0 disables integral action.
+    modal_integral_gain: float = 0.02
     enabled_heater_node_ids: tuple[int, ...] | None = None
     enabled_sensor_node_ids: tuple[int, ...] | None = None
     autoscale_temperature: bool = True
@@ -43,13 +78,7 @@ class SimulationParameters:
     colormap: str = "thermal_jet"
     loop_playback: bool = False
     save_trajectory: bool = False
-    gpu_simulation_enabled: bool = True
-    gpu_simulation_max_substeps: int = 128
-    gpu_simulation_safety_factor: float = 0.2
-    fast_sparse_simulation_enabled: bool = True
-    fast_sparse_simulation_max_substeps: int = 128
-    fast_sparse_simulation_safety_factor: float = 0.2
-    implicit_sparse_simulation_enabled: bool = True
+    gpu_solver_enabled: bool = True
     implicit_sparse_simulation_method: str = "tr_bdf2"
     implicit_sparse_simulation_rtol: float = 1.0e-6
     implicit_sparse_simulation_maxiter: int = 300
@@ -57,6 +86,16 @@ class SimulationParameters:
     implicit_sparse_adaptive_target_delta_K: float = 1.0
     implicit_sparse_adaptive_max_substeps: int = 4
     implicit_sparse_residual_check_enabled: bool = True
+    use_temperature_dependent_properties: bool = False
+    # Evaluate the lagged nonlinear terms (temperature-dependent C/L and
+    # radiation) at a forward-Euler midpoint instead of the step-start
+    # temperature. Second-order-in-dt operator splitting; only adds cost when
+    # those terms are active (constant-property runs are unaffected).
+    use_midpoint_property_coupling: bool = True
+    copper_rrr: int = 100
+    default_bolted_contact_conductance_W_m2K: float = 3000.0
+    contact_conductance_temp_exponent: float = 1.0
+    contact_conductance_reference_temperature_K: float = 293.15
     simulation_history_limit: int = 256
     live_step_profiling_enabled: bool = True
     live_step_profile_threshold_ms: float = 1000.0
@@ -86,6 +125,23 @@ def load_simulation_parameters(path: Path) -> tuple[SimulationParameters, dict[s
         "mimo_hold_control_deadband_K",
         "mimo_negative_error_bleed_per_s",
         "mimo_hold_negative_error_bleed_per_s",
+        "cryocooler",
+        "Kp_cooler",
+        "kp_cooler",
+        "kp_cooler_w_per_k",
+        "T_cooler_setpoint",
+        "setpoint_k",
+        "cooler_setpoint_k",
+        "P_cooler_max",
+        "max_cooling",
+        "max_cooling_w",
+        "gpu_simulation_enabled",
+        "gpu_simulation_max_substeps",
+        "gpu_simulation_safety_factor",
+        "fast_sparse_simulation_enabled",
+        "fast_sparse_simulation_max_substeps",
+        "fast_sparse_simulation_safety_factor",
+        "implicit_sparse_simulation_enabled",
     }
     values = {key: migrated[key] for key in known if key in migrated}
     extras = {key: value for key, value in raw.items() if key not in known and key not in deprecated}
@@ -94,7 +150,21 @@ def load_simulation_parameters(path: Path) -> tuple[SimulationParameters, dict[s
 
 def save_simulation_parameters(path: Path, params: SimulationParameters, extras: dict[str, Any] | None = None) -> None:
     payload = dict(extras or {})
-    payload.update(asdict(params))
+    parameter_payload = asdict(params)
+    parameter_payload.pop("cryocooler_model", PT60_MODEL_NAME)
+    max_power_w = parameter_payload.pop("cryocooler_max_power_W", PT60LiftCurve.DEFAULT_MAX_POWER_W)
+    capacity_scale = parameter_payload.pop("cryocooler_capacity_scale", 1.0)
+    enabled = parameter_payload.pop("cryocooler_enabled", True)
+    payload.update(parameter_payload)
+    payload["cryocooler"] = {
+        "model": PT60_MODEL_NAME,
+        "max_power_w": _finite_nonnegative_or_default(
+            max_power_w,
+            PT60LiftCurve.DEFAULT_MAX_POWER_W,
+        ),
+        "capacity_scale": _finite_nonnegative_or_default(capacity_scale, 1.0),
+        "enabled": bool(enabled),
+    }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -135,6 +205,29 @@ def apply_initial_temperature_parameter_payload(model: Any, extras: dict[str, An
 
 def _migrate_legacy_fields(raw: dict[str, Any]) -> dict[str, Any]:
     data = dict(raw)
+    cryocooler = raw.get("cryocooler", {})
+    if not isinstance(cryocooler, dict):
+        cryocooler = {}
+    data["cryocooler_model"] = PT60_MODEL_NAME
+    maximum = _first_present(
+        cryocooler,
+        ("max_power_w", "max_cooling", "max_cooling_w"),
+    )
+    if maximum is None:
+        maximum = data.get("cryocooler_max_power_W")
+    if maximum is None:
+        maximum = _first_present(data, ("P_cooler_max", "max_cooling", "max_cooling_w"))
+    data["cryocooler_max_power_W"] = _finite_nonnegative_or_default(
+        maximum,
+        PT60LiftCurve.DEFAULT_MAX_POWER_W,
+    )
+    data["cryocooler_capacity_scale"] = _finite_nonnegative_or_default(
+        cryocooler.get("capacity_scale", data.get("cryocooler_capacity_scale")),
+        1.0,
+    )
+    data["cryocooler_enabled"] = bool(
+        cryocooler.get("enabled", data.get("cryocooler_enabled", True))
+    )
     if "dt_s" not in data and "simulated_seconds_per_update" in data:
         data["dt_s"] = data["simulated_seconds_per_update"]
     if "t_final_s" not in data and "simulation_duration" in data:
@@ -149,3 +242,20 @@ def _migrate_legacy_fields(raw: dict[str, Any]) -> dict[str, Any]:
     if "mimo_rho_du" not in data and "mimo_rho_smoothness" in data:
         data["mimo_rho_du"] = data["mimo_rho_smoothness"]
     return data
+
+
+def _first_present(data: dict[str, Any], names: tuple[str, ...]) -> Any:
+    for name in names:
+        if name in data:
+            return data[name]
+    return None
+
+
+def _finite_nonnegative_or_default(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not np.isfinite(number) or number < 0.0:
+        return float(default)
+    return number

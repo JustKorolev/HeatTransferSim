@@ -33,7 +33,12 @@ DEFAULT_MATERIAL = Material(
     k_W_mK=2.0,
     emissivity=0.85,
 )
-DEFAULT_ASSIGNED_MATERIAL_NAME = "6061-T6 Aluminum"
+# A component whose material cannot be determined (not in the spreadsheet, marked
+# "unknown material", and not inferable from the GLB appearance/name) is assigned
+# this INERT material rather than a real one -- near-zero heat capacity, ~zero
+# conductivity and zero emissivity -- so it is effectively ignored by the heat
+# transfer instead of being silently faked as aluminum.
+DEFAULT_ASSIGNED_MATERIAL_NAME = "Unassigned (ignored)"
 UNASSIGNED_MATERIAL_NAMES = {
     "",
     "default_unknown",
@@ -104,13 +109,64 @@ def infer_material_name_from_text(text: str | None, materials: dict[str, Materia
         (r"\b17\s*[-_]?\s*7\b", "17-7PH Stainless Steel"),
         (r"\b6061\s*[-_]?\s*T6\b", "6061-T6 Aluminum"),
         (r"\b6061\b", "6061-T6 Aluminum"),
+        # Specific aluminum/steel grades before the generic aluminum/stainless
+        # catch-alls so they are not swallowed by the broad rules below.
+        (r"\b5052\b", "5052-H32 Aluminum"),
+        (r"\bAISI\s*303\b", "AISI 303 Stainless Steel"),
+        (r"\b303\s*SS\b", "AISI 303 Stainless Steel"),
+        (r"\bAISI\s*316\b", "AISI 316 Stainless Steel"),
+        (r"\b316\s*SS\b", "AISI 316 Stainless Steel"),
+        (r"\bAISI\s*416\b", "AISI 416 Stainless Steel"),
+        (r"\b416\s*STAINLESS\b", "AISI 416 Stainless Steel"),
+        (r"\bAISI\s*440C\b", "AISI 440C Stainless Steel"),
+        (r"\b440C\b", "AISI 440C Stainless Steel"),
+        (r"\bALLOY\s*STEEL\b", "Alloy Steel"),
+        (r"\bSPRING\s*STEEL\b", "Spring Steel"),
+        (r"\bCAST\s*IRON\b", "Cast Iron"),
+        (r"\bKOVAR\b", "Kovar"),
         (r"\bAL(?:UMINUM)?\b", "6061-T6 Aluminum"),
         (r"\bCOPPER\b", "Copper"),
         (r"\bCU\b", "Copper"),
         (r"\bINVAR\s*36\b", "Invar36"),
         (r"\bINVAR\b", "Invar, AL 36"),
+        # Common CAD/vendor spellings for Invar 36 (Fe-Ni 36).
+        (r"\bNILO\s*36\b", "Invar, AL 36"),
+        (r"\bPERNIFER\s*36\b", "Invar, AL 36"),
+        (r"\bFE\s*-?\s*NI\s*36\b", "Invar, AL 36"),
+        (r"\bFENI\s*36\b", "Invar, AL 36"),
         (r"\bDELRIN\b", "Delrin 2700 NC010, Low Viscosity Acetal Copolymer (SS)"),
         (r"\bPHENOLIC\b", "Phenolic"),
+        # Fiberglass / glass-epoxy laminate (G-10 / FR-4 / Garolite): all map to the
+        # G-10 material (shares the G-10 cryogenic cp(T)/k(T) curve).
+        (r"\bG\s*-?\s*10\b", "G-10"),
+        (r"\bFR\s*-?\s*4\b", "G-10"),
+        (r"\bFIBER\s*GLASS\b", "G-10"),
+        (r"\bGLASS\s*EPOXY\b", "G-10"),
+        (r"\bEPOXY\s*GLASS\b", "G-10"),
+        (r"\bGAR?ROLITE\b", "G-10"),
+        # Elastomers / polymers.
+        (r"\bVITON\b", "Viton"),
+        (r"\bNBR\b", "NBR"),
+        (r"\bBUNA\b", "NBR"),
+        (r"\bSILICONE\b", "Silicone Rubber"),
+        (r"\bNYLON\b", "Nylon 12"),
+        # Glass ceramics / semiconductors.
+        (r"\bZERODUR\b", "ZERODUR"),
+        (r"\bFUSED\s*SILICA\b", "Fused Silica"),
+        (r"\bGERMANIUM\b", "Germanium"),
+        (r"\bSILICON\s*CARBIDE\b", "Silicon Carbide"),
+        (r"\bSIC\b", "Silicon Carbide"),
+        # Copper alloys (bronzes / brasses).
+        (r"\bPHOSPHOR\s*BRONZE\b", "Phosphor bronze 10% D, UNS C52400"),
+        (r"\bC52400\b", "Phosphor bronze 10% D, UNS C52400"),
+        (r"\bC64200\b", "Aluminum Silicon Bronze UNS C64200"),
+        (r"\bSILICON\s*BRONZE\b", "Aluminum Silicon Bronze UNS C64200"),
+        (r"\bC36000\b", "Free-Cutting Brass, UNS C36000"),
+        (r"\bBRASS\b", "Brass"),
+        # Precious metal / cemented carbide.
+        (r"\bPLATINUM\b", "PLATINUM"),
+        (r"\bKENNAMETAL\b", "Kennametal KF306 Carbid"),
+        (r"\bCARBIDE\b", "Kennametal KF306 Carbid"),
     ]
     for pattern, material_name in aliases:
         if re.search(pattern, normalized) and material_name in materials:

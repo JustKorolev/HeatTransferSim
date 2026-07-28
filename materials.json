@@ -84,7 +84,189 @@
     "emissivity": 0.85
   },
   {
+    "name": "G-10",
+    "density_kg_m3": 1800.0,
+    "cp_J_kgK": 1000.0,
+    "k_W_mK": 0.60,
+    "emissivity": 0.90
+  },
+  {
+    "name": "5052-H32 Aluminum",
+    "density_kg_m3": 2680.0,
+    "cp_J_kgK": 900.0,
+    "k_W_mK": 138.0,
+    "emissivity": 0.10
+  },
+  {
+    "name": "AISI 303 Stainless Steel",
+    "density_kg_m3": 8000.0,
+    "cp_J_kgK": 500.0,
+    "k_W_mK": 16.3,
+    "emissivity": 0.30
+  },
+  {
+    "name": "AISI 316 Stainless Steel",
+    "density_kg_m3": 8000.0,
+    "cp_J_kgK": 500.0,
+    "k_W_mK": 16.3,
+    "emissivity": 0.30
+  },
+  {
+    "name": "AISI 416 Stainless Steel",
+    "density_kg_m3": 7800.0,
+    "cp_J_kgK": 460.0,
+    "k_W_mK": 24.9,
+    "emissivity": 0.30
+  },
+  {
+    "name": "AISI 440C Stainless Steel",
+    "density_kg_m3": 7800.0,
+    "cp_J_kgK": 460.0,
+    "k_W_mK": 24.2,
+    "emissivity": 0.30
+  },
+  {
+    "name": "Alloy Steel",
+    "density_kg_m3": 7850.0,
+    "cp_J_kgK": 475.0,
+    "k_W_mK": 42.6,
+    "emissivity": 0.50
+  },
+  {
+    "name": "Spring Steel",
+    "density_kg_m3": 7850.0,
+    "cp_J_kgK": 490.0,
+    "k_W_mK": 46.6,
+    "emissivity": 0.50
+  },
+  {
+    "name": "Cast Iron",
+    "density_kg_m3": 7200.0,
+    "cp_J_kgK": 490.0,
+    "k_W_mK": 55.0,
+    "emissivity": 0.60
+  },
+  {
+    "name": "Kovar",
+    "density_kg_m3": 8360.0,
+    "cp_J_kgK": 460.0,
+    "k_W_mK": 17.3,
+    "emissivity": 0.30
+  },
+  {
+    "name": "Carpenter Invar 36",
+    "density_kg_m3": 8100.0,
+    "cp_J_kgK": 515.0,
+    "k_W_mK": 10.5,
+    "emissivity": 0.30
+  },
+  {
+    "name": "Viton",
+    "density_kg_m3": 1800.0,
+    "cp_J_kgK": 1300.0,
+    "k_W_mK": 0.20,
+    "emissivity": 0.90
+  },
+  {
+    "name": "NBR",
+    "density_kg_m3": 1000.0,
+    "cp_J_kgK": 2000.0,
+    "k_W_mK": 0.25,
+    "emissivity": 0.90
+  },
+  {
+    "name": "Silicone Rubber",
+    "density_kg_m3": 1100.0,
+    "cp_J_kgK": 1300.0,
+    "k_W_mK": 0.22,
+    "emissivity": 0.90
+  },
+  {
+    "name": "Nylon 12",
+    "density_kg_m3": 1010.0,
+    "cp_J_kgK": 1700.0,
+    "k_W_mK": 0.25,
+    "emissivity": 0.90
+  },
+  {
+    "name": "ZERODUR",
+    "density_kg_m3": 2530.0,
+    "cp_J_kgK": 800.0,
+    "k_W_mK": 1.46,
+    "emissivity": 0.90
+  },
+  {
+    "name": "Fused Silica",
+    "density_kg_m3": 2200.0,
+    "cp_J_kgK": 740.0,
+    "k_W_mK": 1.38,
+    "emissivity": 0.90
+  },
+  {
+    "name": "Germanium",
+    "density_kg_m3": 5323.0,
+    "cp_J_kgK": 320.0,
+    "k_W_mK": 60.2,
+    "emissivity": 0.50
+  },
+  {
+    "name": "Silicon Carbide",
+    "density_kg_m3": 3210.0,
+    "cp_J_kgK": 670.0,
+    "k_W_mK": 120.0,
+    "emissivity": 0.90
+  },
+  {
+    "name": "Brass",
+    "density_kg_m3": 8500.0,
+    "cp_J_kgK": 380.0,
+    "k_W_mK": 115.0,
+    "emissivity": 0.40
+  },
+  {
+    "name": "Free-Cutting Brass, UNS C36000",
+    "density_kg_m3": 8500.0,
+    "cp_J_kgK": 380.0,
+    "k_W_mK": 115.0,
+    "emissivity": 0.40
+  },
+  {
+    "name": "Phosphor bronze 10% D, UNS C52400",
+    "density_kg_m3": 8800.0,
+    "cp_J_kgK": 380.0,
+    "k_W_mK": 69.0,
+    "emissivity": 0.40
+  },
+  {
+    "name": "Aluminum Silicon Bronze UNS C64200",
+    "density_kg_m3": 7700.0,
+    "cp_J_kgK": 375.0,
+    "k_W_mK": 45.0,
+    "emissivity": 0.40
+  },
+  {
+    "name": "PLATINUM",
+    "density_kg_m3": 21450.0,
+    "cp_J_kgK": 133.0,
+    "k_W_mK": 71.6,
+    "emissivity": 0.10
+  },
+  {
+    "name": "Kennametal KF306 Carbid",
+    "density_kg_m3": 14500.0,
+    "cp_J_kgK": 240.0,
+    "k_W_mK": 90.0,
+    "emissivity": 0.40
+  },
+  {
     "name": "ZERO MATTER",
+    "density_kg_m3": 1.0,
+    "cp_J_kgK": 1.0,
+    "k_W_mK": 1.0e-9,
+    "emissivity": 0.0
+  },
+  {
+    "name": "Unassigned (ignored)",
     "density_kg_m3": 1.0,
     "cp_J_kgK": 1.0,
     "k_W_mK": 1.0e-9,

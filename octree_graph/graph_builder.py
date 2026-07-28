@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
+from types import SimpleNamespace
 from typing import Iterator
 
 import numpy as np
@@ -11,7 +12,13 @@ import numpy as np
 from .load_gltf import MeshObject
 from .load_contact_report import ContactReport
 from .materials import DEFAULT_ASSIGNED_MATERIAL_NAME, Material, resolve_material
-from .octree import OctreeCell, _physical_material_name, _triangle_intersects_aabb
+from .octree import (
+    OctreeCell,
+    _mesh_contains_point,
+    _physical_material_name,
+    _point_in_object_bounds,
+    _triangle_intersects_aabb,
+)
 
 
 _ROLE_MARKER_C_J_K = 1.0
@@ -76,6 +83,16 @@ class GraphBuildResult:
     nodes: list[dict]
     edges: list[dict]
     warnings: list[str]
+    # (node_i, node_j) pairs whose conduction was suppressed by contact-gap
+    # detection (voxels touch but the CAD parts are separated by a gap). Persisted
+    # so the load-time edge rebuild honors them instead of re-bridging the gap.
+    suppressed_contact_pairs: list[tuple[int, int]] = field(default_factory=list)
+    # (node_i, node_j, shared_face_area_m2) for each suppressed inter-part gap.
+    # The two faces are coincident (sub-voxel separation) so they see each other
+    # with view factor ~1; the solver turns each into a direct A<->B gray-diffuse
+    # radiative exchange link, capturing the radiation that crosses the gap the
+    # suppressed conduction edge no longer carries.
+    gap_radiation_links: list[tuple[int, int, float]] = field(default_factory=list)
 
 
 def build_graph(
@@ -86,6 +103,9 @@ def build_graph(
     contact_interface_conductance_W_m2K: float = DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
     radiation_reference_temperature_K: float = 293.15,
     contact_detection_distance_mm: float = 0.0,
+    contact_gap_tolerance_mm: float = 0.0,
+    mesh_objects: list[MeshObject] | None = None,
+    contains_backend: str = "trimesh",
     component_bounds_mm: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
     role_components: list[RoleComponent] | None = None,
     role_contact_tolerance_mm: float = _ROLE_NODE_CONTACT_TOLERANCE_MM,
@@ -146,6 +166,17 @@ def build_graph(
     edge_index = 0
     connected_pairs: set[tuple[str, str]] = set()
     connected_node_pairs: set[tuple[int, int]] = set()
+    # Contact-gap detection: for adjacent cells of DIFFERENT parts, verify the CAD
+    # surfaces actually touch (within tolerance) rather than the voxels merely
+    # bridging an unresolved gap. When a gap is found, the conduction edge is
+    # suppressed and the shared face is re-exposed so the parts couple radiatively.
+    meshes_by_component: dict[str, list[MeshObject]] = {}
+    for obj in mesh_objects or []:
+        meshes_by_component.setdefault(str(getattr(obj, "name", "") or ""), []).append(obj)
+    gap_detection = float(contact_gap_tolerance_mm) > 0.0 and bool(meshes_by_component)
+    suppressed_gap_interfaces = 0
+    suppressed_contact_pairs: list[tuple[int, int]] = []
+    gap_radiation_links: list[tuple[int, int, float]] = []
     for a, b in _candidate_cell_pairs(solid, 0.0):
         area_mm2, distance_mm = _shared_face_area_and_distance(a, b)
         if area_mm2 <= 0.0:
@@ -155,6 +186,25 @@ def build_graph(
         material_a = resolve_material(str(node_a["material_name"]), materials, warnings)
         material_b = resolve_material(str(node_b["material_name"]), materials, warnings)
         same_component = node_a["component_name"] == node_b["component_name"]
+        if not same_component and gap_detection:
+            face = _shared_face_rectangle(a, b)
+            if face is not None and not _interface_is_true_contact(
+                meshes_by_component.get(str(node_a["component_name"]), []),
+                meshes_by_component.get(str(node_b["component_name"]), []),
+                face,
+                float(contact_gap_tolerance_mm),
+                contains_backend,
+            ):
+                face_area_m2 = float(area_mm2 * 1.0e-6)
+                suppressed_gap_interfaces += 1
+                suppressed_contact_pairs.append((int(node_a["node_id"]), int(node_b["node_id"])))
+                # The coincident faces see each other (view factor ~1 across the
+                # sub-voxel gap): record a direct A<->B radiative exchange so the
+                # heat that no longer conducts still crosses the gap by radiation.
+                gap_radiation_links.append(
+                    (int(node_a["node_id"]), int(node_b["node_id"]), face_area_m2)
+                )
+                continue  # gap: no conduction edge (couples radiatively instead)
         if same_component:
             edge_type = "internal_conduction"
             G = contact_conductance_W_K(
@@ -207,6 +257,16 @@ def build_graph(
         connected_pairs.add(_cell_pair_key(a, b))
         connected_node_pairs.add(_node_pair_key(node_a, node_b))
         edge_index += 1
+    if suppressed_gap_interfaces:
+        # The suppressed interfaces are captured as direct A<->B radiative exchange
+        # links (see gap_radiation_links); the solver couples the parts across the
+        # gap by radiation rather than either conducting through it or leaking the
+        # faces to the ambient sink.
+        warnings.append(
+            f"Contact-gap detection: suppressed conduction across {suppressed_gap_interfaces} inter-part voxel "
+            f"interface(s) with a CAD gap > {float(contact_gap_tolerance_mm):g} mm; those faces couple by direct "
+            f"radiation across the gap instead."
+        )
     if contact_detection_distance_mm > 0.0:
         edge_index = _add_near_contact_edges(
             solid,
@@ -265,7 +325,13 @@ def build_graph(
         max_heater_sensor_pair_distance_mm=max_heater_sensor_pair_distance_mm,
         max_heaters_per_sensor=max_heaters_per_sensor,
     )
-    return GraphBuildResult(nodes=nodes, edges=edges, warnings=warnings)
+    return GraphBuildResult(
+        nodes=nodes,
+        edges=edges,
+        warnings=warnings,
+        suppressed_contact_pairs=suppressed_contact_pairs,
+        gap_radiation_links=gap_radiation_links,
+    )
 
 
 def classify_role_component_name(
@@ -1129,6 +1195,78 @@ def contact_conductance_W_K(
     if resistance <= 0.0 or not np.isfinite(resistance):
         return 0.0
     return float(1.0 / resistance)
+
+
+def _shared_face_rectangle(a: OctreeCell, b: OctreeCell):
+    """Geometry of the shared face between two face-adjacent cells: (axis, plane
+    coordinate, normal sign a->b, [other axes], (lo0,hi0), (lo1,hi1)) in mm, or
+    None if the cells are not face-adjacent."""
+    amin, amax = _cell_bounds_mm(a)
+    bmin, bmax = _cell_bounds_mm(b)
+    touch_axes: list[int] = []
+    for axis in range(3):
+        gap = max(bmin[axis] - amax[axis], amin[axis] - bmax[axis])
+        if abs(gap) <= 1.0e-7:
+            touch_axes.append(axis)
+        elif gap > 0.0:
+            return None
+    if len(touch_axes) != 1:
+        return None
+    axis = touch_axes[0]
+    other = [i for i in range(3) if i != axis]
+    lo0 = max(float(amin[other[0]]), float(bmin[other[0]]))
+    hi0 = min(float(amax[other[0]]), float(bmax[other[0]]))
+    lo1 = max(float(amin[other[1]]), float(bmin[other[1]]))
+    hi1 = min(float(amax[other[1]]), float(bmax[other[1]]))
+    if hi0 - lo0 <= 1.0e-7 or hi1 - lo1 <= 1.0e-7:
+        return None
+    coord = 0.5 * (float(amax[axis]) + float(bmin[axis])) if amax[axis] <= bmin[axis] + 1.0e-7 else 0.5 * (float(amin[axis]) + float(bmax[axis]))
+    sign = 1.0 if float(b.center_mm[axis]) >= float(a.center_mm[axis]) else -1.0
+    return axis, coord, sign, other, (lo0, hi0), (lo1, hi1)
+
+
+def _interface_is_true_contact(
+    objs_a: list[MeshObject],
+    objs_b: list[MeshObject],
+    face,
+    tolerance_mm: float,
+    contains_backend: str,
+    samples: int = 3,
+) -> bool:
+    """Whether two parts' CAD surfaces actually meet across the shared voxel face
+    (within ``tolerance_mm``), rather than the voxels merely touching across an
+    unresolved gap. Samples points on the shared face and checks that each part's
+    material is present within tolerance on its own side of the face. Returns True
+    (assume contact) when it cannot test (no meshes / not watertight)."""
+    if not objs_a or not objs_b or tolerance_mm <= 0.0:
+        return True
+    if not all(bool(getattr(o, "watertight", False)) for o in objs_a + objs_b):
+        return True  # containment test needs watertight meshes; do not suppress
+    axis, coord, sign, other, (lo0, hi0), (lo1, hi1) = face
+    params = SimpleNamespace(contains_backend=str(contains_backend))
+    step = 0.5 * max(float(tolerance_mm), 1.0e-9)
+    normal = np.zeros(3, dtype=float)
+    normal[axis] = sign
+    us = np.linspace(lo0, hi0, samples + 2)[1:-1]
+    vs = np.linspace(lo1, hi1, samples + 2)[1:-1]
+    contact = 0
+    total = 0
+    for u in us:
+        for v in vs:
+            point = np.zeros(3, dtype=float)
+            point[axis] = coord
+            point[other[0]] = float(u)
+            point[other[1]] = float(v)
+            point_a = point - step * normal
+            point_b = point + step * normal
+            a_here = any(_point_in_object_bounds(point_a, o) and _mesh_contains_point(o, point_a, params) for o in objs_a)
+            b_here = any(_point_in_object_bounds(point_b, o) and _mesh_contains_point(o, point_b, params) for o in objs_b)
+            total += 1
+            if a_here and b_here:
+                contact += 1
+    if total == 0:
+        return True
+    return (contact / total) >= 0.5
 
 
 def _shared_face_area_and_distance(a: OctreeCell, b: OctreeCell) -> tuple[float, float]:

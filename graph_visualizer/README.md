@@ -70,10 +70,12 @@ graphs/
     materials_used.json
     material_warnings.csv
     validation_report.txt
+    node_ids.npy
     C.npy
-    G.npy
     L.npy
-    A.npy
+    G_rad.npy
+    initial_temperature_K.npy
+    G.npy    # dense conductance matrix, only for small graphs
     ui_state.json
 ```
 

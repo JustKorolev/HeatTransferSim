@@ -1,0 +1,362 @@
+"""Modal / balanced-truncation reduction + reduced-order LQR controller design.
+
+This is the library behind both ``tools/analyze_plant_modes.py`` (CLI, reads a
+graph folder's light files) and the "Modal LQR design" panel in the simulation
+tab (reduces the in-memory graph). It turns a large thermal graph's sparse
+operator into the *exact* artifact consumed by
+``PreparedSimulation._load_modal_controller``:
+
+    K            (n_heaters x r)  reduced-order LQR state feedback  (u = -K x)
+    E_reg        (r x n_sensors)  regularized static state estimate (x_hat = E_reg (y - T_op))
+    Nx, Nu       reduced servo maps (fallback feedforward; ill-conditioned at DC)
+    dc_gain_pinv (n_heaters x n_ctrl)  EXACT full-plant DC feedforward (preferred)
+    heater_ids, sensor_ids, monitor, T_op_K
+
+Pipeline: largest connected component -> slow radiation-damped modes -> modal
+state space (A_mod, B_mod, C_out) -> Hankel singular values -> square-root
+balanced truncation to order r -> LQR + estimator + servo design -> exact
+steady-state DC gain feedforward.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Any, Callable
+
+import numpy as np
+from scipy.linalg import expm, solve_continuous_are, solve_continuous_lyapunov, svd
+from scipy.sparse import csr_matrix, diags
+from scipy.sparse.csgraph import connected_components
+from scipy.sparse.linalg import eigsh, splu
+
+
+# ------------------------------------------------------------------ reduction primitives
+# These are shared with tools/analyze_plant_modes.py (which imports them).
+
+def largest_connected_component(L, C, Grad, node_ids):
+    """Restrict to the largest conductively-connected component (the main part)."""
+    ncomp, labels = connected_components(L, directed=False)
+    sizes = np.bincount(labels)
+    main = int(np.argmax(sizes))
+    rows = np.where(labels == main)[0]
+    info = {
+        "components": int(ncomp),
+        "main_nodes": int(rows.size),
+        "total_nodes": int(C.size),
+        "top_sizes": sorted(sizes.tolist(), reverse=True)[:8],
+    }
+    Lm = L[rows][:, rows].tocsr()
+    return Lm, C[rows], Grad[rows], node_ids[rows], rows, info
+
+
+def slow_modes(Lm, Cm, Gradm, n_modes: int):
+    """Slowest n_modes of the radiation-damped generalized problem
+    (L + diag(G_rad)) phi = lam C phi, via symmetric shift-invert eigsh.
+
+    Returns (lam, Phi, Leff, lam_max) with Phi C-orthonormal (Phi^T C Phi = I)."""
+    Leff = (Lm + diags(Gradm)).tocsr()
+    D = diags(1.0 / np.sqrt(Cm))
+    A = (D @ Leff @ D).tocsr()
+    A = 0.5 * (A + A.T)
+    lam_max = float(eigsh(A, k=1, which="LA", return_eigenvectors=False, tol=1e-3)[0])
+    vals, vecs = eigsh(A, k=int(n_modes), sigma=-1e-4 * lam_max, which="LM", tol=1e-6)
+    order = np.argsort(vals)
+    vals, vecs = vals[order], vecs[:, order]
+    Phi = vecs / np.sqrt(Cm)[:, None]  # C^{-1/2} psi
+    return vals, Phi, Leff, lam_max
+
+
+def _sqrtm_psd(M):
+    w, V = np.linalg.eigh(0.5 * (M + M.T))
+    return V @ np.diag(np.sqrt(np.clip(w, 0.0, None))) @ V.T
+
+
+def hankel_svs(A_mod, B_mod, C_out):
+    """Gramians of the (stable) modal model -> Hankel singular values + factors."""
+    Wc = solve_continuous_lyapunov(A_mod, -(B_mod @ B_mod.T))
+    Wo = solve_continuous_lyapunov(A_mod.T, -(C_out.T @ C_out))
+    Lc, Lo = _sqrtm_psd(Wc), _sqrtm_psd(Wo)
+    U, s, Vt = svd(Lo @ Lc)
+    return s, U, Vt, Lc, Lo
+
+
+def balanced_truncate(A_mod, B_mod, C_out, r, factors):
+    """Square-root balanced truncation to order r."""
+    s, U, Vt, Lc, Lo = factors
+    S12 = np.diag(1.0 / np.sqrt(s[:r]))
+    T = Lc @ Vt[:r].T @ S12
+    Ti = S12 @ U[:, :r].T @ Lo
+    return Ti @ A_mod @ T, Ti @ B_mod, C_out @ T
+
+
+def validate_reduced(A_mod, B_mod, C_out, Ar, Br, Cr):
+    """Relative DC-gain and step-response error of the reduced vs modal model."""
+    n, r = A_mod.shape[0], Ar.shape[0]
+    Gf = C_out @ np.linalg.solve(-A_mod, B_mod)
+    Gr = Cr @ np.linalg.solve(-Ar, Br)
+    dc = float(np.max(np.abs(Gf - Gr)) / max(np.max(np.abs(Gf)), 1e-30))
+    step_err = 0.0
+    for t in (5.0, 20.0, 60.0, 200.0, 600.0):
+        yf = C_out @ np.linalg.solve(A_mod, (expm(A_mod * t) - np.eye(n)) @ B_mod)
+        yr = Cr @ np.linalg.solve(Ar, (expm(Ar * t) - np.eye(r)) @ Br)
+        step_err = max(step_err, float(np.max(np.abs(yf - yr)) / (np.max(np.abs(yf)) + 1e-30)))
+    return dc, step_err
+
+
+def dc_gain_and_rga(Leff, F, S, monitor):
+    """Exact steady-state gain G = S_ctrl L_eff^{-1} F and its RGA."""
+    lu = splu(Leff.tocsc())
+    X = lu.solve(np.asarray(F, dtype=float))
+    ctrl = ~monitor
+    G = S[ctrl] @ X
+    RGA = G * np.linalg.pinv(G).T
+    return G, RGA
+
+
+# ------------------------------------------------------------------ in-memory plant maps
+
+def heater_sensor_maps_from_model(model: Any, node_ids_full, main_rows):
+    """F (heater watts -> node power) and S (node temps -> sensor readout) built
+    directly from the in-memory graph model, restricted to the main-component rows.
+
+    Mirrors the nodes.csv path in tools/analyze_plant_modes.py but reads the live
+    node deposition/readout maps. Returns F (nm x n_heaters), S (n_sensors x nm),
+    monitor mask, heater node ids, sensor node ids."""
+    node_ids_full = np.asarray(node_ids_full, dtype=int)
+    row_of = {int(nid): i for i, nid in enumerate(node_ids_full)}
+    main_rows = np.asarray(main_rows, dtype=int)
+    local = -np.ones(node_ids_full.size, dtype=int)
+    local[main_rows] = np.arange(main_rows.size)
+    nm = int(main_rows.size)
+
+    heater_nodes = []
+    sensor_nodes = []
+    for nid in sorted(model.nodes):
+        node = model.nodes[nid]
+        if bool(getattr(node, "is_heater", False)) and bool(getattr(node, "heater_valid", True)):
+            heater_nodes.append(node)
+        if bool(getattr(node, "is_sensor", False)) and bool(getattr(node, "sensor_valid", True)):
+            sensor_nodes.append(node)
+
+    F = np.zeros((nm, len(heater_nodes)), dtype=float)
+    heater_ids: list[int] = []
+    for j, node in enumerate(heater_nodes):
+        heater_ids.append(int(node.node_id))
+        ids = list(getattr(node, "power_deposition_node_ids", None) or [])
+        weights = list(getattr(node, "power_deposition_weights", None) or [])
+        if not ids or len(weights) != len(ids):
+            continue
+        ws = np.asarray(weights, dtype=float)
+        total = ws.sum()
+        ws = ws / total if total > 0 else ws
+        for nid, wt in zip(ids, ws):
+            gr = row_of.get(int(nid))
+            if gr is not None and local[gr] >= 0:
+                F[local[gr], j] += float(wt)
+
+    S = np.zeros((len(sensor_nodes), nm), dtype=float)
+    monitor = np.zeros(len(sensor_nodes), dtype=bool)
+    sensor_ids: list[int] = []
+    for i, node in enumerate(sensor_nodes):
+        sensor_ids.append(int(node.node_id))
+        monitor[i] = bool(getattr(node, "sensor_monitor_only", False))
+        ids = list(getattr(node, "readout_node_ids", None) or []) or list(
+            getattr(node, "sensor_connected_node_ids", None) or []
+        )
+        weights = list(getattr(node, "readout_weights", None) or [])
+        if len(weights) != len(ids):
+            weights = [1.0] * len(ids)
+        ws = np.asarray(weights, dtype=float)
+        total = ws.sum()
+        ws = ws / total if total > 0 else ws
+        for nid, wt in zip(ids, ws):
+            gr = row_of.get(int(nid))
+            if gr is not None and local[gr] >= 0:
+                S[i, local[gr]] += float(wt)
+
+    return F, S, monitor, np.asarray(heater_ids, dtype=int), np.asarray(sensor_ids, dtype=int)
+
+
+# ------------------------------------------------------------------ LQR + estimator + servo
+
+def design_lqr(A_r, B_r, C_ctrl, effort_weight: float):
+    """Continuous-time LQR gain for tracking the controlled outputs.
+
+    Minimizes int (y_ctrl^T y_ctrl + rho u^T u) dt with Q = C_ctrl^T C_ctrl and
+    R = rho I. Returns K (n_heaters x r) with u = -K x."""
+    r = A_r.shape[0]
+    Q = C_ctrl.T @ C_ctrl + 1.0e-9 * np.eye(r)  # tiny ridge for numerical detectability
+    R = max(float(effort_weight), 1.0e-12) * np.eye(B_r.shape[1])
+    P = solve_continuous_are(A_r, B_r, Q, R)
+    return np.linalg.solve(R, B_r.T @ P)
+
+
+def regularized_estimator(C_r, reg_frac: float = 1.0e-3):
+    """Regularized static state estimate x_hat = E_reg y from all sensor outputs
+    (y = C_r x). Tikhonov inverse E_reg = (C_r^T C_r + mu I)^{-1} C_r^T."""
+    r = C_r.shape[1]
+    sv = np.linalg.svd(C_r, compute_uv=False)
+    mu = reg_frac * (float(sv[0]) ** 2 if sv.size else 1.0)
+    return np.linalg.solve(C_r.T @ C_r + mu * np.eye(r), C_r.T)
+
+
+def servo_maps(A_r, B_r, C_ctrl, reg: float = 1.0e-8):
+    """Reduced-model steady-state servo maps (Nx, Nu) for a controlled-output
+    reference: [A_r B_r; C_ctrl 0][x_ss; u_ss] = [0; r_ctrl]. Regularized least
+    squares (the KKT system is generally not square). These are a fallback; the
+    deployed controller prefers the exact-plant dc_gain_pinv."""
+    r = A_r.shape[0]
+    nu = B_r.shape[1]
+    nc = C_ctrl.shape[0]
+    M = np.block([[A_r, B_r], [C_ctrl, np.zeros((nc, nu))]])
+    rhs = np.vstack([np.zeros((r, nc)), np.eye(nc)])
+    z = np.linalg.solve(M.T @ M + reg * np.eye(r + nu), M.T @ rhs)
+    return z[:r], z[r:]
+
+
+# ------------------------------------------------------------------ orchestration
+
+@dataclass
+class ModalDesignResult:
+    path: str
+    total_nodes: int
+    main_nodes: int
+    components: int
+    n_modes: int
+    reduced_order: int
+    n_heaters: int
+    n_sensors: int
+    n_controlled: int
+    dc_gain_error: float
+    step_response_error: float
+    reduced_stable: bool
+    slowest_tau_s: float
+    hsv_above_1pct: int
+    cond_dc_gain: float
+
+    def summary(self) -> str:
+        return (
+            f"r={self.reduced_order} (from {self.n_modes} modes over {self.main_nodes} nodes); "
+            f"{self.n_heaters} heaters, {self.n_controlled}/{self.n_sensors} controlled sensors; "
+            f"reduced DC err {self.dc_gain_error:.1e}, step err {self.step_response_error:.1e}, "
+            f"{'stable' if self.reduced_stable else 'UNSTABLE'}; cond(G)={self.cond_dc_gain:.0f}."
+        )
+
+
+def _report(progress: Callable[[str], None] | None, message: str) -> None:
+    if progress is not None:
+        progress(message)
+
+
+def design_modal_controller(
+    C: np.ndarray,
+    L: csr_matrix,
+    Grad: np.ndarray,
+    node_ids: np.ndarray,
+    model: Any,
+    *,
+    T_op_K: float,
+    n_modes: int,
+    r: int,
+    effort_weight: float,
+    integral_gain: float,
+    out_path: str | Path,
+    graph_name: str = "",
+    progress: Callable[[str], None] | None = None,
+) -> ModalDesignResult:
+    """Reduce the plant and design the reduced-order LQR controller, saving the
+    artifact consumed by the modal-LQR controller to ``out_path`` (an .npz)."""
+    C = np.asarray(C, dtype=float).reshape(-1)
+    Grad = np.asarray(Grad, dtype=float).reshape(-1) if Grad is not None else np.zeros_like(C)
+    node_ids = np.asarray(node_ids, dtype=int).reshape(-1)
+    L = csr_matrix(L)
+
+    _report(progress, "Selecting largest connected component…")
+    Lm, Cm, Gradm, _node_ids_m, main_rows, info = largest_connected_component(L, C, Grad, node_ids)
+    main_nodes = int(info["main_nodes"])
+    # eigsh needs 1 <= k <= n-1; keep a small margin.
+    n_modes = int(max(2, min(int(n_modes), main_nodes - 2)))
+
+    _report(progress, f"Solving {n_modes} slow modes over {main_nodes} nodes…")
+    lam, Phi, Leff, _lam_max = slow_modes(Lm, Cm, Gradm, n_modes)
+
+    _report(progress, "Building heater/sensor maps…")
+    F, S, monitor, heater_ids, sensor_ids = heater_sensor_maps_from_model(model, node_ids, main_rows)
+    if F.shape[1] == 0:
+        raise ValueError("No valid heaters found in the graph (need at least one).")
+    if S.shape[0] == 0:
+        raise ValueError("No valid sensors found in the graph (need at least one).")
+    ctrl_idx = np.where(~monitor)[0]
+    if ctrl_idx.size == 0:
+        raise ValueError("All sensors are monitor-only; need at least one controlled sensor.")
+
+    A_mod = -np.diag(lam)
+    B_mod = Phi.T @ F
+    C_out = S @ Phi
+
+    _report(progress, "Hankel singular values + balanced truncation…")
+    factors = hankel_svs(A_mod, B_mod, C_out)
+    hsv = factors[0]
+    r = int(max(1, min(int(r), n_modes)))
+    Ar, Br, Cr = balanced_truncate(A_mod, B_mod, C_out, r, factors)
+    dc_err, step_err = validate_reduced(A_mod, B_mod, C_out, Ar, Br, Cr)
+    reduced_stable = bool(np.max(np.linalg.eigvals(Ar).real) < 0.0)
+
+    _report(progress, "Designing LQR + estimator…")
+    C_ctrl = Cr[ctrl_idx]
+    K = design_lqr(Ar, Br, C_ctrl, effort_weight)
+    E_reg = regularized_estimator(Cr)
+    Nx, Nu = servo_maps(Ar, Br, C_ctrl)
+
+    _report(progress, "Exact steady-state DC gain + feedforward…")
+    G, _RGA = dc_gain_and_rga(Leff, F, S, monitor)
+    dc_lambda = 1.0e-3 * float(svd(G, compute_uv=False)[0]) ** 2
+    dc_gain_pinv = np.linalg.solve(G.T @ G + dc_lambda * np.eye(G.shape[1]), G.T)
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        out_path,
+        K=np.asarray(K, dtype=float),
+        E_reg=np.asarray(E_reg, dtype=float),
+        Nx=np.asarray(Nx, dtype=float),
+        Nu=np.asarray(Nu, dtype=float),
+        dc_gain_pinv=np.asarray(dc_gain_pinv, dtype=float),
+        heater_ids=heater_ids.astype(int),
+        sensor_ids=sensor_ids.astype(int),
+        monitor=monitor.astype(bool),
+        T_op_K=float(T_op_K),
+        integral_gain=float(integral_gain),
+        r=int(r),
+        n_modes=int(n_modes),
+        effort_weight=float(effort_weight),
+        hsv=np.asarray(hsv, dtype=float),
+        lam=np.asarray(lam, dtype=float),
+        dc_gain=np.asarray(G, dtype=float),
+        graph=str(graph_name),
+    )
+
+    slowest_tau = float(1.0 / max(lam[0], 1e-300))
+    hsv_norm = hsv / hsv[0] if hsv.size and hsv[0] > 0 else hsv
+    return ModalDesignResult(
+        path=str(out_path),
+        total_nodes=int(info["total_nodes"]),
+        main_nodes=main_nodes,
+        components=int(info["components"]),
+        n_modes=int(n_modes),
+        reduced_order=int(r),
+        n_heaters=int(F.shape[1]),
+        n_sensors=int(S.shape[0]),
+        n_controlled=int(ctrl_idx.size),
+        dc_gain_error=float(dc_err),
+        step_response_error=float(step_err),
+        reduced_stable=reduced_stable,
+        slowest_tau_s=slowest_tau,
+        hsv_above_1pct=int(np.sum(hsv_norm > 1e-2)),
+        cond_dc_gain=float(np.linalg.cond(G)),
+    )
+
+
+def result_as_dict(result: ModalDesignResult) -> dict[str, Any]:
+    return asdict(result)

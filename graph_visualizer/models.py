@@ -194,6 +194,10 @@ class NodeProperties:
     sensor_control_mode: str = "manual"
     sensor_manual_power_W: float = 0.0
     has_cryocooler: bool = False
+    cryocooler_id: str = ""
+    cryocooler_enabled: bool = True
+    cryocooler_receiving_node_ids: list[int] = field(default_factory=list)
+    cryocooler_contact_areas_m2: list[float] = field(default_factory=list)
     controller_setpoint_K: float = 293.15
     controller_weight: float = 0.0
     sensor_settling_time_s: float = 0.0
@@ -203,8 +207,6 @@ class NodeProperties:
     controller_ki_hold: float = 0.0
     controller_kd_coarse: float = 0.0
     controller_kd_hold: float = 0.0
-    controller_lambda_order: float = 1.0
-    controller_mu_order: float = 1.0
     controller_integral_leak_per_s: float = 0.0
 
     @classmethod
@@ -258,6 +260,7 @@ class NodeProperties:
         sensor_data = copied.pop("sensor", {}) or {}
         controller_data = copied.pop("controller", copied.pop("mimo_controller", {}) or {}) or {}
         physical_device_data = copied.pop("physical_device", copied.pop("physicalDevice", {}) or {}) or {}
+        cryocooler_data = copied.pop("cryocooler", {}) or {}
         if isinstance(physical_device_data, dict):
             device_kind = str(physical_device_data.get("kind", "")).lower()
             if is_heater_value is None and "heater" in device_kind:
@@ -315,30 +318,6 @@ class NodeProperties:
                 float(controller_data.get("kd_hold", copied.get("controller_kd_hold", 0.0))),
             )
             copied.setdefault(
-                "controller_lambda_order",
-                max(
-                    0.0,
-                    float(
-                        controller_data.get(
-                            "lambda_order",
-                            controller_data.get("lambda", copied.get("controller_lambda_order", 1.0)),
-                        )
-                    ),
-                ),
-            )
-            copied.setdefault(
-                "controller_mu_order",
-                max(
-                    0.0,
-                    float(
-                        controller_data.get(
-                            "mu_order",
-                            controller_data.get("mu", copied.get("controller_mu_order", 1.0)),
-                        )
-                    ),
-                ),
-            )
-            copied.setdefault(
                 "controller_integral_leak_per_s",
                 float(controller_data.get("integral_leak_per_s", copied.get("controller_integral_leak_per_s", 0.0))),
             )
@@ -384,6 +363,25 @@ class NodeProperties:
             "has_cryocooler",
             bool(tags.get("cryocooler", tags.get("active_cooler", False))),
         )
+        if isinstance(cryocooler_data, dict):
+            copied.setdefault("cryocooler_id", str(cryocooler_data.get("id", "") or ""))
+            copied.setdefault("cryocooler_enabled", bool(cryocooler_data.get("enabled", True)))
+            copied.setdefault(
+                "cryocooler_receiving_node_ids",
+                [
+                    int(value)
+                    for value in (cryocooler_data.get("receiving_node_ids", []) or [])
+                    if _can_int(value)
+                ],
+            )
+            copied.setdefault(
+                "cryocooler_contact_areas_m2",
+                [
+                    float(value)
+                    for value in (cryocooler_data.get("contact_areas_m2", []) or [])
+                    if _can_float(value)
+                ],
+            )
         if tags.get("notes") and "notes" not in copied:
             copied["notes"] = str(tags.get("notes"))
         if material_name and "material" not in copied:
@@ -576,8 +574,6 @@ class NodeProperties:
                 "ki_hold": self.controller_ki_hold,
                 "kd_coarse": self.controller_kd_coarse,
                 "kd_hold": self.controller_kd_hold,
-                "lambda_order": self.controller_lambda_order,
-                "mu_order": self.controller_mu_order,
                 "integral_leak_per_s": self.controller_integral_leak_per_s,
             },
         }
@@ -593,6 +589,13 @@ class NodeProperties:
             data["role_source_components"] = list(self.role_source_components)
         if self.source_bounds_mm:
             data["source_bounds_mm"] = dict(self.source_bounds_mm)
+        if self.has_cryocooler:
+            data["cryocooler"] = {
+                "id": str(self.cryocooler_id or self.component_name or f"cryocooler-node-{self.node_id}"),
+                "enabled": bool(self.cryocooler_enabled),
+                "receiving_node_ids": [int(value) for value in self.cryocooler_receiving_node_ids],
+                "contact_areas_m2": [float(value) for value in self.cryocooler_contact_areas_m2],
+            }
         if self.assigned_sensor_id is not None:
             data["assigned_sensor_id"] = int(self.assigned_sensor_id)
         if self.assigned_heater_id is not None:
@@ -1107,8 +1110,6 @@ _LEGACY_HEATER_CONTROLLER_DEFAULTS = {
     "controller_kp_hold": 0.0,
     "controller_ki_hold": 0.0,
     "controller_kd_hold": 0.0,
-    "controller_lambda_order": 1.0,
-    "controller_mu_order": 1.0,
 }
 
 

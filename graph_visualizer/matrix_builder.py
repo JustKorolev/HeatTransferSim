@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 from scipy.sparse import coo_matrix
@@ -15,10 +15,27 @@ DENSE_MATRIX_MAX_TOTAL_BYTES = 768 * 1024 * 1024
 DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K = 1.0e4
 
 
+def _suppressed_contact_pairs(model: ThermalGraphModel) -> set[tuple[int, int]]:
+    """Node-id pairs whose conduction was suppressed by contact-gap detection at
+    build time (persisted in the octree graph). Rebuilt edges must skip these so
+    a re-derive does not re-bridge a detected inter-part gap."""
+    data = getattr(model, "octree_graph_data", None) or {}
+    raw = data.get("suppressed_contact_pairs") or []
+    pairs: set[tuple[int, int]] = set()
+    for pair in raw:
+        try:
+            i, j = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        pairs.add((min(i, j), max(i, j)))
+    return pairs
+
+
 def refresh_auto_edges(model: ThermalGraphModel) -> None:
     """Replace edges with 6-neighbor face-adjacent estimated conductances."""
     model.clear_edges()
     coord_index = model.coord_index()
+    suppressed = _suppressed_contact_pairs(model)
     seen: set[tuple[int, int]] = set()
     for node_id, node in model.nodes.items():
         if _is_cad_role_node(node):
@@ -38,7 +55,7 @@ def refresh_auto_edges(model: ThermalGraphModel) -> None:
             if _is_cad_role_node(model.nodes[neighbor_id]):
                 continue
             key = (min(node_id, neighbor_id), max(node_id, neighbor_id))
-            if key in seen:
+            if key in seen or key in suppressed:
                 continue
             seen.add(key)
             conductance = estimate_conductance(model.nodes[key[0]], model.nodes[key[1]])
@@ -54,6 +71,7 @@ def refresh_geometry_edges(
     """Replace edges using physical face contacts from node centers and sizes."""
     model.clear_edges()
     node_ids = model.ordered_node_ids()
+    suppressed = _suppressed_contact_pairs(model)
     tolerance_mm = 1.0e-7
     face_groups: dict[tuple[int, int], dict[str, list[tuple[int, tuple[float, float], tuple[float, float]]]]] = {}
     for node_id in node_ids:
@@ -87,7 +105,7 @@ def refresh_geometry_edges(
                 if source_id == target_id:
                     continue
                 key = (min(source_id, target_id), max(source_id, target_id))
-                if key in seen:
+                if key in seen or key in suppressed:
                     continue
                 overlap_a = min(source_a[1], target_a[1]) - max(source_a[0], target_a[0])
                 overlap_b = min(source_b[1], target_b[1]) - max(source_b[0], target_b[0])
@@ -118,6 +136,49 @@ def refresh_geometry_edges(
                     contact_confidence="medium",
                 )
     model.metadata.edge_mode = EdgeMode.AUTO.value
+
+
+def refresh_geometry_edges_for_nodes(
+    model: ThermalGraphModel,
+    changed_node_ids: Iterable[int],
+    contact_interface_conductance_W_m2K: float = DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
+) -> int:
+    """Recompute conductances only for edges incident to a changed node.
+
+    A material override changes a cell's ``k`` but not its geometry, so the shared
+    face area and center distance already stored on each edge remain valid. That
+    lets us rescale the affected conductances in place instead of running the full
+    O(N) face-matching sweep of ``refresh_geometry_edges`` -- the expensive part on
+    a large graph. Edges between two unchanged nodes are left untouched. Edges with
+    no stored geometry (e.g. coordinate-adjacency AUTO edges) fall back to the same
+    ``estimate_conductance`` used to build them. Returns the number of edges updated.
+    """
+    changed = {int(v) for v in changed_node_ids}
+    if not changed:
+        return 0
+    updated = 0
+    for edge in model.edges.values():
+        if _is_visual_role_contact_edge(edge):
+            continue
+        if edge.source not in changed and edge.target not in changed:
+            continue
+        node_i = model.nodes.get(edge.source)
+        node_j = model.nodes.get(edge.target)
+        if node_i is None or node_j is None:
+            continue
+        area_m2 = float(getattr(edge, "shared_area_m2", 0.0) or 0.0)
+        distance_m = float(getattr(edge, "distance_m", 0.0) or 0.0)
+        if area_m2 > 0.0 and distance_m > 0.0:
+            conductance = _geometry_conductance(
+                node_i, node_j, area_m2, distance_m, contact_interface_conductance_W_m2K
+            )
+        else:
+            conductance = estimate_conductance(node_i, node_j)
+        edge.Gij_W_K = float(max(0.0, conductance))
+        updated += 1
+    if updated:
+        model.touch()
+    return updated
 
 
 def refresh_radiation_from_exposed_faces(

@@ -1,0 +1,3 @@
+node_id,cell_id,component_name,material_name,level,volume_m3,mass_kg,C_J_K,initial_temperature_K,radiation_is_exposed,radiation_radiating_area_m2,radiation_emissivity,radiation_G_rad_W_K,radiation_R_rad_K_W,occupancy_fraction,confidence
+0,cell_0,VALIDATION_HOT_BLOCK,Copper,0,1.0000000000000002e-06,0.008960000000000001,3.4496,300.0,False,0.0,0.35,0.0,,1.0,high
+1,cell_1,VALIDATION_COLD_BLOCK,Copper,0,1.0000000000000002e-06,0.008960000000000001,3.4496,200.0,False,0.0,0.35,0.0,,1.0,high

@@ -956,10 +956,12 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual(args.contains_backend, "ray")
 
-    def test_cli_defaults_to_ray_contains_backend(self) -> None:
+    def test_cli_defaults_to_trimesh_contains_backend(self) -> None:
+        # Defaults to the BVH-accelerated backend (falls back to 'ray' when the
+        # native deps are unavailable); 'ray' remains selectable explicitly.
         args = build_parser().parse_args(["--mesh-dir", "meshes", "--graph-name", "graph"])
 
-        self.assertEqual(args.contains_backend, "ray")
+        self.assertEqual(args.contains_backend, "trimesh")
 
     def test_cli_accepts_dense_matrix_node_limit(self) -> None:
         args = build_parser().parse_args(
@@ -2750,6 +2752,55 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         )
 
         self.assertEqual(args.contact_interface_conductance_W_m2K, 25000.0)
+
+    def test_material_lookup_matches_leaf_across_assembly_path(self) -> None:
+        # Sheet keys are full assembly paths with instance suffixes; GLB/graph names
+        # are leaf names with different indices. They must still match on the leaf.
+        from octree_graph.load_contact_report import ContactReport, _add_component_aliases
+
+        report = ContactReport(
+            component_materials={
+                "HISPEC-0030-A0070-1/HISPEC-0030-A0003-1/V_MMC_WASHER_18-8SS-50": "18-8 Stainless Steel",
+                "Wire Routes^HISPEC-0030-A0016-3": "Copper",
+            }
+        )
+        _add_component_aliases(report)
+        # Different instance index (_1812 vs -50) and no path prefix -> still matches.
+        self.assertEqual(report.material_for_component("V_MMC_WASHER_18-8SS_1812"), "18-8 Stainless Steel")
+        # "^" instance-of prefix and a different index.
+        self.assertEqual(report.material_for_component("Wire Routes^HISPEC-0030-A0016_2"), "Copper")
+
+    def test_spreadsheet_material_takes_priority_over_glb_appearance(self) -> None:
+        # The spreadsheet is authoritative; a GLB appearance name (e.g. an aluminum
+        # look on an Invar part) must not override it.
+        from octree_graph.load_contact_report import ContactReport
+        from octree_graph.octree import _physical_material_name
+
+        report = ContactReport(component_materials={"HISPEC-0030-P0500": "Carpenter Invar 36"})
+        known = {"6061-T6 Aluminum", "Invar, AL 36"}
+        obj = SimpleNamespace(name="HISPEC-0030-P0500", material_name="brushed_aluminum_128_128")
+        # Sheet says Invar (resolves via alias); appearance says aluminum -> Invar wins.
+        self.assertEqual(_physical_material_name(obj, report, known), "Invar, AL 36")
+        # With no sheet entry, it falls back to the GLB appearance.
+        empty = ContactReport(component_materials={})
+        self.assertEqual(_physical_material_name(obj, empty, known), "6061-T6 Aluminum")
+
+    def test_unresolved_material_is_inert_not_aluminum(self) -> None:
+        # No spreadsheet entry and no material-bearing appearance/name -> the node
+        # gets the INERT default so it is ignored by the heat transfer, NOT faked
+        # as aluminum.
+        from octree_graph.load_contact_report import ContactReport
+        from octree_graph.materials import DEFAULT_ASSIGNED_MATERIAL_NAME, load_material_table
+        from octree_graph.octree import _physical_material_name
+
+        obj = SimpleNamespace(name="HISPEC-0030-P9999", material_name="color_128_128_128")
+        result = _physical_material_name(obj, ContactReport(component_materials={}), {"Copper", "Invar, AL 36"})
+        self.assertEqual(result, DEFAULT_ASSIGNED_MATERIAL_NAME)
+        # And that default resolves to a thermally-inert material (near-zero k, zero emissivity).
+        materials, _ = load_material_table()
+        inert = materials[DEFAULT_ASSIGNED_MATERIAL_NAME]
+        self.assertLess(inert.k_W_mK, 1.0e-6)
+        self.assertEqual(inert.emissivity, 0.0)
 
 
 if __name__ == "__main__":

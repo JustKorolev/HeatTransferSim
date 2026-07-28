@@ -20,6 +20,7 @@ from graph_visualizer.connectivity import (
     connectivity_component_color,
     connectivity_component_for_node,
 )
+from graph_visualizer.cryocooler import PT60LiftCurve
 from graph_visualizer.draw_tools import (
     clone_node_for_extrusion,
     compute_face_normal,
@@ -57,7 +58,7 @@ from graph_visualizer.role_assignment import (
 )
 from graph_visualizer.role_pairing import assign_heater_to_sensor, recompute_heater_sensor_pairing
 from graph_visualizer.role_warnings import has_role_warning, role_warning_reasons
-from graph_visualizer.simulation_model import prepare_simulation
+from graph_visualizer.simulation_model import PreparedSimulation, prepare_simulation
 from graph_visualizer.simulation_parameters import (
     SimulationParameters,
     apply_initial_temperature_parameter_payload,
@@ -90,6 +91,18 @@ def _expected_contact_g(k_i: float, k_j: float, area_m2: float, distance_m: floa
 
 
 class GraphVisualizerModelTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests assert CPU stepper selection and were written for a
+        # GPU-free environment. Disable the CuPy probe so the GPU stepper is not
+        # built when the test machine happens to have a working CuPy install;
+        # the dedicated GPU tests patch their own hooks and are unaffected.
+        cupy_patcher = patch(
+            "graph_visualizer.simulation_model._optional_cupy_modules",
+            return_value=(None, None, "disabled for CPU stepper tests"),
+        )
+        cupy_patcher.start()
+        self.addCleanup(cupy_patcher.stop)
+
     def make_model(self) -> ThermalGraphModel:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="test_graph"))
         node_10 = NodeProperties.with_material(10, (0, 0, 0), material="copper")
@@ -646,7 +659,14 @@ class GraphVisualizerModelTests(unittest.TestCase):
             "G_rad": np.array([0.0]),
             "initial_temperature_K": np.array([300.0]),
         }
-        params = SimulationParameters(dt_s=1.0, T_env_K=290.0, use_ambient_radiation=True)
+        # Step-start (non-midpoint) radiation coupling so the single large step
+        # matches this explicit closed form exactly.
+        params = SimulationParameters(
+            dt_s=1.0,
+            T_env_K=290.0,
+            use_ambient_radiation=True,
+            use_midpoint_property_coupling=False,
+        )
         prepared = prepare_simulation(model, matrices, params)
         prepared.step_forward()
         sigma = 5.670374419e-8
@@ -731,7 +751,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertEqual(prepared.heater_power_by_node(), {2: 7.0})
 
-    def test_cryocooler_removes_heat_above_setpoint_only(self) -> None:
+    def test_pt60_cryocooler_removes_temperature_dependent_available_heat(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="cryocooler"))
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
@@ -747,22 +767,335 @@ class GraphVisualizerModelTests(unittest.TestCase):
         params = SimulationParameters(
             dt_s=1.0,
             input_mode="zero",
-            Kp_cooler=0.5,
-            P_cooler_max=10.0,
-            T_cooler_setpoint=270.0,
+            cryocooler_max_power_W=150.0,
+            cryocooler_capacity_scale=1.0,
         )
 
         prepared = prepare_simulation(model, matrices, params)
 
-        self.assertEqual(prepared.cryocooler_power_by_node(), {1: 10.0})
-        self.assertEqual(prepared.heater_power_by_node(), {1: -10.0})
+        expected = PT60LiftCurve().cooling_capacity_w(300.0)
+        self.assertEqual(prepared.cryocooler_power_by_node(), {1: expected})
+        self.assertEqual(prepared.heater_power_by_node(), {1: -expected})
         prepared.step_forward()
         self.assertLess(float(prepared.temperatures_K[0]), 300.0)
 
-        prepared.z[0] = 260.0
+        prepared.z[0] = 20.0
 
         self.assertEqual(prepared.cryocooler_power_by_node(), {1: 0.0})
         self.assertEqual(prepared.heater_power_by_node(), {1: 0.0})
+
+    def test_pt60_inverse_curve_expected_values_and_limits(self) -> None:
+        curve = PT60LiftCurve()
+        for temperature_k, expected_w in (
+            (27.669, 0.0),
+            (30.0, 4.3),
+            (40.0, 19.1),
+            (50.0, 30.8),
+            (60.0, 40.8),
+            (80.0, 58.0),
+            (100.0, 72.7),
+            (150.0, 103.9),
+        ):
+            self.assertAlmostEqual(curve.cooling_capacity_w(temperature_k), expected_w, delta=0.15)
+        self.assertEqual(curve.cooling_capacity_w(10.0), 0.0)
+        self.assertEqual(curve.cooling_capacity_w(curve.maximum_temperature_k + 100.0), 150.0)
+        self.assertEqual(curve.cooling_capacity_w(float("nan")), 0.0)
+        self.assertEqual(curve.cooling_capacity_w(float("inf")), 0.0)
+
+    def test_pt60_capacity_scale_and_cap(self) -> None:
+        base = PT60LiftCurve(max_power_w=150.0, capacity_scale=1.0).base_cooling_capacity_w(50.0)
+        scaled = PT60LiftCurve(max_power_w=150.0, capacity_scale=2.0)
+        capped = PT60LiftCurve(max_power_w=40.0, capacity_scale=10.0)
+
+        self.assertAlmostEqual(scaled.cooling_capacity_w(50.0), 2.0 * base, places=6)
+        self.assertEqual(capped.cooling_capacity_w(100.0), 40.0)
+        with self.assertRaises(ValueError):
+            PT60LiftCurve(max_power_w=float("nan"))
+        with self.assertRaises(ValueError):
+            PT60LiftCurve(capacity_scale=-1.0)
+
+    def test_one_physical_cryocooler_many_nodes_applies_one_total_capacity(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="one_physical_cooler_many_cells"))
+        node_ids = np.arange(1, 21, dtype=int)
+        for node_id in node_ids:
+            node = NodeProperties.with_material(int(node_id), (int(node_id), 0, 0), material="copper")
+            node.component_name = "PT60-A"
+            node.C_J_K = float(node_id)
+            node.initial_temperature_K = 50.0
+            node.has_cryocooler = True
+            model.add_node(node)
+        matrices = {
+            "node_ids": node_ids,
+            "C": np.arange(1.0, 21.0),
+            "L": np.zeros((20, 20)),
+            "G_rad": np.zeros(20),
+        }
+
+        prepared = prepare_simulation(model, matrices, SimulationParameters(use_ambient_radiation=False))
+        distributed = prepared.cryocooler_power_by_node()
+        expected_total = PT60LiftCurve().cooling_capacity_w(50.0)
+
+        self.assertEqual(len(prepared.cryocooler_devices), 1)
+        self.assertEqual(prepared.cryocooler_devices[0].weighting_basis, "thermal_capacitance")
+        self.assertAlmostEqual(sum(distributed.values()), expected_total, places=10)
+        self.assertAlmostEqual(distributed[1], expected_total / sum(range(1, 21)), places=10)
+        diagnostic = prepared.cryocooler_diagnostics()[0]
+        self.assertAlmostEqual(diagnostic["temperature_weight_sum"], 1.0)
+        self.assertAlmostEqual(diagnostic["distribution_weight_sum"], 1.0)
+        self.assertAlmostEqual(diagnostic["total_distributed_cooling_W"], expected_total, places=10)
+
+    def test_component_cryocooler_assignment_tags_all_component_cells_as_one_device(self) -> None:
+        try:
+            from graph_visualizer.app import _set_component_cryocooler_state
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="component_cooler_assignment"))
+        for node_id, component in ((1, "PT60-A"), (2, "PT60-A"), (3, "body")):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+            node.component_name = component
+            node.C_J_K = 10.0
+            node.initial_temperature_K = 50.0
+            model.add_node(node)
+        count, total = _set_component_cryocooler_state(model, "PT60-A", True)
+
+        self.assertEqual((count, total), (2, 2))
+        self.assertTrue(model.nodes[1].has_cryocooler)
+        self.assertTrue(model.nodes[2].has_cryocooler)
+        self.assertFalse(model.nodes[3].has_cryocooler)
+        self.assertEqual(model.nodes[1].cryocooler_id, "PT60-A")
+        matrices = {
+            "node_ids": np.array([1, 2, 3]),
+            "C": np.array([10.0, 10.0, 10.0]),
+            "L": np.zeros((3, 3)),
+            "G_rad": np.zeros(3),
+        }
+        prepared = prepare_simulation(model, matrices, SimulationParameters(use_ambient_radiation=False))
+
+        self.assertEqual(len(prepared.cryocooler_devices), 1)
+        self.assertEqual(prepared.cryocooler_devices[0].identifier, "PT60-A")
+        self.assertEqual(prepared.cryocooler_devices[0].source_node_ids, (1, 2))
+
+        count, total = _set_component_cryocooler_state(model, "PT60-A", False)
+        self.assertEqual((count, total), (2, 2))
+        self.assertFalse(model.nodes[1].has_cryocooler)
+        self.assertFalse(model.nodes[2].has_cryocooler)
+        self.assertEqual(model.nodes[1].cryocooler_id, "")
+
+    def test_apply_component_material_overrides_all_component_cells(self) -> None:
+        try:
+            from graph_visualizer.app import GraphVisualizerApp
+            from graph_visualizer.material_library import default_material_library
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+        library = default_material_library()
+        target = "6061-T6 Aluminum"
+        self.assertIn(target, library)
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="component_material_override"))
+        model.material_library = library
+        for node_id, component in ((1, "PT60-A"), (2, "PT60-A"), (3, "body")):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+            node.component_name = component
+            node.size_mm = (10.0, 10.0, 10.0)
+            model.add_node(node)
+
+        class Combo:
+            def __init__(self, text: str) -> None:
+                self._text = text
+
+            def currentText(self) -> str:
+                return self._text
+
+            def count(self) -> int:
+                return 1
+
+        # Minimal fakes so the handler's QProgressDialog path runs headlessly.
+        class FakeProgress:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def __getattr__(self, _name):
+                return lambda *a, **k: None
+
+        class FakeApplication:
+            @staticmethod
+            def processEvents() -> None:
+                pass
+
+        class FakeQtWidgets:
+            QProgressDialog = FakeProgress
+            QApplication = FakeApplication
+
+        class FakeQtCore:
+            class Qt:
+                WindowModal = 0
+
+        app = object.__new__(GraphVisualizerApp)
+        app.model = model
+        app.QtWidgets = FakeQtWidgets
+        app.QtCore = FakeQtCore
+        app.window = None
+        app.component_temp_combo = Combo("PT60-A")
+        app.component_material_combo = Combo(target)
+        app.selected_node_id = -1  # not a real node -> skip form reload
+        statuses: list[str] = []
+        app._mark_dirty = lambda: None
+        app._refresh_all = lambda **kwargs: None
+        app._sync_simulation_from_editor = lambda **kwargs: None
+        app._set_status = lambda message, error=False: statuses.append(message)
+
+        app.apply_component_material()
+
+        for node_id in (1, 2):
+            self.assertEqual(model.nodes[node_id].material, target)
+            self.assertAlmostEqual(model.nodes[node_id].k_W_mK, library[target]["k_W_mK"])
+            self.assertAlmostEqual(model.nodes[node_id].emissivity, library[target]["emissivity"])
+            self.assertGreater(model.nodes[node_id].mass_kg, 0.0)
+            self.assertAlmostEqual(
+                model.nodes[node_id].C_J_K,
+                model.nodes[node_id].mass_kg * library[target]["cp_J_kgK"],
+            )
+        # The untouched component keeps its original copper material.
+        self.assertEqual(model.nodes[3].material, "copper")
+        self.assertNotAlmostEqual(model.nodes[3].k_W_mK, library[target]["k_W_mK"])
+        self.assertTrue(any("PT60-A" in message and target in message for message in statuses))
+
+    def test_refresh_geometry_edges_for_nodes_matches_full_refresh(self) -> None:
+        try:
+            from graph_visualizer.material_library import default_material_library
+            from graph_visualizer.matrix_builder import (
+                refresh_geometry_edges,
+                refresh_geometry_edges_for_nodes,
+            )
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+        library = default_material_library()
+        target = "6061-T6 Aluminum"
+
+        def build_chain() -> ThermalGraphModel:
+            model = ThermalGraphModel(metadata=GraphMetadata(graph_name="scoped_edges"))
+            model.material_library = library
+            for node_id, component in ((1, "PT60-A"), (2, "PT60-A"), (3, "body")):
+                node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+                node.component_name = component
+                node.center_mm = (10.0 * node_id, 5.0, 5.0)  # adjacent 10 mm cubes sharing faces
+                node.size_mm = (10.0, 10.0, 10.0)
+                node.side_length_m = 0.01
+                model.add_node(node)
+            return model
+
+        # Scoped path: build edges once, change k on PT60-A, rescale in place.
+        scoped = build_chain()
+        refresh_geometry_edges(scoped)
+        self.assertTrue(scoped.edges)  # touching cells => geometry edges exist
+        for node_id in (1, 2):
+            scoped.nodes[node_id].k_W_mK = library[target]["k_W_mK"]
+        updated = refresh_geometry_edges_for_nodes(scoped, {1, 2})
+        self.assertGreater(updated, 0)
+
+        # Reference path: same k change, then a full rebuild from scratch.
+        reference = build_chain()
+        for node_id in (1, 2):
+            reference.nodes[node_id].k_W_mK = library[target]["k_W_mK"]
+        refresh_geometry_edges(reference)
+
+        self.assertEqual(set(scoped.edges), set(reference.edges))
+        for key, ref_edge in reference.edges.items():
+            self.assertAlmostEqual(
+                scoped.edges[key].Gij_W_K,
+                ref_edge.Gij_W_K,
+                places=6,
+                msg=f"conductance mismatch on edge {key}",
+            )
+
+    def test_cryocooler_contact_area_weights_tip_and_distribution(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="cooler_contact_weights"))
+        cooler = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        cooler.component_name = "PT60-A"
+        cooler.has_cryocooler = True
+        body_a = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        body_a.component_name = "body-a"
+        body_a.initial_temperature_K = 40.0
+        body_b = NodeProperties.with_material(3, (2, 0, 0), material="copper")
+        body_b.component_name = "body-b"
+        body_b.initial_temperature_K = 80.0
+        for node in (cooler, body_a, body_b):
+            node.C_J_K = 10.0
+            model.add_node(node)
+        model.set_edge(1, 2, 1.0, edge_type="inter_component_contact", shared_area_m2=1.0)
+        model.set_edge(1, 3, 1.0, edge_type="inter_component_contact", shared_area_m2=3.0)
+        matrices = {
+            "node_ids": np.array([1, 2, 3]),
+            "C": np.array([10.0, 10.0, 10.0]),
+            "L": np.zeros((3, 3)),
+            "G_rad": np.zeros(3),
+        }
+
+        prepared = prepare_simulation(model, matrices, SimulationParameters(use_ambient_radiation=False))
+        device = prepared.cryocooler_devices[0]
+        distributed = prepared.cryocooler_power_by_node()
+
+        self.assertEqual(device.receiving_node_ids, (2, 3))
+        self.assertEqual(device.weighting_basis, "contact_area")
+        np.testing.assert_allclose(device.temperature_weights, [0.25, 0.75])
+        expected_total = PT60LiftCurve().cooling_capacity_w(70.0)
+        self.assertAlmostEqual(distributed[2], 0.25 * expected_total, places=10)
+        self.assertAlmostEqual(distributed[3], 0.75 * expected_total, places=10)
+
+    def test_two_cryocoolers_are_evaluated_independently(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="two_coolers"))
+        for node_id, component, temperature in ((1, "PT60-A", 40.0), (2, "PT60-B", 80.0)):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
+            node.component_name = component
+            node.C_J_K = 10.0
+            node.initial_temperature_K = temperature
+            node.has_cryocooler = True
+            model.add_node(node)
+        matrices = {
+            "node_ids": np.array([1, 2]),
+            "C": np.array([10.0, 10.0]),
+            "L": np.zeros((2, 2)),
+            "G_rad": np.zeros(2),
+        }
+
+        prepared = prepare_simulation(model, matrices, SimulationParameters(use_ambient_radiation=False))
+        powers = prepared.cryocooler_power_by_node()
+
+        self.assertEqual(len(prepared.cryocooler_devices), 2)
+        self.assertAlmostEqual(powers[1], PT60LiftCurve().cooling_capacity_w(40.0), places=8)
+        self.assertAlmostEqual(powers[2], PT60LiftCurve().cooling_capacity_w(80.0), places=8)
+
+    def test_disabled_and_empty_cryocoolers_apply_zero_with_diagnostics(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="disabled_empty_coolers"))
+        disabled = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        disabled.component_name = "disabled"
+        disabled.has_cryocooler = True
+        disabled.cryocooler_enabled = False
+        disabled.initial_temperature_K = 100.0
+        empty = NodeProperties.with_material(2, (1, 0, 0), material="copper")
+        empty.component_name = "empty"
+        empty.has_cryocooler = True
+        empty.cryocooler_receiving_node_ids = [999]
+        empty.initial_temperature_K = 100.0
+        for node in (disabled, empty):
+            node.C_J_K = 10.0
+            model.add_node(node)
+        matrices = {
+            "node_ids": np.array([1, 2]),
+            "C": np.array([10.0, 10.0]),
+            "L": np.zeros((2, 2)),
+            "G_rad": np.zeros(2),
+        }
+
+        prepared = prepare_simulation(model, matrices, SimulationParameters(use_ambient_radiation=False))
+        powers = prepared.cryocooler_power_by_node()
+        diagnostics = {item["cryocooler_id"]: item for item in prepared.cryocooler_diagnostics()}
+
+        self.assertEqual(powers, {1: 0.0})
+        self.assertFalse(diagnostics["disabled"]["enabled"])
+        self.assertEqual(diagnostics["disabled"]["applied_cooling_W"], 0.0)
+        self.assertEqual(diagnostics["empty"]["receiving_node_count"], 0)
+        self.assertIn("no valid receiving nodes", diagnostics["empty"]["warning"])
+        self.assertTrue(any("no valid receiving nodes" in warning for warning in prepared.warnings))
 
     def test_mimo_controller_math_helpers(self) -> None:
         self.assertAlmostEqual(weighted_rms_error(np.array([2.0, 4.0]), np.array([1.0, 3.0])), np.sqrt(13.0))
@@ -1294,6 +1627,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
                 mimo_lambda_u=0.0,
                 drift_lpf_tau_s=0.0,
                 use_ambient_radiation=False,
+                mimo_passive_drift_from_measurement=False,  # deterministic model path for this unit test
             ),
         )
 
@@ -1439,10 +1773,12 @@ class GraphVisualizerModelTests(unittest.TestCase):
             SimulationParameters(
                 dt_s=1.0,
                 input_mode="heater_inputs",
-                Kp_cooler=1.0,
-                P_cooler_max=5.0,
-                T_cooler_setpoint=290.0,
+                cryocooler_max_power_W=5.0,
                 use_ambient_radiation=False,
+                # Model-based (oracle) passive drift: the feedforward knows the
+                # -0.5 K/s cooling load instantly. The measurement-based observer
+                # (the default) is reactive and is covered by its own test.
+                mimo_passive_drift_from_measurement=False,
             ),
         )
 
@@ -1457,6 +1793,187 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostics["feedforward_hold_power_W"][0], 5.0)
         prepared.step_forward()
         self.assertAlmostEqual(float(prepared.temperatures_K[0]), 300.0)
+
+    def test_refresh_cryocoolers_activates_cooling_without_reprepare(self) -> None:
+        # A cryocooler (re)assignment should take effect via a light device rebuild,
+        # NOT a full re-prepare: matrices/operators are preserved and cooling becomes
+        # active. (Full re-prepare on a large graph is the multi-second assignment lag.)
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="cryo_refresh"))
+        for nid, cx in ((1, 0.0), (2, 5.0)):
+            n = NodeProperties.with_material(nid, (nid, 0, 0), material="Copper")
+            n.center_mm = (cx, 0.0, 0.0)
+            n.size_mm = (5.0, 5.0, 5.0)
+            n.side_length_m = 0.005
+            n.mass_kg = n.rho_kg_m3 * (5.0e-3 ** 3)
+            n.C_J_K = n.mass_kg * n.cp_J_kgK
+            n.initial_temperature_K = 100.0
+            model.add_node(n)
+        model.set_edge(1, 2, 0.5)
+        matrices = build_matrices(model)
+        params = SimulationParameters(
+            dt_s=0.5, input_mode="heater_inputs", use_ambient_radiation=False, gpu_solver_enabled=False,
+        )
+        prepared = prepare_simulation(model, matrices, params)
+        prepared.reset()
+        self.assertEqual(len(prepared.cryocooler_devices), 0)  # no cooler yet
+        operator_before = prepared.A  # matrices/operators must survive the refresh
+        # Assign a cryocooler in-place and refresh (no re-prepare).
+        model.nodes[1].has_cryocooler = True
+        model.nodes[1].cryocooler_enabled = True
+        model.nodes[1].cryocooler_id = "CX"
+        prepared.refresh_cryocoolers()
+        self.assertGreater(len(prepared.cryocooler_devices), 0)
+        self.assertIs(prepared.A, operator_before)  # not re-prepared
+        start = float(prepared.temperatures_K[0])
+        for _ in range(60):
+            prepared.step_forward()
+        self.assertLess(float(prepared.temperatures_K[0]), start - 1.0)  # cooling is now active
+
+    def test_cryocooler_does_not_overshoot_below_floor_temperature(self) -> None:
+        # A cold cryocooler cell with temperature-dependent (tiny) capacity must not
+        # be driven below the cooler's floor temperature by the frozen explicit
+        # cooling power -- that overshoot used to send cells to negative kelvin and
+        # detonate the T^4 radiation term.
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="cryo_floor"))
+        for nid, cx in ((1, 0.0), (2, 5.0)):
+            n = NodeProperties.with_material(nid, (nid, 0, 0), material="Copper")
+            n.center_mm = (cx, 0.0, 0.0)
+            n.size_mm = (5.0, 5.0, 5.0)
+            n.side_length_m = 0.005
+            n.mass_kg = n.rho_kg_m3 * (5.0e-3 ** 3)
+            n.C_J_K = n.mass_kg * n.cp_J_kgK
+            n.initial_temperature_K = 40.0
+            n.emissivity = 0.1
+            n.is_exposed = True
+            if nid == 1:
+                n.has_cryocooler = True
+                n.cryocooler_enabled = True
+                n.cryocooler_id = "CX"
+            model.add_node(n)
+        model.set_edge(1, 2, 0.5)
+        matrices = build_matrices(model)
+        params = SimulationParameters(
+            dt_s=0.2, input_mode="heater_inputs", use_ambient_radiation=True, T_env_K=4.0,
+            use_temperature_dependent_properties=True, gpu_solver_enabled=False,
+        )
+        prepared = prepare_simulation(model, matrices, params)
+        prepared.reset()
+        for _ in range(200):
+            prepared.step_forward()
+        temperatures = np.asarray(prepared.temperatures_K, dtype=float)
+        self.assertTrue(np.all(np.isfinite(temperatures)))
+        self.assertGreater(float(np.min(temperatures)), 0.0)  # never driven negative
+        floor = float(prepared.cryocooler_lift_curve.minimum_temperature_k)
+        self.assertGreaterEqual(float(np.min(temperatures)), floor - 0.5)  # not below the cooler's floor
+
+    def test_implicit_step_is_physical_rejects_garbage(self) -> None:
+        prev = np.array([300.0, 100.0, 4.0])
+        self.assertTrue(PreparedSimulation._implicit_step_is_physical(prev, prev + 1.0))
+        self.assertFalse(PreparedSimulation._implicit_step_is_physical(prev, np.array([np.nan, 1.0, 1.0])))
+        self.assertFalse(PreparedSimulation._implicit_step_is_physical(prev, np.array([300.0, 100.0, -50.0])))
+        # The 1e7/1e9-K blowup signature: an implausibly large single-step jump.
+        self.assertFalse(PreparedSimulation._implicit_step_is_physical(prev, prev + 1.0e8))
+
+    def _stub_prepared_for_stepper(self, stepper):
+        temps = np.array([300.0, 100.0, 5.0])
+        prepared = PreparedSimulation(
+            node_ids=np.array([1, 2, 3], dtype=int),
+            z=np.concatenate([temps, np.array([1.0])]),
+            initial_temperatures_K=temps,
+            params=SimulationParameters(),
+        )
+        prepared.sparse_implicit_stepper = stepper
+        prepared.gpu_implicit_stepper = None
+        return prepared, temps
+
+    def test_implicit_step_subdivides_until_physical(self) -> None:
+        # Mimics stiff-cryo behaviour: the solver returns garbage at the coarse
+        # substep count and only a stable result once the step is subdivided enough.
+        class _Stub:
+            def __init__(self) -> None:
+                self.substep_calls: list[int] = []
+
+            def step(self, temps, source, min_substeps=1):
+                self.substep_calls.append(int(min_substeps))
+                if int(min_substeps) >= 4:
+                    return np.asarray(temps, dtype=float).copy()
+                return np.asarray(temps, dtype=float) + 1.0e9
+
+        stub = _Stub()
+        prepared, temps = self._stub_prepared_for_stepper(stub)
+        result = prepared._run_implicit_step(temps, np.zeros_like(temps))
+        np.testing.assert_allclose(result, temps)  # applied the stable solve, not the garbage
+        self.assertEqual(stub.substep_calls[0], 1)  # started at the adaptive count
+        self.assertGreaterEqual(max(stub.substep_calls), 4)  # escalated subdivision to recover
+
+    def test_implicit_step_falls_back_gracefully_when_unrecoverable(self) -> None:
+        # If subdivision never recovers, the step must NOT raise (that would regress
+        # vs. old behaviour) -- it applies a best-effort finite result and warns.
+        class _AlwaysUnrecoverable:
+            def __init__(self) -> None:
+                self.attempts = 0
+
+            def step(self, temps, source, min_substeps=1):
+                self.attempts += 1
+                return np.asarray(temps, dtype=float) + 5.0e8  # finite but never physical
+
+        stub = _AlwaysUnrecoverable()
+        prepared, temps = self._stub_prepared_for_stepper(stub)
+        result = prepared._run_implicit_step(temps, np.zeros_like(temps))
+        self.assertTrue(np.all(np.isfinite(result)))  # finite best-effort, no raise
+        self.assertGreater(stub.attempts, 1)  # it did try to subdivide first
+        self.assertTrue(any("best-effort" in w for w in prepared.warnings))
+
+    def test_mimo_measurement_observer_holds_against_cooling_load_over_steps(self) -> None:
+        # The default measurement-based disturbance observer cannot know the load
+        # on the first step (no history), but it converges: after a few steps the
+        # feedforward learns the passive cooling and holds the temperature.
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_observer_hold"))
+        node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        node.C_J_K = 10.0
+        node.initial_temperature_K = 300.0
+        node.is_heater = True
+        node.is_sensor = True
+        node.has_cryocooler = True
+        node.sensor_connected_node_ids = [1]
+        node.power_deposition_node_ids = [1]
+        node.power_deposition_weights = [1.0]
+        node.heater.heater_max_power_W = 20.0
+        node.heater_control.mode = "mimo"
+        node.controller_setpoint_K = 300.0
+        node.controller_kp_coarse = 0.0
+        node.controller_ki_coarse = 0.0
+        node.controller_kd_coarse = 0.0
+        model.add_node(node)
+        matrices = {
+            "node_ids": np.array([1], dtype=int),
+            "C": np.array([10.0]),
+            "L": np.zeros((1, 1)),
+            "G_rad": np.array([0.0]),
+        }
+        prepared = prepare_simulation(
+            model,
+            matrices,
+            SimulationParameters(
+                dt_s=1.0,
+                input_mode="heater_inputs",
+                cryocooler_max_power_W=5.0,
+                use_ambient_radiation=False,
+                drift_lpf_tau_s=0.0,  # no observer smoothing lag for a clean check
+            ),
+        )
+        prepared.step_forward()
+        after_first = float(prepared.temperatures_K[0])
+        for _ in range(20):
+            prepared.step_forward()
+        after_many = float(prepared.temperatures_K[0])
+        # With zero PID gains the feedforward regulates the RATE, not the setpoint:
+        # step 1 is uncompensated (observer has no history) so the temperature
+        # droops ~0.5 K, then the observer learns the 5 W load and arrests further
+        # cooling -- the actuator settles at 5 W and the temperature stops falling.
+        self.assertAlmostEqual(prepared.heater_actuator_power_by_node()[1], 5.0, places=2)
+        self.assertGreater(after_many, 299.0)  # cooling was arrested, not a runaway
+        self.assertAlmostEqual(after_many, after_first, places=2)  # holding steady
 
     def test_mimo_feedforward_uses_saved_g_ctrl_gain(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_feedforward_g_ctrl"))
@@ -1483,10 +2000,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
             SimulationParameters(
                 dt_s=1.0,
                 input_mode="heater_inputs",
-                Kp_cooler=1.0,
-                P_cooler_max=5.0,
-                T_cooler_setpoint=290.0,
+                cryocooler_max_power_W=5.0,
                 use_ambient_radiation=False,
+                mimo_passive_drift_from_measurement=False,  # deterministic model path for this unit test
             ),
         )
 
@@ -1659,6 +2175,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
             input_mode="heater_inputs",
             mimo_lambda_u=0.0,
             use_ambient_radiation=False,
+            mimo_passive_drift_from_measurement=False,  # deterministic model path for this unit test
         )
 
         prepared = prepare_simulation(model, matrices, params)
@@ -1667,8 +2184,10 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(prepared.controller_integrators[1], 10.0)
         self.assertAlmostEqual(prepared.heater_power_by_node()[1], 0.25)
 
-    def test_mimo_fractional_integral_order_scales_rate_command(self) -> None:
-        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_fractional_integrator"))
+    def test_mimo_integral_is_standard_order_and_ignores_fractional_order(self) -> None:
+        # The integral is now standard (integer-order) recursive: I_k = I_{k-1} +
+        # e_k * dt. Setting the (deprecated) fractional order must have no effect.
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_standard_integrator"))
         node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
         node.C_J_K = 10.0
         node.initial_temperature_K = 290.0
@@ -1678,7 +2197,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 300.0
         node.controller_ki_coarse = 1.0
-        node.controller_lambda_order = 0.5
         model.add_node(node)
         model.set_controller_gain(1, 1, 1.0)
         matrices = {
@@ -1701,8 +2219,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(prepared.heater_power_by_node()[1], 0.25)
         prepared.step_forward()
 
-        self.assertAlmostEqual(prepared.controller_integrators[1], 20.0)
-        self.assertEqual(prepared.controller_error_history[1], (10.0,))
+        # Standard integral: e=10, dt=4 -> I = 40 (NOT the fractional 20).
+        self.assertAlmostEqual(prepared.controller_integrators[1], 40.0)
         self.assertAlmostEqual(prepared.controller_last_power_by_heater[1], 0.25)
 
     def test_mimo_integral_can_go_negative_above_setpoint(self) -> None:
@@ -1736,10 +2254,11 @@ class GraphVisualizerModelTests(unittest.TestCase):
                 use_ambient_radiation=False,
             ),
         )
-        prepared.controller_integrators[1] = 100.0
 
         prepared.step_forward()
 
+        # Above setpoint (error = -10) the recursive integral goes negative:
+        # I = 0 + (-10) * 1 = -10.
         self.assertAlmostEqual(prepared.controller_integrators[1], -10.0)
         self.assertAlmostEqual(prepared.controller_last_power_by_heater[1], 0.0, places=8)
 
@@ -1810,8 +2329,10 @@ class GraphVisualizerModelTests(unittest.TestCase):
                 use_ambient_radiation=False,
             ),
         )
-        prepared.controller_error_history[1] = (10.0,)
+        prepared.controller_error_prev[1] = 10.0
 
+        # error now = 310 - 305 = 5; backward-difference derivative = (5 - 10)/1 =
+        # -5. kp*5 + kd*(-5) = 0 -> the derivative exactly cancels proportional.
         self.assertEqual(prepared.heater_power_by_node(), {1: 0.0})
 
     def test_mimo_controller_clears_fractional_memory_on_mode_change(self) -> None:
@@ -1847,12 +2368,15 @@ class GraphVisualizerModelTests(unittest.TestCase):
             ),
         )
         prepared.controller_mode = "coarse"
-        prepared.controller_error_history[1] = (2.0,)
+        # Stale integrator + previous-error carried from coarse mode.
+        prepared.controller_integrators[1] = 5.0
+        prepared.controller_error_prev[1] = 2.0
 
         prepared.step_forward()
 
         self.assertEqual(prepared.controller_mode, "hold")
-        self.assertEqual(prepared.controller_error_history[1], (10.0,))
+        # Mode change resets the recursive state: integrator starts from 0, not the
+        # stale 5.0, so I = 0 + 10 * 1 = 10 (the stale value was cleared).
         self.assertAlmostEqual(prepared.controller_integrators[1], 10.0)
         self.assertAlmostEqual(prepared.controller_last_power_by_heater[1], 0.25)
 
@@ -1884,6 +2408,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
                 mimo_lambda_u=0.0,
                 mimo_rho_du=1.0,
                 use_ambient_radiation=False,
+                mimo_passive_drift_from_measurement=False,  # deterministic model path for this unit test
             ),
         )
         prepared.controller_mode = "coarse"
@@ -1894,6 +2419,276 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(prepared.controller_mode, "hold")
         self.assertGreater(prepared.controller_last_power_by_heater[1], 1.9)
         self.assertLess(prepared.controller_last_power_by_heater[1], 4.0)
+
+    def test_design_modal_controller_pipeline_produces_loadable_artifact(self) -> None:
+        import os
+        import tempfile
+
+        from graph_visualizer.matrix_builder import build_matrices, refresh_geometry_edges
+        from graph_visualizer.models import HeaterProperties
+        from graph_visualizer.modal_reduction import design_modal_controller
+        from graph_visualizer.simulation_model import STEFAN_BOLTZMANN_W_M2K4
+
+        # Small radiating copper rod + a heater depositing into it and a sensor
+        # reading two cells -- the same shape as the analyze_plant_modes self-test.
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="modal_pipeline"))
+        for i in range(6):
+            node = NodeProperties.with_material(i + 1, (i, 0, 0), material="Copper")
+            node.center_mm = (i * 10.0, 0.0, 0.0)
+            node.size_mm = (10.0, 10.0, 10.0)
+            node.side_length_m = 0.01
+            node.mass_kg = node.rho_kg_m3 * 1.0e-6
+            node.C_J_K = node.mass_kg * node.cp_J_kgK
+            node.initial_temperature_K = 150.0
+            node.emissivity = 0.8
+            node.is_exposed = True
+            node.radiating_area_m2 = 5.0e-4
+            node.G_rad_W_K = 4.0 * node.emissivity * STEFAN_BOLTZMANN_W_M2K4 * node.radiating_area_m2 * 150.0**3
+            model.add_node(node)
+        sensor = model.nodes[3]
+        sensor.is_sensor = True
+        sensor.readout_node_ids = [3, 4]
+        sensor.readout_weights = [1.0, 1.0]
+        sensor.controller_setpoint_K = 152.0
+        heater = NodeProperties.with_material(100, (-1, 0, 0), material="Not assigned")
+        heater.component_name = "HEATER"
+        heater.center_mm = (-50.0, 0.0, 0.0)
+        heater.size_mm = (1.0, 1.0, 1.0)
+        heater.mass_kg = 1.0e-9
+        heater.C_J_K = 1.0e-6
+        heater.is_heater = True
+        heater.heater = HeaterProperties(heater_id=100, heater_min_power_W=0.0, heater_max_power_W=50.0, heater_efficiency=1.0)
+        heater.power_deposition_node_ids = [1]
+        heater.power_deposition_weights = [1.0]
+        heater.assigned_sensor_id = 3
+        model.add_node(heater)
+        refresh_geometry_edges(model)
+        matrices = build_matrices(model)
+
+        out = os.path.join(tempfile.mkdtemp(), "modal_controller.npz")
+        result = design_modal_controller(
+            matrices["C"], matrices["L"], matrices["G_rad"], matrices["node_ids"], model,
+            T_op_K=150.0, n_modes=5, r=3, effort_weight=1.0, integral_gain=0.05,
+            out_path=out, graph_name="modal_pipeline",
+        )
+        self.assertTrue(os.path.exists(out))
+        self.assertEqual(result.n_heaters, 1)
+        self.assertEqual(result.n_controlled, 1)
+        self.assertGreaterEqual(result.reduced_order, 1)
+        self.assertTrue(result.reduced_stable)
+
+        # The saved artifact must load + run through the modal-LQR controller path.
+        params = SimulationParameters(
+            dt_s=1.0, input_mode="heater_inputs", gpu_solver_enabled=False,
+            use_ambient_radiation=True, T_env_K=100.0, cryocooler_enabled=False,
+            mimo_controller_scheme="modal_lqr", modal_controller_path=out, modal_integral_gain=0.05,
+        )
+        prepared = prepare_simulation(model, matrices, params)
+        prepared.reset()
+        self.assertTrue(prepared._modal_scheme_active())
+        for _ in range(10):
+            prepared.step_forward()
+        self.assertEqual(prepared.controller_allocator_diagnostics.get("controller_scheme"), "modal_lqr")
+
+    def test_build_modal_controller_panel_wires_result_into_scheme(self) -> None:
+        import os
+
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        from graph_visualizer.matrix_builder import build_matrices, refresh_geometry_edges
+        from graph_visualizer.models import HeaterProperties
+        from graph_visualizer.simulation_model import STEFAN_BOLTZMANN_W_M2K4
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="modal_panel"))
+        for i in range(6):
+            node = NodeProperties.with_material(i + 1, (i, 0, 0), material="Copper")
+            node.center_mm = (i * 10.0, 0.0, 0.0)
+            node.size_mm = (10.0, 10.0, 10.0)
+            node.side_length_m = 0.01
+            node.mass_kg = node.rho_kg_m3 * 1.0e-6
+            node.C_J_K = node.mass_kg * node.cp_J_kgK
+            node.initial_temperature_K = 150.0
+            node.emissivity = 0.8
+            node.is_exposed = True
+            node.radiating_area_m2 = 5.0e-4
+            node.G_rad_W_K = 4.0 * node.emissivity * STEFAN_BOLTZMANN_W_M2K4 * node.radiating_area_m2 * 150.0**3
+            model.add_node(node)
+        sensor = model.nodes[3]
+        sensor.is_sensor = True
+        sensor.readout_node_ids = [3, 4]
+        sensor.readout_weights = [1.0, 1.0]
+        heater = NodeProperties.with_material(100, (-1, 0, 0), material="Not assigned")
+        heater.center_mm = (-50.0, 0.0, 0.0)
+        heater.size_mm = (1.0, 1.0, 1.0)
+        heater.mass_kg = 1.0e-9
+        heater.C_J_K = 1.0e-6
+        heater.is_heater = True
+        heater.heater = HeaterProperties(heater_id=100, heater_min_power_W=0.0, heater_max_power_W=50.0, heater_efficiency=1.0)
+        heater.power_deposition_node_ids = [1]
+        heater.power_deposition_weights = [1.0]
+        heater.assigned_sensor_id = 3
+        model.add_node(heater)
+        refresh_geometry_edges(model)
+
+        class Spin:
+            def __init__(self, value: float) -> None:
+                self._value = value
+
+            def value(self) -> float:
+                return self._value
+
+        class Widget:
+            def setEnabled(self, *a) -> None:
+                pass
+
+            def setText(self, *a) -> None:
+                pass
+
+            def blockSignals(self, *a) -> None:
+                pass
+
+            def setCurrentText(self, *a) -> None:
+                pass
+
+            def currentText(self) -> str:
+                return ""
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.model = model
+        tab.matrices = build_matrices(model)
+        tab.folder = None  # -> artifact written to a temp path
+        tab.prepared = None
+        tab.simulation_future = None
+        tab.modal_design_future = None
+        tab.sys_id_state = None
+        tab.simulation_executor = None  # run the build inline (synchronous) for the test
+        tab._modal_design_progress = {"message": ""}
+        tab.params = SimulationParameters(input_mode="heater_inputs", mimo_controller_scheme="pid_qp")
+        tab._controller_scheme_labels = {"pid_qp": "PID + QP allocator", "modal_lqr": "Modal LQR (reduced-model)"}
+        tab.controller_scheme_combo = Widget()
+        tab.modal_temp_spin = Spin(150.0)
+        tab.modal_modes_spin = Spin(5)
+        tab.modal_order_spin = Spin(3)
+        tab.modal_effort_spin = Spin(1.0)
+        tab.modal_integral_spin = Spin(0.05)
+        tab.modal_design_button = Widget()
+        tab.modal_design_status_label = Widget()
+        sync_calls: list[bool] = []
+        tab.sync_from_editor = lambda m, f, reinitialize=False: sync_calls.append(reinitialize)
+        tab._status = lambda message, error=False: None
+
+        tab.build_modal_controller()
+
+        # The freshly-built artifact is auto-wired into the modal-LQR scheme.
+        self.assertEqual(tab.params.mimo_controller_scheme, "modal_lqr")
+        self.assertTrue(tab.params.modal_controller_path.endswith("modal_controller.npz"))
+        self.assertTrue(os.path.exists(tab.params.modal_controller_path))
+        self.assertAlmostEqual(tab.params.modal_integral_gain, 0.05)
+        # The controller actually loads it onto this graph (no fallback).
+        matrices = build_matrices(model)
+        prepared = prepare_simulation(model, matrices, tab.params)
+        prepared.reset()
+        self.assertTrue(prepared._modal_scheme_active())
+
+    def test_modal_lqr_scheme_runs_and_drives_heater(self) -> None:
+        import os
+        import tempfile
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="modal_lqr_wiring"))
+        # One node that is both heater and sensor (self-deposition) so the test is
+        # not defeated by geometry-based deposition refresh, mirroring the MIMO tests.
+        node = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        node.C_J_K = 10.0
+        node.initial_temperature_K = 300.0
+        node.is_sensor = True
+        node.is_heater = True
+        node.readout_node_ids = [1]
+        node.readout_weights = [1.0]
+        node.sensor_connected_node_ids = [1]
+        node.power_deposition_node_ids = [1]
+        node.power_deposition_weights = [1.0]
+        node.heater.heater_max_power_W = 50.0
+        node.heater.heater_efficiency = 1.0
+        node.controller_setpoint_K = 310.0
+        node.assigned_sensor_id = 1
+        model.add_node(node)
+        matrices = {
+            "node_ids": np.array([1], dtype=int),
+            "C": np.array([10.0], dtype=float),
+            "L": np.zeros((1, 1), dtype=float),
+            "G_rad": np.array([0.0], dtype=float),
+        }
+        # Hand-built modal controller: pure feedforward (u_ff = Nu * r_sp) + integral,
+        # enough to exercise the whole modal path (estimate -> command -> deposit).
+        path = os.path.join(tempfile.mkdtemp(), "modal_controller.npz")
+        np.savez(
+            path, K=np.array([[0.0]]), E_reg=np.array([[1.0]]), Nx=np.array([[0.0]]),
+            Nu=np.array([[1.0]]), heater_ids=np.array([1]), sensor_ids=np.array([1]),
+            monitor=np.array([False]), T_op_K=300.0, integral_gain=0.05, r=1, graph="test",
+        )
+        params = SimulationParameters(
+            dt_s=1.0, input_mode="heater_inputs", gpu_solver_enabled=False,
+            use_ambient_radiation=False, cryocooler_enabled=False,
+            mimo_controller_scheme="modal_lqr", modal_controller_path=path, modal_integral_gain=0.05,
+        )
+        prepared = prepare_simulation(model, matrices, params)
+        prepared.reset()
+        self.assertTrue(prepared._modal_scheme_active())  # modal path selected + artifact loaded
+
+        for _ in range(8):
+            prepared.step_forward()
+
+        self.assertEqual(prepared.controller_allocator_diagnostics.get("controller_scheme"), "modal_lqr")
+        self.assertGreater(prepared.heater_actuator_power_by_node().get(1, 0.0), 0.0)  # heater is commanded
+        self.assertGreater(float(prepared.temperatures_K[0]), 300.5)  # body warmed toward the setpoint
+
+    def test_dc_gain_feedforward_maps_errors_across_orderings(self) -> None:
+        # The DC-gain feedforward must map controlled-sensor errors to the right
+        # heaters even when the active sensor/heater sets differ in order/subset
+        # from the artifact's. u_ff = dc_pinv @ (errors over the controlled sensors).
+        from graph_visualizer.simulation_model import PreparedSimulation
+
+        prepared = object.__new__(PreparedSimulation)
+        dc_pinv = np.array([[2.0, 0.0], [0.0, 3.0]], dtype=float)  # 2 heaters x 2 controlled sensors
+        prepared._load_modal_controller = lambda: {  # type: ignore[method-assign]
+            "dc_pinv": dc_pinv,
+            "heater_ids": [10, 20],
+            "sensor_ids": [1, 2, 3],  # sensor 3 is monitor-only
+            "ctrl_idx": np.array([0, 1]),
+        }
+        # Active sensors [1, 2] with errors [0.1, 0.2]; active heaters given reversed.
+        u = prepared._dc_gain_feedforward([1, 2], [20, 10], np.array([0.1, 0.2]))
+        # cmd for artifact heaters [10, 20] = dc_pinv @ [0.1, 0.2] = [0.2, 0.6];
+        # returned in the ACTIVE heater order [20, 10] -> [0.6, 0.2].
+        self.assertTrue(np.allclose(u, [0.6, 0.2]))
+        # No artifact -> None (caller keeps existing behavior).
+        prepared._load_modal_controller = lambda: None  # type: ignore[method-assign]
+        self.assertIsNone(prepared._dc_gain_feedforward([1, 2], [20, 10], np.array([0.1, 0.2])))
+
+    def test_modal_lqr_falls_back_when_artifact_missing(self) -> None:
+        # Selecting the modal scheme with no artifact must NOT run the modal path
+        # (falls back to the standard controller).
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="modal_lqr_fallback"))
+        body = NodeProperties.with_material(1, (0, 0, 0), material="copper")
+        body.C_J_K = 10.0
+        body.initial_temperature_K = 300.0
+        body.is_sensor = True
+        model.add_node(body)
+        matrices = {
+            "node_ids": np.array([1], dtype=int),
+            "C": np.array([10.0], dtype=float),
+            "L": np.zeros((1, 1), dtype=float),
+            "G_rad": np.array([0.0], dtype=float),
+        }
+        params = SimulationParameters(
+            dt_s=1.0, input_mode="heater_inputs", gpu_solver_enabled=False,
+            mimo_controller_scheme="modal_lqr", modal_controller_path="",
+        )
+        prepared = prepare_simulation(model, matrices, params)
+        self.assertFalse(prepared._modal_scheme_active())
 
     def test_disabled_mimo_controller_does_not_use_manual_fallback_power_for_sys_id(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_sys_id_baseline"))
@@ -1937,6 +2732,12 @@ class GraphVisualizerModelTests(unittest.TestCase):
                 "has_heat_sink": True,
                 "heat_sink": {"heat_sink_id": 44, "heat_sink_power_W": 7.5},
                 "has_cryocooler": True,
+                "cryocooler": {
+                    "id": "PT60-A",
+                    "enabled": False,
+                    "receiving_node_ids": [4],
+                    "contact_areas_m2": [0.25],
+                },
             }
         )
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="cryocooler_round_trip"))
@@ -1948,6 +2749,10 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertFalse(hasattr(restored.nodes[4], "has_heat_sink"))
         self.assertNotIn("has_heat_sink", matrices)
         self.assertTrue(restored.nodes[4].has_cryocooler)
+        self.assertEqual(restored.nodes[4].cryocooler_id, "PT60-A")
+        self.assertFalse(restored.nodes[4].cryocooler_enabled)
+        self.assertEqual(restored.nodes[4].cryocooler_receiving_node_ids, [4])
+        self.assertEqual(restored.nodes[4].cryocooler_contact_areas_m2, [0.25])
         self.assertTrue(bool(matrices["has_cryocooler"][0]))
 
     def test_heater_node_metadata_defines_role_without_tags(self) -> None:
@@ -2171,6 +2976,85 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(widget.depth_focus_axis, "y")
         self.assertAlmostEqual(widget.depth_focus_fraction, 0.25)
         self.assertAlmostEqual(widget.depth_focus_width, 0.4)
+
+    def test_cross_section_setter_updates_axis_and_fraction(self) -> None:
+        try:
+            from graph_visualizer.pyvista_widget import GraphPyVistaWidget
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"PyVista widget dependency unavailable: {exc}")
+        widget = object.__new__(GraphPyVistaWidget)
+        widget.cross_section_enabled = False
+        widget.cross_section_axis = "z"
+        widget.cross_section_fraction = 0.5
+        apply_calls = []
+        widget._apply_cross_section_to_scene = lambda: apply_calls.append(True)
+        widget.safe_render = lambda: True
+
+        widget.set_cross_section(True, 1.5, axis="Y", render=False)
+
+        self.assertTrue(widget.cross_section_enabled)
+        self.assertEqual(widget.cross_section_axis, "y")
+        self.assertAlmostEqual(widget.cross_section_fraction, 1.0)
+        self.assertEqual(apply_calls, [True])
+
+    def test_cross_section_coordinate_and_kept_side_follow_selected_axis(self) -> None:
+        try:
+            from graph_visualizer.pyvista_widget import GraphPyVistaWidget
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"PyVista widget dependency unavailable: {exc}")
+        widget = object.__new__(GraphPyVistaWidget)
+        widget.cross_section_enabled = True
+        widget.cross_section_axis = "y"
+        widget.cross_section_fraction = 0.25
+        widget._last_cross_section_bounds = (0.0, 10.0, -20.0, 20.0, 100.0, 200.0)
+
+        self.assertAlmostEqual(widget.cross_section_coordinate(), -10.0)
+        self.assertTrue(widget._cross_section_keeps_point(np.array([0.0, -10.0, 0.0])))
+        self.assertTrue(widget._cross_section_keeps_point(np.array([0.0, 5.0, 0.0])))
+        self.assertFalse(widget._cross_section_keeps_point(np.array([0.0, -15.0, 0.0])))
+
+    def test_cross_section_adds_and_removes_mapper_clipping_plane(self) -> None:
+        try:
+            from graph_visualizer.pyvista_widget import GraphPyVistaWidget
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"PyVista widget dependency unavailable: {exc}")
+
+        class Mapper:
+            def __init__(self) -> None:
+                self.added = []
+                self.removed = []
+                self.modified = 0
+
+            def AddClippingPlane(self, plane) -> None:
+                self.added.append(plane)
+
+            def RemoveClippingPlane(self, plane) -> None:
+                self.removed.append(plane)
+
+            def Modified(self) -> None:
+                self.modified += 1
+
+        class Actor:
+            def __init__(self, mapper) -> None:
+                self.mapper = mapper
+
+            def GetMapper(self):
+                return self.mapper
+
+        widget = object.__new__(GraphPyVistaWidget)
+        widget.cross_section_enabled = True
+        widget._cross_section_plane = object()
+        widget._cross_section_mapper_keys = set()
+        mapper = Mapper()
+        actor = Actor(mapper)
+
+        widget._apply_cross_section_to_actor(actor)
+        widget._apply_cross_section_to_actor(actor)
+        widget._remove_cross_section_from_actor(actor)
+
+        self.assertEqual(mapper.added, [widget._cross_section_plane])
+        self.assertEqual(mapper.removed, [widget._cross_section_plane])
+        self.assertGreaterEqual(mapper.modified, 2)
 
     def test_role_interface_overlays_batch_outlines_by_style(self) -> None:
         import sys
@@ -2550,6 +3434,222 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertTrue(np.allclose(tab.matrices["C"], np.array([20.0, 20.0], dtype=float)))
         self.assertTrue(np.allclose(tab.matrices["G_rad"], np.array([1.0e-8, 1.0e-8], dtype=float)))
 
+    def test_set_all_initial_temperatures_updates_model_and_prepared(self) -> None:
+        import sys
+        import types
+
+        heat_tab_module_name = "graph_visualizer.heat_transfer_simulation_tab"
+        pyvista_module_name = "graph_visualizer.pyvista_widget"
+        qtpy_module_name = "qtpy"
+        previous_heat_tab = sys.modules.pop(heat_tab_module_name, None)
+        previous_pyvista = sys.modules.get(pyvista_module_name)
+        previous_qtpy = sys.modules.get(qtpy_module_name)
+        pyvista_stub = types.ModuleType(pyvista_module_name)
+        pyvista_stub.GraphPyVistaWidget = object
+        sys.modules[pyvista_module_name] = pyvista_stub
+        qtpy_stub = types.ModuleType(qtpy_module_name)
+        qtpy_stub.QtGui = types.SimpleNamespace()
+        sys.modules[qtpy_module_name] = qtpy_stub
+        try:
+            from graph_visualizer import heat_transfer_simulation_tab as heat_tab_module
+            HeatTransferSimulationTab = heat_tab_module.HeatTransferSimulationTab
+        finally:
+            sys.modules.pop(heat_tab_module_name, None)
+            if previous_heat_tab is not None:
+                sys.modules[heat_tab_module_name] = previous_heat_tab
+            if previous_pyvista is not None:
+                sys.modules[pyvista_module_name] = previous_pyvista
+            else:
+                sys.modules.pop(pyvista_module_name, None)
+            if previous_qtpy is not None:
+                sys.modules[qtpy_module_name] = previous_qtpy
+            else:
+                sys.modules.pop(qtpy_module_name, None)
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="init_temp_all"))
+        for nid in (1, 2, 3):
+            node = NodeProperties.with_material(nid, (nid, 0, 0), material="copper")
+            node.center_mm = (float(nid), 0.0, 0.0)
+            node.size_mm = (1.0, 1.0, 1.0)
+            node.C_J_K = 10.0
+            node.initial_temperature_K = 293.15
+            model.add_node(node)
+        matrices = {
+            "node_ids": np.array([1, 2, 3], dtype=int),
+            "C": np.array([10.0, 10.0, 10.0], dtype=float),
+            "L": np.zeros((3, 3), dtype=float),
+            "G_rad": np.array([0.0, 0.0, 0.0], dtype=float),
+            "initial_temperature_K": np.array([293.15, 293.15, 293.15], dtype=float),
+        }
+        prepared = prepare_simulation(
+            model, matrices, SimulationParameters(dt_s=1.0, input_mode="zero", gpu_solver_enabled=False)
+        )
+        prepared.reset()
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.model = model
+        tab.matrices = matrices
+        tab.prepared = prepared
+        tab.temperature_by_node = {}
+        tab.initial_temperature_all_spin = types.SimpleNamespace(value=lambda: 50.0)
+        tab._simulation_worker_active = lambda: False
+        tab.use_current_graph = lambda: None
+        for stub in ("_reset_time_slider", "_refresh_initialized_view", "_refresh_stats", "_status"):
+            setattr(tab, stub, lambda *a, **k: None)
+
+        tab._set_all_initial_temperatures()
+
+        # every component's stored initial temperature is updated
+        self.assertTrue(all(abs(n.initial_temperature_K - 50.0) < 1e-9 for n in model.nodes.values()))
+        # cached matrices vector stays consistent
+        self.assertTrue(np.allclose(matrices["initial_temperature_K"], 50.0))
+        # applied live to the prepared sim: both the reset target and current state
+        self.assertTrue(np.allclose(prepared.initial_temperatures_K, 50.0))
+        self.assertTrue(np.allclose(prepared.temperatures_K, 50.0))
+
+    def test_set_all_initial_temperatures_while_running_stops_and_forces_reinit(self) -> None:
+        import sys
+        import types
+
+        heat_tab_module_name = "graph_visualizer.heat_transfer_simulation_tab"
+        pyvista_module_name = "graph_visualizer.pyvista_widget"
+        qtpy_module_name = "qtpy"
+        previous_heat_tab = sys.modules.pop(heat_tab_module_name, None)
+        previous_pyvista = sys.modules.get(pyvista_module_name)
+        previous_qtpy = sys.modules.get(qtpy_module_name)
+        pyvista_stub = types.ModuleType(pyvista_module_name)
+        pyvista_stub.GraphPyVistaWidget = object
+        sys.modules[pyvista_module_name] = pyvista_stub
+        qtpy_stub = types.ModuleType(qtpy_module_name)
+        qtpy_stub.QtGui = types.SimpleNamespace()
+        sys.modules[qtpy_module_name] = qtpy_stub
+        try:
+            from graph_visualizer import heat_transfer_simulation_tab as heat_tab_module
+            HeatTransferSimulationTab = heat_tab_module.HeatTransferSimulationTab
+        finally:
+            sys.modules.pop(heat_tab_module_name, None)
+            if previous_heat_tab is not None:
+                sys.modules[heat_tab_module_name] = previous_heat_tab
+            if previous_pyvista is not None:
+                sys.modules[pyvista_module_name] = previous_pyvista
+            else:
+                sys.modules.pop(pyvista_module_name, None)
+            if previous_qtpy is not None:
+                sys.modules[qtpy_module_name] = previous_qtpy
+            else:
+                sys.modules.pop(qtpy_module_name, None)
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="init_temp_running"))
+        for nid in (1, 2, 3):
+            node = NodeProperties.with_material(nid, (nid, 0, 0), material="copper")
+            node.center_mm = (float(nid), 0.0, 0.0)
+            node.size_mm = (1.0, 1.0, 1.0)
+            node.C_J_K = 10.0
+            node.initial_temperature_K = 293.15
+            model.add_node(node)
+        matrices = {
+            "node_ids": np.array([1, 2, 3], dtype=int),
+            "C": np.array([10.0, 10.0, 10.0], dtype=float),
+            "L": np.zeros((3, 3), dtype=float),
+            "G_rad": np.array([0.0, 0.0, 0.0], dtype=float),
+            "initial_temperature_K": np.array([293.15, 293.15, 293.15], dtype=float),
+        }
+        prepared = prepare_simulation(
+            model, matrices, SimulationParameters(dt_s=1.0, input_mode="zero", gpu_solver_enabled=False)
+        )
+        prepared.reset()  # currently running "hot" at 293.15 K
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.model = model
+        tab.matrices = matrices
+        tab.prepared = prepared
+        tab.temperature_by_node = {}
+        tab.initial_temperature_all_spin = types.SimpleNamespace(value=lambda: 50.0)
+        tab._simulation_worker_active = lambda: True  # a run is in progress
+        tab._simulation_reinitialize_pending = False
+        paused = {"called": False}
+        tab.pause = lambda: paused.__setitem__("called", True)
+        tab.use_current_graph = lambda: None
+        for stub in ("_reset_time_slider", "_refresh_initialized_view", "_refresh_stats", "_status"):
+            setattr(tab, stub, lambda *a, **k: None)
+
+        tab._set_all_initial_temperatures()
+
+        # the running simulation was stopped so the change can take effect
+        self.assertTrue(paused["called"])
+        # the model (the source of truth for the next prepare) is updated
+        self.assertTrue(all(abs(n.initial_temperature_K - 50.0) < 1e-9 for n in model.nodes.values()))
+        self.assertTrue(np.allclose(matrices["initial_temperature_K"], 50.0))
+        # a clean re-initialize is forced so the next Play starts at the set temp
+        self.assertTrue(tab._simulation_reinitialize_pending)
+        # the still-finishing worker's state was NOT mutated out from under it
+        self.assertTrue(np.allclose(prepared.temperatures_K, 293.15))
+
+    def test_randomize_sensor_setpoints_assigns_random_targets(self) -> None:
+        import sys
+        import types
+
+        heat_tab_module_name = "graph_visualizer.heat_transfer_simulation_tab"
+        pyvista_module_name = "graph_visualizer.pyvista_widget"
+        qtpy_module_name = "qtpy"
+        previous_heat_tab = sys.modules.pop(heat_tab_module_name, None)
+        previous_pyvista = sys.modules.get(pyvista_module_name)
+        previous_qtpy = sys.modules.get(qtpy_module_name)
+        pyvista_stub = types.ModuleType(pyvista_module_name)
+        pyvista_stub.GraphPyVistaWidget = object
+        sys.modules[pyvista_module_name] = pyvista_stub
+        qtpy_stub = types.ModuleType(qtpy_module_name)
+        qtpy_stub.QtGui = types.SimpleNamespace()
+        sys.modules[qtpy_module_name] = qtpy_stub
+        try:
+            from graph_visualizer import heat_transfer_simulation_tab as heat_tab_module
+            HeatTransferSimulationTab = heat_tab_module.HeatTransferSimulationTab
+        finally:
+            sys.modules.pop(heat_tab_module_name, None)
+            if previous_heat_tab is not None:
+                sys.modules[heat_tab_module_name] = previous_heat_tab
+            if previous_pyvista is not None:
+                sys.modules[pyvista_module_name] = previous_pyvista
+            else:
+                sys.modules.pop(pyvista_module_name, None)
+            if previous_qtpy is not None:
+                sys.modules[qtpy_module_name] = previous_qtpy
+            else:
+                sys.modules.pop(qtpy_module_name, None)
+
+        # Two sensors + a non-sensor node (whose setpoint must be untouched).
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="randomize_setpoints"))
+        for nid in (1, 3, 5):
+            node = NodeProperties.with_material(nid, (nid, 0, 0), material="copper")
+            node.center_mm = (float(nid), 0.0, 0.0)
+            node.size_mm = (1.0, 1.0, 1.0)
+            node.C_J_K = 10.0
+            node.controller_setpoint_K = 293.15
+            model.add_node(node)
+        model.nodes[1].is_sensor = True
+        model.nodes[3].is_sensor = True
+        # node 5 is not a sensor -> its setpoint must stay at 293.15
+
+        tab = object.__new__(HeatTransferSimulationTab)
+        tab.model = model
+        tab.prepared = None
+        tab.sensor_random_center_spin = types.SimpleNamespace(value=lambda: 50.0)
+        tab.sensor_random_spread_mK_spin = types.SimpleNamespace(value=lambda: 40.0)  # +/- 40 mK
+        tab.use_current_graph = lambda: None
+        tab._status = lambda *a, **k: None
+
+        tab._randomize_sensor_setpoints()
+
+        # sensor setpoints sit within 50 K +/- 40 mK
+        for sid in (1, 3):
+            self.assertLessEqual(abs(model.nodes[sid].controller_setpoint_K - 50.0), 0.040 + 1e-9)
+        # the two sensors almost surely drew different targets
+        self.assertNotAlmostEqual(
+            model.nodes[1].controller_setpoint_K, model.nodes[3].controller_setpoint_K, places=7
+        )
+        # a non-sensor node's setpoint is untouched
+        self.assertEqual(model.nodes[5].controller_setpoint_K, 293.15)
+
     def test_simulation_initialize_updates_existing_view_without_redraw(self) -> None:
         import sys
         import types
@@ -2665,7 +3765,11 @@ class GraphVisualizerModelTests(unittest.TestCase):
         tab._handle_parameter_change("playback_speed")
 
         self.assertTrue(tab.timer.isActive())
-        self.assertEqual(tab.timer.started_with, 10)
+        # The playback timer fires at the (render-decoupled) display-update rate;
+        # playback_speed scales steps-per-tick, not the timer frequency. So for
+        # display_update_interval_ms=100 the timer restarts at 100 ms regardless
+        # of speed (it used to be 200/speed=10 before the render decoupling).
+        self.assertEqual(tab.timer.started_with, 100)
         self.assertAlmostEqual(tab.params.playback_speed, 20.0)
         self.assertIs(tab.prepared.params, tab.params)
         self.assertEqual(saves, [True])
@@ -3157,27 +4261,33 @@ class GraphVisualizerModelTests(unittest.TestCase):
         tab.pause = lambda: None
         tab.temperature_by_node = {}
         tab._update_colors = lambda: None
-        tab._refresh_stats = lambda: None
-        tab._refresh_sensor_readouts = lambda: None
+        tab._refresh_stats = lambda *a, **k: None
+        tab._refresh_sensor_readouts = lambda *a, **k: None
         tab._sync_time_slider_to_history = lambda: None
         statuses = []
         tab._status = lambda message, error=False: statuses.append(message)
 
-        tab.step_forward()
+        logged: list[tuple[str, dict]] = []
+        with patch(
+            "graph_visualizer.heat_transfer_simulation_tab.log_event",
+            side_effect=lambda event, **fields: logged.append((event, fields)),
+        ):
+            tab.step_forward()
 
         self.assertEqual(tab.prepared.time_s, 1.0)
         self.assertEqual(tab.temperature_by_node, {10: 301.0, 20: 301.5})
-        self.assertTrue(any("Live step profile" in message for message in statuses))
-        self.assertTrue(any("solve/controller=120.0 ms" in message for message in statuses))
+        # The per-step breakdown is recorded to the diagnostics log, NOT the
+        # on-screen status (which stays on the "Playing simulation" line).
+        self.assertFalse(any("Live step profile" in message for message in statuses))
+        profile_events = [fields for event, fields in logged if event == "simulation live step profile"]
+        self.assertTrue(profile_events)
+        self.assertEqual(profile_events[-1].get("model_solve_ms"), 120.0)
 
     def test_simulation_parameter_round_trips_live_step_profile_settings(self) -> None:
         params = SimulationParameters(
             live_step_profiling_enabled=True,
             live_step_profile_threshold_ms=12.5,
-            fast_sparse_simulation_enabled=True,
-            fast_sparse_simulation_max_substeps=64,
-            fast_sparse_simulation_safety_factor=0.5,
-            implicit_sparse_simulation_enabled=True,
+            gpu_solver_enabled=False,
             implicit_sparse_simulation_method="tr_bdf2",
             implicit_sparse_simulation_rtol=1.0e-4,
             implicit_sparse_simulation_maxiter=321,
@@ -3194,10 +4304,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertTrue(loaded.live_step_profiling_enabled)
         self.assertAlmostEqual(loaded.live_step_profile_threshold_ms, 12.5)
-        self.assertTrue(loaded.fast_sparse_simulation_enabled)
-        self.assertEqual(loaded.fast_sparse_simulation_max_substeps, 64)
-        self.assertAlmostEqual(loaded.fast_sparse_simulation_safety_factor, 0.5)
-        self.assertTrue(loaded.implicit_sparse_simulation_enabled)
+        self.assertFalse(loaded.gpu_solver_enabled)
         self.assertEqual(loaded.implicit_sparse_simulation_method, "tr_bdf2")
         self.assertAlmostEqual(loaded.implicit_sparse_simulation_rtol, 1.0e-4)
         self.assertEqual(loaded.implicit_sparse_simulation_maxiter, 321)
@@ -3206,6 +4313,62 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(loaded.implicit_sparse_adaptive_max_substeps, 3)
         self.assertTrue(loaded.implicit_sparse_residual_check_enabled)
         self.assertEqual(extras["custom"], "kept")
+
+    def test_legacy_proportional_cryocooler_parameters_migrate_to_pt60(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "simulation_parameters.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "Kp_cooler": 2.5,
+                        "T_cooler_setpoint": 45.0,
+                        "max_cooling_w": 87.0,
+                        "custom": "kept",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded, extras = load_simulation_parameters(path)
+            save_simulation_parameters(path, loaded, extras)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(loaded.cryocooler_model, "pt60_lift_curve")
+        self.assertEqual(loaded.cryocooler_max_power_W, 87.0)
+        self.assertEqual(loaded.cryocooler_capacity_scale, 1.0)
+        self.assertTrue(loaded.cryocooler_enabled)
+        self.assertEqual(saved["cryocooler"], {
+            "model": "pt60_lift_curve",
+            "max_power_w": 87.0,
+            "capacity_scale": 1.0,
+            "enabled": True,
+        })
+        self.assertNotIn("Kp_cooler", saved)
+        self.assertNotIn("T_cooler_setpoint", saved)
+        self.assertNotIn("max_cooling_w", saved)
+        self.assertEqual(saved["custom"], "kept")
+
+    def test_nested_legacy_cryocooler_maximum_migrates_to_pt60(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "simulation_parameters.json"
+            path.write_text(
+                json.dumps({"cryocooler": {"kp_cooler": 4.0, "setpoint_k": 40.0, "max_cooling": 63.0}}),
+                encoding="utf-8",
+            )
+
+            loaded, extras = load_simulation_parameters(path)
+            save_simulation_parameters(path, loaded, extras)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(loaded.cryocooler_max_power_W, 63.0)
+        self.assertEqual(saved["cryocooler"]["max_power_w"], 63.0)
+        self.assertNotIn("kp_cooler", saved["cryocooler"])
+        self.assertNotIn("setpoint_k", saved["cryocooler"])
+
+    def test_old_proportional_cryocooler_helper_is_removed(self) -> None:
+        import graph_visualizer.simulation_model as simulation_model
+
+        self.assertFalse(hasattr(simulation_model, "_cryocooler_power_for_temperature"))
 
     def test_octree_node_load_sanitizes_nonfinite_geometry(self) -> None:
         model = ThermalGraphModel.from_octree_graph_dict(
@@ -3318,8 +4481,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         sensor.controller_ki_hold = 0.125
         sensor.controller_kd_coarse = 0.4
         sensor.controller_kd_hold = 0.2
-        sensor.controller_lambda_order = 0.8
-        sensor.controller_mu_order = 0.6
         heater = NodeProperties.with_material(2, (1, 0, 0), material="copper")
         heater.is_heater = True
         heater.is_sensor = True
@@ -3339,8 +4500,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(restored.nodes[1].controller_ki_hold, 0.125)
         self.assertAlmostEqual(restored.nodes[1].controller_kd_coarse, 0.4)
         self.assertAlmostEqual(restored.nodes[1].controller_kd_hold, 0.2)
-        self.assertAlmostEqual(restored.nodes[1].controller_lambda_order, 0.8)
-        self.assertAlmostEqual(restored.nodes[1].controller_mu_order, 0.6)
         self.assertFalse(hasattr(restored.nodes[1], "controller_integral_negative_error_leak_per_s"))
         self.assertAlmostEqual(restored.controller_gain(1, 2), 0.125)
 
@@ -3581,9 +4740,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
             SimulationParameters(
                 dt_s=1.0,
                 input_mode="heater_inputs",
-                Kp_cooler=1.0,
-                P_cooler_max=20.0,
-                T_cooler_setpoint=290.0,
+                cryocooler_max_power_W=10.0,
             ),
         )
 
@@ -3828,12 +4985,11 @@ class GraphVisualizerModelTests(unittest.TestCase):
         before = prepared.temperatures_K.copy()
         prepared.step_forward()
 
-        self.assertIsNone(prepared.Phi_aug)
         self.assertLess(float(prepared.temperatures_K[0]), float(before[0]))
         self.assertIsNotNone(prepared.sparse_implicit_stepper)
         self.assertEqual(prepared.sparse_implicit_stepper.method, "tr_bdf2")
-        self.assertIn("cpu_sparse_implicit_step_ms", prepared.last_step_profile_ms)
-        self.assertIn("cpu_sparse_implicit_residual_norm", prepared.last_step_profile_ms)
+        self.assertIn("implicit_step_ms", prepared.last_step_profile_ms)
+        self.assertIn("implicit_residual_norm", prepared.last_step_profile_ms)
         self.assertNotIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
         self.assertIn("model_solve_ms", prepared.last_step_profile_ms)
 
@@ -3861,7 +5017,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         prepared.step_forward()
 
         self.assertIsNotNone(prepared.sparse_implicit_stepper)
-        self.assertIn("cpu_sparse_implicit_step_ms", prepared.last_step_profile_ms)
+        self.assertIn("implicit_step_ms", prepared.last_step_profile_ms)
         self.assertNotIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
         exact = 300.0 * np.exp(-0.1)
         backward_euler = 10.0 * 300.0 / 11.0
@@ -3896,8 +5052,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         prepared.step_forward()
 
         self.assertIsNotNone(prepared.sparse_implicit_stepper)
-        self.assertIn("cpu_sparse_implicit_step_ms", prepared.last_step_profile_ms)
-        self.assertGreaterEqual(prepared.last_step_profile_ms["cpu_sparse_implicit_iterations"], 0.0)
+        self.assertIn("implicit_step_ms", prepared.last_step_profile_ms)
+        self.assertGreaterEqual(prepared.last_step_profile_ms["implicit_iterations"], 0.0)
         self.assertLess(float(prepared.temperatures_K[0]), float(before[0]))
         self.assertGreater(float(prepared.temperatures_K[1]), float(before[1]))
         self.assertGreater(float(np.max(np.abs(prepared.temperatures_K - before))), 1.0e-9)
@@ -3932,89 +5088,24 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         self.assertIsNotNone(prepared.sparse_implicit_stepper)
         self.assertEqual(prepared.sparse_implicit_stepper.last_substeps, 4)
-        self.assertEqual(prepared.last_step_profile_ms["cpu_sparse_implicit_substeps"], 4.0)
-        self.assertGreater(prepared.last_step_profile_ms["cpu_sparse_implicit_predicted_delta_K"], 1.0)
-        self.assertLess(prepared.last_step_profile_ms["cpu_sparse_implicit_relative_residual"], 1.0e-5)
+        self.assertEqual(prepared.last_step_profile_ms["implicit_substeps"], 4.0)
+        self.assertGreater(prepared.last_step_profile_ms["implicit_predicted_delta_K"], 1.0)
+        self.assertLess(prepared.last_step_profile_ms["implicit_relative_residual"], 1.0e-5)
 
-    def test_fast_sparse_cpu_stepper_bypasses_expm_multiply_automatically(self) -> None:
-        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="fast_sparse_cpu"))
+    def test_gpu_implicit_solver_falls_back_to_cpu_when_cupy_unavailable(self) -> None:
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="gpu_fallback"))
         node_count = 513
         for node_id in range(node_count):
             node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
             node.C_J_K = 10.0
-            node.initial_temperature_K = 300.0
-            model.add_node(node)
-        diagonal = np.ones(node_count, dtype=float)
-        matrices = {
-            "node_ids": np.arange(node_count, dtype=int),
-            "C": np.full(node_count, 10.0),
-            "L": csr_matrix((diagonal, (np.arange(node_count), np.arange(node_count))), shape=(node_count, node_count)),
-            "G_rad": np.zeros(node_count),
-        }
-
-        prepared = prepare_simulation(
-            model,
-            matrices,
-            SimulationParameters(
-                dt_s=1.0,
-                use_ambient_radiation=False,
-                implicit_sparse_simulation_enabled=False,
-                fast_sparse_simulation_safety_factor=1.0,
-            ),
-        )
-        prepared.step_forward()
-
-        self.assertEqual(prepared.fast_sparse_substeps, 1)
-        self.assertIn("cpu_fast_sparse_step_ms", prepared.last_step_profile_ms)
-        self.assertNotIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
-
-    def test_fast_sparse_cpu_stepper_falls_back_when_substep_limit_is_too_low(self) -> None:
-        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="fast_sparse_cpu_fallback"))
-        node_count = 513
-        for node_id in range(node_count):
-            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
-            node.C_J_K = 10.0
-            node.initial_temperature_K = 300.0
-            model.add_node(node)
-        diagonal = np.ones(node_count, dtype=float)
-        matrices = {
-            "node_ids": np.arange(node_count, dtype=int),
-            "C": np.full(node_count, 10.0),
-            "L": csr_matrix((diagonal, (np.arange(node_count), np.arange(node_count))), shape=(node_count, node_count)),
-            "G_rad": np.zeros(node_count),
-        }
-
-        prepared = prepare_simulation(
-            model,
-            matrices,
-            SimulationParameters(
-                dt_s=100.0,
-                use_ambient_radiation=False,
-                implicit_sparse_simulation_enabled=False,
-                fast_sparse_simulation_enabled=True,
-                fast_sparse_simulation_max_substeps=1,
-            ),
-        )
-        prepared.step_forward()
-
-        self.assertIsNone(prepared.fast_sparse_substeps)
-        self.assertIn("cpu_expm_multiply_ms", prepared.last_step_profile_ms)
-        self.assertTrue(any("Fast sparse CPU stepping" in warning for warning in prepared.warnings))
-
-    def test_gpu_simulation_request_falls_back_when_cupy_unavailable(self) -> None:
-        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="gpu_unavailable"))
-        node_count = 513
-        for node_id in range(node_count):
-            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
-            node.C_J_K = 10.0
-            node.G_rad_W_K = 1.0
             node.initial_temperature_K = 310.0
             model.add_node(node)
+        diagonal = np.ones(node_count, dtype=float)
         matrices = {
             "node_ids": np.arange(node_count, dtype=int),
             "C": np.full(node_count, 10.0),
-            "L": csr_matrix((node_count, node_count), dtype=float),
-            "G_rad": np.ones(node_count),
+            "L": csr_matrix((diagonal, (np.arange(node_count), np.arange(node_count))), shape=(node_count, node_count)),
+            "G_rad": np.zeros(node_count),
         }
 
         with patch(
@@ -4024,81 +5115,15 @@ class GraphVisualizerModelTests(unittest.TestCase):
             prepared = prepare_simulation(
                 model,
                 matrices,
-                SimulationParameters(dt_s=1.0, gpu_simulation_enabled=True),
+                SimulationParameters(dt_s=1.0, gpu_solver_enabled=True),
             )
 
-        self.assertIsNone(prepared.gpu_stepper)
-        self.assertTrue(any("GPU sparse stepping unavailable" in warning for warning in prepared.warnings))
-
-    def test_gpu_stepper_is_used_when_available(self) -> None:
-        class FakeGpuStepper:
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def step(self, temperatures_K: np.ndarray, heater_power: np.ndarray) -> np.ndarray:
-                self.calls += 1
-                return np.asarray(temperatures_K, dtype=float) - 2.0
-
-        fake_stepper = FakeGpuStepper()
-        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="gpu_hook"))
-        node_count = 513
-        for node_id in range(node_count):
-            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
-            node.C_J_K = 10.0
-            node.initial_temperature_K = 310.0
-            model.add_node(node)
-        matrices = {
-            "node_ids": np.arange(node_count, dtype=int),
-            "C": np.full(node_count, 10.0),
-            "L": csr_matrix((node_count, node_count), dtype=float),
-            "G_rad": np.zeros(node_count),
-        }
-
-        with patch("graph_visualizer.simulation_model._build_gpu_sparse_stepper", return_value=fake_stepper):
-            prepared = prepare_simulation(
-                model,
-                matrices,
-                SimulationParameters(dt_s=1.0, gpu_simulation_enabled=True),
-            )
+        # No CuPy -> no GPU implicit stepper; the CPU implicit solver is used.
+        self.assertIsNone(prepared.gpu_implicit_stepper)
+        self.assertIsNotNone(prepared.sparse_implicit_stepper)
         prepared.step_forward()
-
-        self.assertEqual(fake_stepper.calls, 1)
-        self.assertAlmostEqual(float(prepared.temperatures_K[0]), 308.0)
-        self.assertIn("gpu_step_ms", prepared.last_step_profile_ms)
-        self.assertIn("state_vector_update_ms", prepared.last_step_profile_ms)
-
-    def test_gpu_sparse_stepper_keeps_temperature_state_on_device(self) -> None:
-        from graph_visualizer.simulation_model import GpuSparseStepper
-
-        class FakeCp:
-            def __init__(self) -> None:
-                self.asarray_calls = 0
-
-            def asarray(self, value):
-                self.asarray_calls += 1
-                return np.asarray(value, dtype=float)
-
-            def asnumpy(self, value):
-                return np.asarray(value, dtype=float)
-
-        cp = FakeCp()
-        stepper = GpuSparseStepper(
-            cp=cp,
-            A_gpu=np.zeros((2, 2), dtype=float),
-            inv_C_gpu=np.ones(2, dtype=float),
-            base_b_gpu=np.zeros(2, dtype=float),
-            radiation_coeff_gpu=np.zeros(2, dtype=float),
-            use_ambient_radiation=False,
-            ambient_K=293.15,
-            dt_s=1.0,
-            substeps=1,
-        )
-
-        stepper.step(np.array([300.0, 301.0]), np.zeros(2))
-        stepper.step(np.array([999.0, 999.0]), np.zeros(2))
-
-        self.assertEqual(cp.asarray_calls, 3)
-        np.testing.assert_allclose(stepper.step(np.array([999.0, 999.0]), np.zeros(2)), np.array([300.0, 301.0]))
+        self.assertIn("implicit_step_ms", prepared.last_step_profile_ms)
+        self.assertEqual(prepared.last_step_profile_ms.get("implicit_backend_gpu"), 0.0)
 
     def test_simulation_history_seek_preserves_computed_future(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="history_cursor"))
@@ -4284,8 +5309,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node.assigned_heater_id = 7
         node.sensor_control_mode = "mimo"
         node.controller_setpoint_K = 310.0
-        node.controller_lambda_order = 0.7
-        node.controller_mu_order = 0.4
         node.has_cryocooler = True
         node_text = format_node_tooltip(7, node)
         self.assertIn("Node 7", node_text)
@@ -4300,8 +5323,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertIn("heater min:", node_text)
         self.assertIn("assigned sensor: 7", node_text)
         self.assertIn("control mode: mimo", node_text)
-        self.assertIn("MIMO lambda: 0.700", node_text)
-        self.assertIn("MIMO mu: 0.400", node_text)
         self.assertIn("cryocooler: yes", node_text)
         self.assertIn("sensor_id: 7", node_text)
 

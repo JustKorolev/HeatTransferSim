@@ -110,9 +110,10 @@ default. The mesh directory must contain exactly one `.glb` scene file.
 External-buffer `.gltf`/`.bin` exports are rejected because missing or mismatched
 buffers can collapse CAD geometry during loading.
 CAD components are recognized as heater/sensor geometry only when you provide
-matching names with `--heater-name-substring`, `--heater-name-pattern`,
-`--sensor-name-substring`, or `--sensor-name-pattern`; repeat a flag to add
-multiple matches. Matched components remain in voxelization so their occupied
+matching names with `--heater-name-substring` or `--sensor-name-substring`;
+repeat a flag to add multiple matches. (The `--heater-name-pattern` and
+`--sensor-name-pattern` regex flags are accepted for backward compatibility but
+currently ignored — role detection uses substring matching only.) Matched components remain in voxelization so their occupied
 octree cells first receive normal graph connections, then cells from the same
 detected heater/sensor part are consolidated into one role node with the union
 of those external connections. If no heater or sensor match is configured, no
@@ -153,17 +154,26 @@ graphs/<graph_name>/
   material_warnings.csv
   validation_report.txt
   conversion.log
+  node_ids.npy
   C.npy
-  G.npy
   L.npy
-  A.npy
+  G_rad.npy
+  initial_temperature_K.npy
+  G.npy            # dense conductance matrix, only for small graphs
+  C_diag.json      # browser matrix exports
+  G_rad_diag.json
+  L_sparse.json
   ui_state.json
 ```
 
-Matrix rows and columns follow `node_ids`. `G` stores symmetric conductances in
-W/K, zeros for non-edges, and the Laplacian is built as
-`L[i, i] = sum_j G[i, j]`, `L[i, j] = -G[i, j]`. The optional dynamics matrix is
-`A = -C^{-1}L`.
+Matrix rows and columns follow `node_ids`. `C` is the per-node thermal
+capacitance vector and `G_rad` the per-node linearized radiation conductance.
+The Laplacian is built as `L[i, i] = sum_j G[i, j]`, `L[i, j] = -G[i, j]`. For
+small graphs (at or below `--dense-matrix-node-limit`, default 6000 nodes) a
+dense symmetric conductance matrix `G` is also written, where `G` stores
+conductances in W/K with zeros for non-edges; larger graphs write only the
+sparse Laplacian. No `A = -C^{-1}L` dynamics matrix is written — the simulator
+forms that operator internally from `C` and `L` at run time.
 
 ### Export SolidWorks materials for octree lookup
 

@@ -1,0 +1,249 @@
+{
+  "nodes": [
+    {
+      "coord": [
+        0,
+        0,
+        0
+      ],
+      "cell_id": null,
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "node_type": "",
+      "source_components": [],
+      "source_node_ids": [],
+      "source_cell_ids": [],
+      "role_source_components": [],
+      "source_bounds_mm": {},
+      "center_mm": [
+        -5.0,
+        0.0,
+        0.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "component_name": "VALIDATION_HOT_BLOCK",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": [],
+      "notes": "",
+      "side_length_m": 0.01,
+      "material": "Copper",
+      "rho_kg_m3": 8960.0,
+      "cp_J_kgK": 385.0,
+      "k_W_mK": 401.0,
+      "emissivity": 0.35,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "initial_temperature_K": 300.0,
+      "is_exposed": false,
+      "radiating_area_m2": 0.0,
+      "G_rad_W_K": 0.0,
+      "R_rad_K_W": null,
+      "is_heater": false,
+      "heater": {
+        "heater_id": 0,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "is_sensor": false,
+      "sensor": {
+        "sensor_id": 0,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "assigned_sensor_id": null,
+      "assigned_heater_id": null,
+      "assigned_heater_ids": [],
+      "sensor_pair_distance_mm": null,
+      "power_deposition_node_ids": [],
+      "power_deposition_weights": [],
+      "heater_attached": true,
+      "heater_valid": true,
+      "heater_warning": "",
+      "sensor_connected_node_ids": [],
+      "readout_node_ids": [],
+      "readout_weights": [],
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0,
+      "has_cryocooler": false,
+      "cryocooler_id": "",
+      "cryocooler_enabled": true,
+      "cryocooler_receiving_node_ids": [],
+      "cryocooler_contact_areas_m2": [],
+      "controller_setpoint_K": 293.15,
+      "controller_weight": 0.0,
+      "sensor_settling_time_s": 0.0,
+      "controller_kp_coarse": 0.0,
+      "controller_ki_coarse": 0.0,
+      "controller_kp_hold": 0.0,
+      "controller_ki_hold": 0.0,
+      "controller_kd_coarse": 0.0,
+      "controller_kd_hold": 0.0,
+      "controller_lambda_order": 1.0,
+      "controller_mu_order": 1.0,
+      "controller_integral_leak_per_s": 0.0,
+      "id": 0
+    },
+    {
+      "coord": [
+        1,
+        0,
+        0
+      ],
+      "cell_id": null,
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "node_type": "",
+      "source_components": [],
+      "source_node_ids": [],
+      "source_cell_ids": [],
+      "role_source_components": [],
+      "source_bounds_mm": {},
+      "center_mm": [
+        5.0,
+        0.0,
+        0.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "component_name": "VALIDATION_COLD_BLOCK",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": [],
+      "notes": "",
+      "side_length_m": 0.01,
+      "material": "Copper",
+      "rho_kg_m3": 8960.0,
+      "cp_J_kgK": 385.0,
+      "k_W_mK": 401.0,
+      "emissivity": 0.35,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "C_manual_override": false,
+      "Grad_W_K": 0.0,
+      "initial_temperature_K": 200.0,
+      "is_exposed": false,
+      "radiating_area_m2": 0.0,
+      "G_rad_W_K": 0.0,
+      "R_rad_K_W": null,
+      "is_heater": false,
+      "heater": {
+        "heater_id": 1,
+        "heater_min_power_W": 0.0,
+        "heater_max_power_W": 30.0,
+        "heater_efficiency": 1.0
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "is_sensor": false,
+      "sensor": {
+        "sensor_id": 1,
+        "sensor_noise_std_K": 0.0,
+        "sensor_bias_K": 0.0,
+        "sensor_time_constant_s": 0.0
+      },
+      "assigned_sensor_id": null,
+      "assigned_heater_id": null,
+      "assigned_heater_ids": [],
+      "sensor_pair_distance_mm": null,
+      "power_deposition_node_ids": [],
+      "power_deposition_weights": [],
+      "heater_attached": true,
+      "heater_valid": true,
+      "heater_warning": "",
+      "sensor_connected_node_ids": [],
+      "readout_node_ids": [],
+      "readout_weights": [],
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0,
+      "has_cryocooler": false,
+      "cryocooler_id": "",
+      "cryocooler_enabled": true,
+      "cryocooler_receiving_node_ids": [],
+      "cryocooler_contact_areas_m2": [],
+      "controller_setpoint_K": 293.15,
+      "controller_weight": 0.0,
+      "sensor_settling_time_s": 0.0,
+      "controller_kp_coarse": 0.0,
+      "controller_ki_coarse": 0.0,
+      "controller_kp_hold": 0.0,
+      "controller_ki_hold": 0.0,
+      "controller_kd_coarse": 0.0,
+      "controller_kd_hold": 0.0,
+      "controller_lambda_order": 1.0,
+      "controller_mu_order": 1.0,
+      "controller_integral_leak_per_s": 0.0,
+      "id": 1
+    }
+  ],
+  "edges": [
+    {
+      "source": 0,
+      "target": 1,
+      "Gij_W_K": 4.010000000000001,
+      "source_metadata": "auto",
+      "edge_id": null,
+      "edge_type": "internal_conduction",
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "warnings": []
+    }
+  ],
+  "controller_gain_matrix": {}
+}

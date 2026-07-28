@@ -1,0 +1,5 @@
+edge_id,node_i,node_j,edge_type,G_W_K,shared_area_m2,distance_m,contact_confidence,source
+edge_1_2,1,2,internal_conduction,8.020000000000001,0.0,0.0,medium,auto
+edge_2_3,2,3,internal_conduction,8.020000000000001,0.0,0.0,medium,auto
+edge_3_4,3,4,internal_conduction,8.020000000000001,0.0,0.0,medium,auto
+edge_4_5,4,5,internal_conduction,8.020000000000001,0.0,0.0,medium,auto

@@ -61,7 +61,7 @@ class OctreeParams:
     role_refine_component_names: tuple[str, ...] = field(default_factory=tuple)
     role_refine_distance_mm: float = 0.0
     role_refine_max_depth: int | None = None
-    contains_backend: str = "ray"
+    contains_backend: str = "trimesh"  # BVH-accelerated; falls back to "ray" if deps absent
     balance_adjacent_leaf_sizes: bool = True
     max_adjacent_leaf_size_ratio: float = 4.0
     balance_refine_passes: int = 2
@@ -1281,23 +1281,28 @@ def _classification_confidence(classification: CellClassification, params: Octre
 def _physical_material_name(
     obj: MeshObject, contact_report: ContactReport, known_materials: set[str]
 ) -> str:
-    if (
-        obj.material_name
-        and obj.material_name in known_materials
-        and not is_unassigned_material_name(obj.material_name)
-    ):
-        return obj.material_name
+    """Resolve a component's engineering material. The per-mesh material lookup sheet
+    is authoritative; the GLB's own material name (a CAD *appearance* like
+    "brushed_aluminum") is only a fallback, since it cannot distinguish materials
+    such as Invar or fiberglass."""
+    known_lookup = {name: None for name in known_materials}
+    # 1. Material-lookup spreadsheet (authoritative).
     report_material = contact_report.material_for_component(obj.name)
-    if (
-        report_material
-        and report_material in known_materials
-        and not is_unassigned_material_name(report_material)
-    ):
-        return report_material
-    inferred_material = infer_material_name_from_text(obj.material_name, {name: None for name in known_materials})
-    if inferred_material:
-        return inferred_material
-    inferred_material = infer_material_name_from_text(obj.name, {name: None for name in known_materials})
+    if report_material and not is_unassigned_material_name(report_material):
+        if report_material in known_materials:
+            return report_material
+        inferred_report = infer_material_name_from_text(report_material, known_lookup)
+        if inferred_report:
+            return inferred_report
+    # 2. GLB material (appearance) name, exact then via aliases.
+    if obj.material_name and not is_unassigned_material_name(obj.material_name):
+        if obj.material_name in known_materials:
+            return obj.material_name
+        inferred_material = infer_material_name_from_text(obj.material_name, known_lookup)
+        if inferred_material:
+            return inferred_material
+    # 3. Component name text.
+    inferred_material = infer_material_name_from_text(obj.name, known_lookup)
     if inferred_material:
         return inferred_material
     return DEFAULT_ASSIGNED_MATERIAL_NAME

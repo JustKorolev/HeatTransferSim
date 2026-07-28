@@ -31,7 +31,11 @@ from .graph_io import (
 )
 from .heat_transfer_simulation_tab import HeatTransferSimulationTab
 from .material_library import default_material_library
-from .matrix_builder import refresh_auto_edges
+from .matrix_builder import (
+    refresh_auto_edges,
+    refresh_geometry_edges,
+    refresh_geometry_edges_for_nodes,
+)
 from .models import (
     EdgeMode,
     GraphMetadata,
@@ -60,6 +64,7 @@ from .role_pairing import (
     refresh_sensor_connected_nodes,
 )
 from .role_warnings import role_warning_reasons
+from .thermal_validation_tab import ThermalValidationTab
 from .tooltip_formatters import format_node_tooltip
 from .two_d_graph_widget import TwoDGraphWidget
 from .validation import raise_if_errors, validate_model
@@ -77,8 +82,6 @@ _EDITOR_CONTROLLER_RUNTIME_FIELDS = {
     "controller_ki_hold",
     "controller_kd_coarse",
     "controller_kd_hold",
-    "controller_lambda_order",
-    "controller_mu_order",
 }
 
 
@@ -115,6 +118,7 @@ class GraphVisualizerApp:
         self.dark_mode = False
 
         self.app = self.QtWidgets.QApplication.instance() or self.QtWidgets.QApplication([])
+        self._install_no_wheel_scroll_filter()
         self.window = self.QtWidgets.QMainWindow()
         self.window.setWindowTitle("Graph Visualizer - Sparse Thermal Lump Network")
         self.window.closeEvent = self._handle_close_event
@@ -146,6 +150,35 @@ class GraphVisualizerApp:
                 ) from exc
         self.QtCore = QtCore
         self.QtWidgets = QtWidgets
+
+    def _install_no_wheel_scroll_filter(self) -> None:
+        """Stop the mouse wheel from changing combo boxes, spin boxes and sliders.
+        A stray scroll over the control panel otherwise nudges a value, firing
+        valueChanged/currentTextChanged -> autosave + editor->sim re-sync on every
+        notch (the source of the long lag). The wheel is redirected to the enclosing
+        scroll area so the panel still scrolls under the cursor."""
+        QtCore = self.QtCore
+        QtWidgets = self.QtWidgets
+        wheel_type = getattr(QtCore.QEvent, "Wheel", None) or QtCore.QEvent.Type.Wheel
+        blocked = (QtWidgets.QComboBox, QtWidgets.QAbstractSpinBox, QtWidgets.QSlider)
+
+        class _NoWheelScrollFilter(QtCore.QObject):
+            def eventFilter(self, obj, event):  # noqa: N802 - Qt override name
+                try:
+                    if event.type() == wheel_type and isinstance(obj, blocked):
+                        parent = obj.parentWidget()
+                        while parent is not None:
+                            if isinstance(parent, QtWidgets.QScrollArea):
+                                QtWidgets.QApplication.sendEvent(parent.viewport(), event)
+                                return True
+                            parent = parent.parentWidget()
+                        return True  # no scroll area: at least block the value change
+                except Exception:  # noqa: BLE001 - a filter must never raise
+                    return False
+                return False
+
+        self._no_wheel_scroll_filter = _NoWheelScrollFilter()  # keep a ref (else GC'd)
+        self.app.installEventFilter(self._no_wheel_scroll_filter)
 
     def _build_layout(self) -> None:
         central = self.QtWidgets.QWidget()
@@ -213,6 +246,26 @@ class GraphVisualizerApp:
         toggles.addWidget(self.depth_width_slider)
         toggles.addStretch(1)
         three_d_layout.addLayout(toggles)
+        cross_section_row = self.QtWidgets.QHBoxLayout()
+        self.cross_section_toggle = self._checkbox("Cross section", False, self._handle_view_control_changed)
+        self.cross_section_toggle.setToolTip("Clip away cells below a movable axis-aligned plane.")
+        cross_section_row.addWidget(self.cross_section_toggle)
+        cross_section_row.addWidget(self.QtWidgets.QLabel("Axis"))
+        self.cross_section_axis_combo = self.QtWidgets.QComboBox()
+        self.cross_section_axis_combo.addItems(["X", "Y", "Z"])
+        self.cross_section_axis_combo.setCurrentText("Z")
+        self.cross_section_axis_combo.currentTextChanged.connect(self._handle_view_control_changed)
+        cross_section_row.addWidget(self.cross_section_axis_combo)
+        cross_section_row.addWidget(self.QtWidgets.QLabel("Cut"))
+        self.cross_section_slider = self._view_slider(0, 100, 50, self._handle_view_control_changed)
+        self.cross_section_slider.setToolTip("Move the cut from the minimum to maximum axis coordinate.")
+        self.cross_section_slider.setFixedWidth(220)
+        cross_section_row.addWidget(self.cross_section_slider)
+        self.cross_section_value_label = self.QtWidgets.QLabel("50%")
+        self.cross_section_value_label.setMinimumWidth(110)
+        cross_section_row.addWidget(self.cross_section_value_label)
+        cross_section_row.addStretch(1)
+        three_d_layout.addLayout(cross_section_row)
         self.viewer = GraphPyVistaWidget(
             self.three_d_tab,
             on_pick_node=self._handle_viewer_pick,
@@ -230,9 +283,15 @@ class GraphVisualizerApp:
             on_status=self._set_status,
             on_controller_gain_matrix_changed=self._handle_controller_gain_matrix_changed,
         )
+        self.thermal_validation_tab = ThermalValidationTab(
+            self,
+            right_panel,
+            on_status=self._set_status,
+        )
         self.view_tabs.addTab(self.three_d_tab, "3D Octree Graph Editor")
         self.view_tabs.addTab(self.two_d_view.widget, "2D Network Graph")
         self.view_tabs.addTab(self.simulation_tab.widget, "Heat Transfer Simulation")
+        self.view_tabs.addTab(self.thermal_validation_tab.widget, "Thermal Validation")
         right_layout.addWidget(self.view_tabs, 1)
 
         self.status_label = self.QtWidgets.QLabel("")
@@ -242,6 +301,7 @@ class GraphVisualizerApp:
         self.side_panel_stack = self.QtWidgets.QStackedWidget()
         self.side_panel_stack.addWidget(self.left_scroll)
         self.side_panel_stack.addWidget(self.simulation_tab.controls_scroll)
+        self.side_panel_stack.addWidget(self.thermal_validation_tab.controls_scroll)
         self.side_panel_stack.setCurrentWidget(self.left_scroll)
 
         self.main_splitter = self.QtWidgets.QSplitter(self.QtCore.Qt.Horizontal)
@@ -458,8 +518,6 @@ class GraphVisualizerApp:
         self.inputs["controller_ki_hold"] = self._double_spin(0.0, 1.0e9, 0.0, 0.01)
         self.inputs["controller_kd_coarse"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
         self.inputs["controller_kd_hold"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
-        self.inputs["controller_lambda_order"] = self._double_spin(0.0, 2.0, 1.0, 0.05)
-        self.inputs["controller_mu_order"] = self._double_spin(0.0, 2.0, 1.0, 0.05)
         self.inputs["sensor_settling_time_s"].setToolTip(
             "MIMO sensor settling time used by this heater controller for lag compensation."
         )
@@ -473,8 +531,6 @@ class GraphVisualizerApp:
             ("hold kP", "controller_kp_hold"),
             ("hold kI", "controller_ki_hold"),
             ("hold kD", "controller_kd_hold"),
-            ("lambda", "controller_lambda_order"),
-            ("mu", "controller_mu_order"),
         ):
             heater_form.addRow(label, self.inputs[key])
 
@@ -524,7 +580,7 @@ class GraphVisualizerApp:
         self._update_C_enabled()
 
     def _build_component_temperature_controls(self) -> None:
-        box = self._group_box("Component Initial Temperature")
+        box = self._group_box("Component Tools")
         form = self.QtWidgets.QFormLayout(box)
         self.component_temp_combo = self.QtWidgets.QComboBox()
         self.component_temp_input = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
@@ -532,6 +588,39 @@ class GraphVisualizerApp:
         self.component_temp_input.valueChanged.connect(self._handle_component_initial_temperature_changed)
         form.addRow("component", self.component_temp_combo)
         form.addRow("initial_temperature_K", self.component_temp_input)
+        cryocooler_row = self.QtWidgets.QHBoxLayout()
+        mark_cryocooler = self.QtWidgets.QPushButton("Mark Component Cryocooler")
+        mark_cryocooler.clicked.connect(lambda *_: self.apply_component_cryocooler(True))
+        clear_cryocooler = self.QtWidgets.QPushButton("Clear Component Cryocooler")
+        clear_cryocooler.clicked.connect(lambda *_: self.apply_component_cryocooler(False))
+        cryocooler_row.addWidget(mark_cryocooler)
+        cryocooler_row.addWidget(clear_cryocooler)
+        form.addRow("cryocooler", cryocooler_row)
+        self.component_cryocooler_label = self.QtWidgets.QLabel("")
+        form.addRow("status", self.component_cryocooler_label)
+        material_row = self.QtWidgets.QHBoxLayout()
+        self.component_material_combo = self.QtWidgets.QComboBox()
+        self.component_material_combo.addItems(sorted(self.model.material_library))
+        apply_material = self.QtWidgets.QPushButton("Apply Material to Component")
+        apply_material.setToolTip(
+            "Manually override the material of every cell in the selected component, "
+            "recomputing its per-cell thermal properties and conductances."
+        )
+        apply_material.clicked.connect(self.apply_component_material)
+        material_row.addWidget(self.component_material_combo, 1)
+        material_row.addWidget(apply_material)
+        form.addRow("set material", material_row)
+        reassign = self.QtWidgets.QPushButton("Reassign Materials from Spreadsheet")
+        reassign.setToolTip(
+            "Re-resolve every node's material from the mesh's part->material spreadsheet "
+            "(GLB appearance names as fallback), recompute per-node thermal properties and "
+            "conductances, and rebuild the simulation."
+        )
+        reassign.clicked.connect(self.reassign_materials_from_spreadsheet)
+        form.addRow("materials", reassign)
+        self.component_material_label = self.QtWidgets.QLabel("")
+        self.component_material_label.setWordWrap(True)
+        form.addRow("", self.component_material_label)
         self.left_layout.addWidget(box)
 
     def _build_bulk_role_assignment_controls(self) -> None:
@@ -654,8 +743,6 @@ class GraphVisualizerApp:
             "controller_ki_hold",
             "controller_kd_coarse",
             "controller_kd_hold",
-            "controller_lambda_order",
-            "controller_mu_order",
         ):
             self.inputs[key].valueChanged.connect(
                 lambda *_args, field=key: self._handle_node_form_changed(field)
@@ -801,8 +888,6 @@ class GraphVisualizerApp:
             target.controller_ki_hold = template.controller_ki_hold
             target.controller_kd_coarse = template.controller_kd_coarse
             target.controller_kd_hold = template.controller_kd_hold
-            target.controller_lambda_order = template.controller_lambda_order
-            target.controller_mu_order = template.controller_mu_order
         else:
             target.heater_control.reset_pid_state()
             target.assigned_sensor_id = None
@@ -821,8 +906,6 @@ class GraphVisualizerApp:
             target.controller_ki_hold = 0.0
             target.controller_kd_coarse = 0.0
             target.controller_kd_hold = 0.0
-            target.controller_lambda_order = 1.0
-            target.controller_mu_order = 1.0
         if target.is_sensor:
             target.sensor = deepcopy(template.sensor)
             if target_id != self.selected_node_id:
@@ -1507,8 +1590,6 @@ class GraphVisualizerApp:
             controller_ki_hold=float(self.inputs["controller_ki_hold"].value()) if is_heater else 0.0,
             controller_kd_coarse=float(self.inputs["controller_kd_coarse"].value()) if is_heater else 0.0,
             controller_kd_hold=float(self.inputs["controller_kd_hold"].value()) if is_heater else 0.0,
-            controller_lambda_order=float(self.inputs["controller_lambda_order"].value()) if is_heater else 1.0,
-            controller_mu_order=float(self.inputs["controller_mu_order"].value()) if is_heater else 1.0,
             notes=self.inputs["notes"].toPlainText(),
         )
         if not node.C_manual_override:
@@ -1565,8 +1646,6 @@ class GraphVisualizerApp:
         self.inputs["controller_ki_hold"].setValue(float(getattr(node, "controller_ki_hold", 0.0)))
         self.inputs["controller_kd_coarse"].setValue(float(getattr(node, "controller_kd_coarse", 0.0)))
         self.inputs["controller_kd_hold"].setValue(float(getattr(node, "controller_kd_hold", 0.0)))
-        self.inputs["controller_lambda_order"].setValue(float(getattr(node, "controller_lambda_order", 1.0)))
-        self.inputs["controller_mu_order"].setValue(float(getattr(node, "controller_mu_order", 1.0)))
         self.inputs["has_cryocooler"].setChecked(node.has_cryocooler)
         self._sync_pairing_labels(node)
         self._sync_node_role_label(node)
@@ -1650,8 +1729,6 @@ class GraphVisualizerApp:
             "controller_ki_hold",
             "controller_kd_coarse",
             "controller_kd_hold",
-            "controller_lambda_order",
-            "controller_mu_order",
         ):
             self.inputs[key].setEnabled(mimo_active)
             self.inputs[key].setSpecialValueText("" if not mimo_active else "")
@@ -1665,9 +1742,14 @@ class GraphVisualizerApp:
             * float(self.inputs["heater_efficiency"].value()),
         )
 
-    def _sync_simulation_from_editor(self, reinitialize: bool = False) -> None:
+    def _sync_simulation_from_editor(self, reinitialize: bool = False, cryocoolers_changed: bool = False) -> None:
         if hasattr(self, "simulation_tab"):
-            if reinitialize:
+            if cryocoolers_changed and not reinitialize:
+                # A cryocooler is a runtime source: it changes neither the thermal
+                # matrices nor the radiation coupling, so refresh just the cooler
+                # devices instead of a full (multi-second on large graphs) re-prepare.
+                self.simulation_tab.refresh_cryocoolers_from_editor(self.model, self.current_folder)
+            elif reinitialize:
                 self.simulation_tab.sync_from_editor(
                     self.model,
                     self.current_folder,
@@ -1706,6 +1788,7 @@ class GraphVisualizerApp:
             visible_node_ids=visible_node_ids,
             node_colors=self._node_color_overrides(),
         )
+        self._update_cross_section_value_label()
         log_event("editor refresh_all after viewer.draw")
         self.two_d_view.selected_node_ids = set(self.selected_node_ids)
         self.two_d_view.set_model(
@@ -1751,6 +1834,15 @@ class GraphVisualizerApp:
                 self.component_temp_combo.setCurrentText(current)
             self.component_temp_combo.blockSignals(False)
             self._sync_component_temperature_input()
+        if hasattr(self, "component_material_combo"):
+            current = self.component_material_combo.currentText() if self.component_material_combo.count() else ""
+            materials = sorted(self.model.material_library)
+            self.component_material_combo.blockSignals(True)
+            self.component_material_combo.clear()
+            self.component_material_combo.addItems(materials)
+            if current in materials:
+                self.component_material_combo.setCurrentText(current)
+            self.component_material_combo.blockSignals(False)
 
     def _filtered_node_ids(self) -> set[int]:
         if not hasattr(self, "filter_material"):
@@ -1917,6 +2009,23 @@ class GraphVisualizerApp:
             width=float(self.depth_width_slider.value()) / 100.0,
             render=False,
         )
+        self.viewer.set_cross_section(
+            self.cross_section_toggle.isChecked(),
+            float(self.cross_section_slider.value()) / 100.0,
+            axis=self.cross_section_axis_combo.currentText().lower(),
+            render=False,
+        )
+        self._update_cross_section_value_label()
+
+    def _update_cross_section_value_label(self) -> None:
+        if not hasattr(self, "cross_section_value_label"):
+            return
+        coordinate = self.viewer.cross_section_coordinate()
+        if coordinate is None:
+            self.cross_section_value_label.setText(f"{self.cross_section_slider.value()}%")
+        else:
+            axis = self.cross_section_axis_combo.currentText().upper()
+            self.cross_section_value_label.setText(f"{axis} = {coordinate:.4g} mm")
 
     def _handle_marker_toggle(self, *_: Any) -> None:
         if hasattr(self, "viewer"):
@@ -1958,18 +2067,268 @@ class GraphVisualizerApp:
         self._sync_simulation_from_editor(reinitialize=True)
         self._set_status(f"Updated initial_temperature_K for {count} cells in {component}.")
 
+    def apply_component_cryocooler(self, enabled: bool) -> None:
+        if not hasattr(self, "component_temp_combo"):
+            return
+        component = self.component_temp_combo.currentText()
+        if not component:
+            self._set_status("Choose a component before changing cryocooler tags.", error=True)
+            return
+        count, total = _set_component_cryocooler_state(self.model, component, bool(enabled))
+        if total <= 0:
+            self._set_status(f"No cells found for component {component!r}.", error=True)
+            return
+        self._mark_dirty()
+        if self.selected_node_id in self.model.nodes:
+            self._load_node_into_form(self.model.nodes[int(self.selected_node_id)])
+        self._refresh_all(reset_camera=False)
+        self._sync_component_temperature_input()
+        self._sync_simulation_from_editor(reinitialize=False, cryocoolers_changed=True)
+        action = "Marked" if enabled else "Cleared"
+        suffix = "as cryocooler cells" if enabled else "cryocooler tags"
+        self._set_status(f"{action} {count} of {total} cells in {component} {suffix}.")
+
+    def apply_component_material(self) -> None:
+        """Manually override the material of every cell in the selected component.
+
+        Mirrors the per-cell resolution done by the spreadsheet reassignment, but
+        scoped to the one component chosen in the Component Tools box -- an escape
+        hatch for parts the spreadsheet/GLB got wrong or left unresolved.
+        """
+        if not hasattr(self, "component_temp_combo"):
+            return
+        if self.model is None:
+            self._set_status("Load a graph before setting materials.", error=True)
+            return
+        component = self.component_temp_combo.currentText()
+        if not component:
+            self._set_status("Choose a component before setting its material.", error=True)
+            return
+        material = self.component_material_combo.currentText()
+        if not material or material not in self.model.material_library:
+            self._set_status("Choose a valid material to assign.", error=True)
+            return
+
+        from .material_library import material_defaults
+
+        properties = material_defaults(material, self.model.material_library)
+        target_nodes = [
+            node for node in self.model.nodes.values() if node.component_name == component
+        ]
+        if not target_nodes:
+            self._set_status(f"No cells found for component {component!r}.", error=True)
+            return
+
+        total = len(target_nodes)
+        progress = self.QtWidgets.QProgressDialog(
+            f"Setting {component} to {material}…", "", 0, total + 2, self.window
+        )
+        progress.setWindowTitle("Set Component Material")
+        progress.setWindowModality(self.QtCore.Qt.WindowModal)
+        progress.setCancelButton(None)  # mid-mutation cancel would leave a half-updated component
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        # A single component's node loop is short, so the dialog would otherwise not
+        # paint before the blocking tail (redraw + reinitialize). Force it visible now.
+        progress.show()
+        self.QtWidgets.QApplication.processEvents()
+        self.QtWidgets.QApplication.processEvents()
+        update_every = max(1, total // 100)
+        changed_ids: list[int] = []
+        try:
+            for index, node in enumerate(target_nodes):
+                node.material = material
+                node.rho_kg_m3 = float(properties["rho_kg_m3"])
+                node.cp_J_kgK = float(properties["cp_J_kgK"])
+                node.k_W_mK = float(properties["k_W_mK"])
+                node.emissivity = float(properties.get("emissivity", node.emissivity))
+                volume = self._node_volume_m3(node)
+                node.mass_kg = node.rho_kg_m3 * volume
+                node.C_J_K = node.mass_kg * node.cp_J_kgK
+                changed_ids.append(int(node.node_id))
+                if index % update_every == 0:
+                    progress.setValue(index)
+                    self.QtWidgets.QApplication.processEvents()
+            # Only k changed (not geometry), so rescale conductances on the edges
+            # touching this component in place -- far cheaper than the full-graph
+            # face-matching sweep of refresh_geometry_edges.
+            progress.setLabelText("Recomputing conductances…")
+            progress.setValue(total)
+            self.QtWidgets.QApplication.processEvents()
+            refresh_geometry_edges_for_nodes(self.model, changed_ids)
+            progress.setLabelText("Rebuilding simulation…")
+            progress.setValue(total + 1)
+            self.QtWidgets.QApplication.processEvents()
+            self._mark_dirty()
+            if self.selected_node_id in self.model.nodes:
+                self._load_node_into_form(self.model.nodes[int(self.selected_node_id)])
+            self._refresh_all(reset_camera=False)
+            self._sync_simulation_from_editor(reinitialize=True)
+            progress.setValue(total + 2)
+        finally:
+            progress.close()
+        self._set_status(f"Set material of {len(changed_ids)} cells in {component} to {material}.")
+
+    @staticmethod
+    def _node_volume_m3(node: Any) -> float:
+        occupancy = float(getattr(node, "occupancy_fraction", 1.0) or 1.0)
+        if not (occupancy > 0.0):
+            occupancy = 1.0
+        size = getattr(node, "size_mm", None)
+        if size:
+            sx, sy, sz = (max(0.0, float(v)) for v in size)
+            return sx * sy * sz * 1.0e-9 * occupancy
+        return max(0.0, float(getattr(node, "side_length_m", 0.0))) ** 3 * occupancy
+
+    def _resolve_material_spreadsheet_path(self) -> Path | None:
+        # Prefer the lookup recorded when the graph was built, then materials.xlsx
+        # next to the graph, then ask the user.
+        data = self.model.octree_graph_data if self.model is not None else None
+        if isinstance(data, dict):
+            stored = (data.get("input_files") or {}).get("material_lookup")
+            if stored and Path(stored).is_file():
+                return Path(stored)
+        if self.current_folder is not None:
+            for candidate in Path(self.current_folder).glob("*.xlsx"):
+                if candidate.is_file() and candidate.name.lower() == "materials.xlsx":
+                    return candidate
+        start = str(self.current_folder or Path.cwd())
+        filename, _ = self.QtWidgets.QFileDialog.getOpenFileName(
+            self.window, "Select material spreadsheet (Part Name -> Material Name)", start, "Excel (*.xlsx *.xls)"
+        )
+        if not filename:
+            self._set_status("Material reassignment cancelled.")
+            return None
+        return Path(filename)
+
+    def reassign_materials_from_spreadsheet(self) -> None:
+        """Re-resolve every node's material from the mesh's part->material spreadsheet
+        (GLB appearance as fallback), recompute per-node thermal properties and
+        conductances, and rebuild the simulation."""
+        if self.model is None:
+            self._set_status("Load a graph before reassigning materials.", error=True)
+            return
+        path = self._resolve_material_spreadsheet_path()
+        if path is None:
+            return
+        from collections import Counter
+
+        from octree_graph.load_contact_report import load_contact_report
+        from octree_graph.materials import (
+            DEFAULT_ASSIGNED_MATERIAL_NAME,
+            infer_material_name_from_text,
+            is_unassigned_material_name,
+        )
+
+        from .material_library import default_material_library, material_defaults
+
+        try:
+            report = load_contact_report(path)
+        except Exception as exc:  # noqa: BLE001 - surface the parse error to the user
+            self._set_status(f"Could not read material spreadsheet {path.name}: {exc}", error=True)
+            return
+        library = default_material_library()  # fresh from materials.json (includes new materials)
+        self.model.material_library = library
+        known_lookup = {name: None for name in library}
+        distribution: Counter[str] = Counter()
+        changed = 0
+        ignored = 0
+        nodes = list(self.model.nodes.values())
+        total = len(nodes)
+        progress = self.QtWidgets.QProgressDialog(
+            f"Reassigning materials from {path.name}…", "", 0, total + 2, self.window
+        )
+        progress.setWindowTitle("Reassign Materials")
+        progress.setWindowModality(self.QtCore.Qt.WindowModal)
+        progress.setCancelButton(None)  # mid-mutation cancel would leave a half-reassigned graph
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        update_every = max(1, total // 100)
+        try:
+            for index, node in enumerate(nodes):
+                component = str(getattr(node, "component_name", "") or "")
+                sheet_material = report.material_for_component(component)
+                canonical = None
+                if sheet_material and not is_unassigned_material_name(sheet_material):
+                    canonical = (
+                        sheet_material if sheet_material in library
+                        else infer_material_name_from_text(sheet_material, known_lookup)
+                    )
+                if canonical is None:  # spreadsheet had no entry: fall back to component-name text
+                    canonical = infer_material_name_from_text(component, known_lookup)
+                if canonical is None or canonical not in library:
+                    # No spreadsheet entry / unknown material: assign the INERT material
+                    # so the node is ignored by the heat transfer rather than faked.
+                    canonical = DEFAULT_ASSIGNED_MATERIAL_NAME
+                    ignored += 1
+                properties = material_defaults(canonical, library)
+                previous = getattr(node, "material", None)
+                node.material = canonical
+                node.rho_kg_m3 = float(properties["rho_kg_m3"])
+                node.cp_J_kgK = float(properties["cp_J_kgK"])
+                node.k_W_mK = float(properties["k_W_mK"])
+                node.emissivity = float(properties.get("emissivity", node.emissivity))
+                volume = self._node_volume_m3(node)
+                node.mass_kg = node.rho_kg_m3 * volume
+                node.C_J_K = node.mass_kg * node.cp_J_kgK
+                if previous != canonical:
+                    changed += 1
+                distribution[canonical] += 1
+                if index % update_every == 0:
+                    progress.setValue(index)
+                    self.QtWidgets.QApplication.processEvents()
+            # Recompute conductances (from the new k) and radiation (from the new
+            # emissivity) across the graph, then rebuild the simulation.
+            progress.setLabelText("Recomputing conductances and radiation…")
+            progress.setValue(total)
+            self.QtWidgets.QApplication.processEvents()
+            refresh_geometry_edges(self.model)
+            progress.setLabelText("Rebuilding simulation…")
+            progress.setValue(total + 1)
+            self.QtWidgets.QApplication.processEvents()
+            self._mark_dirty()
+            if self.selected_node_id in self.model.nodes:
+                self._load_node_into_form(self.model.nodes[int(self.selected_node_id)])
+            self._refresh_all(reset_camera=False)
+            self._sync_simulation_from_editor(reinitialize=True)
+            progress.setValue(total + 2)
+        finally:
+            progress.close()
+        top = ", ".join(f"{name} ({count})" for name, count in distribution.most_common(5))
+        self.component_material_label.setText(
+            f"Reassigned {changed} of {len(self.model.nodes)} nodes from {path.name}. "
+            f"{ignored} had no material and are IGNORED (inert) in the heat transfer. Top: {top}"
+        )
+        self._set_status(
+            f"Reassigned materials from {path.name}: {changed} node(s) changed; "
+            f"{ignored} node(s) with no spreadsheet material set inert (ignored in heat transfer)."
+        )
+
     def _sync_component_temperature_input(self, *_: Any) -> None:
         if not hasattr(self, "component_temp_combo"):
             return
         component = self.component_temp_combo.currentText()
         if not component:
+            if hasattr(self, "component_cryocooler_label"):
+                self.component_cryocooler_label.setText("")
             return
+        total = 0
+        cryocooler_count = 0
         for node in self.model.nodes.values():
             if node.component_name == component:
-                self.component_temp_input.blockSignals(True)
-                self.component_temp_input.setValue(float(node.initial_temperature_K))
-                self.component_temp_input.blockSignals(False)
-                return
+                if total == 0:
+                    self.component_temp_input.blockSignals(True)
+                    self.component_temp_input.setValue(float(node.initial_temperature_K))
+                    self.component_temp_input.blockSignals(False)
+                total += 1
+                if node.has_cryocooler:
+                    cryocooler_count += 1
+        if hasattr(self, "component_cryocooler_label"):
+            self.component_cryocooler_label.setText(
+                f"{cryocooler_count} / {total} cells tagged"
+                if total
+                else "No cells in component"
+            )
 
     def _handle_component_initial_temperature_changed(self, *_: Any) -> None:
         if self._building_form:
@@ -1996,6 +2355,9 @@ class GraphVisualizerApp:
         if hasattr(self, "side_panel_stack"):
             if current is self.simulation_tab.widget:
                 self.side_panel_stack.setCurrentWidget(self.simulation_tab.controls_scroll)
+            elif current is self.thermal_validation_tab.widget:
+                self.simulation_tab.pause()
+                self.side_panel_stack.setCurrentWidget(self.thermal_validation_tab.controls_scroll)
             else:
                 self.simulation_tab.pause()
                 self.side_panel_stack.setCurrentWidget(self.left_scroll)
@@ -2009,6 +2371,8 @@ class GraphVisualizerApp:
         self.component_temperature_timer.stop()
         if hasattr(self, "simulation_tab"):
             self.simulation_tab.shutdown()
+        if hasattr(self, "thermal_validation_tab"):
+            self.thermal_validation_tab.shutdown()
         if hasattr(self, "viewer"):
             self.viewer.close()
         event.accept()
@@ -2224,6 +2588,35 @@ def _warning_color_for_node(node: NodeProperties) -> str:
     if primary == "unknown_material":
         return "#a855f7"
     return "#facc15"
+
+
+def _set_component_cryocooler_state(
+    model: ThermalGraphModel,
+    component_name: str,
+    enabled: bool,
+) -> tuple[int, int]:
+    """Set the cryocooler tag for every cell in one imported component."""
+    component = str(component_name or "").strip()
+    if not component:
+        return 0, 0
+    matching = [
+        node
+        for node in model.nodes.values()
+        if str(getattr(node, "component_name", "") or "").strip() == component
+    ]
+    for node in matching:
+        node.has_cryocooler = bool(enabled)
+        if enabled:
+            node.cryocooler_id = component
+            node.cryocooler_enabled = True
+        else:
+            node.cryocooler_id = ""
+            node.cryocooler_enabled = True
+            node.cryocooler_receiving_node_ids = []
+            node.cryocooler_contact_areas_m2 = []
+    if matching:
+        model.touch()
+    return len(matching), len(matching)
 
 
 def _node_warning_reasons(node: NodeProperties) -> list[str]:

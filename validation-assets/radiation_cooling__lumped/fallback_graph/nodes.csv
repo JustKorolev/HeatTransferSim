@@ -1,0 +1,2 @@
+node_id,cell_id,component_name,material_name,level,volume_m3,mass_kg,C_J_K,initial_temperature_K,radiation_is_exposed,radiation_radiating_area_m2,radiation_emissivity,radiation_G_rad_W_K,radiation_R_rad_K_W,occupancy_fraction,confidence
+1,cell_1,VALIDATION_RADIATOR,Copper,0,8.000000000000001e-06,0.07168000000000001,27.596800000000005,300.0,True,0.0024,0.5,0.000139355121721344,,1.0,high

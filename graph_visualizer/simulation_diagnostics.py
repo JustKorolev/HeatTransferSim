@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 
 from .graph_io import load_graph_folder
+from .matrix_builder import _is_cad_role_node
 from .models import ThermalGraphModel
 from .simulation_model import PreparedSimulation, prepare_simulation
 from .simulation_parameters import (
@@ -19,6 +20,62 @@ from .simulation_parameters import (
     apply_initial_temperature_parameter_payload,
     load_simulation_parameters,
 )
+
+
+def inter_component_conduction_report(model: ThermalGraphModel) -> list[dict[str, Any]]:
+    """List every pair of distinct components (parts) joined by a CONDUCTION edge.
+
+    Parts that should only exchange heat by radiation must have NO conduction
+    edges between them. An entry here for a pair you expect to be separated by a
+    vacuum gap means the voxelization bridged that gap (cells from the two parts
+    touch because the gap is narrower than ~2 cells), giving a spurious thermal
+    short. Sorted by total inter-part conductance (worst first). Role nodes
+    (heaters/sensors/cryocoolers) are excluded."""
+    component_of: dict[int, str] = {}
+    for node_id, node in model.nodes.items():
+        if _is_cad_role_node(node):
+            continue
+        component_of[int(node_id)] = str(getattr(node, "component_name", "") or "").strip()
+    pairs: dict[tuple[str, str], dict[str, float]] = {}
+    for edge in model.edges.values():
+        comp_a = component_of.get(int(edge.source))
+        comp_b = component_of.get(int(edge.target))
+        if not comp_a or not comp_b or comp_a == comp_b:
+            continue
+        key = tuple(sorted((comp_a, comp_b)))
+        entry = pairs.setdefault(key, {"edges": 0.0, "total_conductance_W_K": 0.0})
+        entry["edges"] += 1.0
+        entry["total_conductance_W_K"] += float(getattr(edge, "Gij_W_K", 0.0) or 0.0)
+    report = [
+        {
+            "component_a": key[0],
+            "component_b": key[1],
+            "edges": int(value["edges"]),
+            "total_conductance_W_K": float(value["total_conductance_W_K"]),
+        }
+        for key, value in pairs.items()
+    ]
+    report.sort(key=lambda row: row["total_conductance_W_K"], reverse=True)
+    return report
+
+
+def inter_component_conduction_report_from_folder(folder: str | Path) -> list[dict[str, Any]]:
+    """Load a saved octree graph folder and run inter_component_conduction_report."""
+    model, _matrices = load_graph_folder(Path(folder))
+    return inter_component_conduction_report(model)
+
+
+def format_inter_component_conduction_report(report: list[dict[str, Any]]) -> str:
+    """Human-readable table of inter-component conduction connections."""
+    if not report:
+        return "No conduction edges between distinct components (no bridged gaps)."
+    lines = [f"{'part A':28s} {'part B':28s} {'edges':>6s} {'total G [W/K]':>14s}"]
+    for row in report:
+        lines.append(
+            f"{row['component_a'][:28]:28s} {row['component_b'][:28]:28s} "
+            f"{row['edges']:>6d} {row['total_conductance_W_K']:>14.4g}"
+        )
+    return "\n".join(lines)
 
 
 @dataclass
@@ -82,7 +139,7 @@ def compare_implicit_cpu_to_expm_multiply(
         raise RuntimeError("Implicit sparse CPU stepper is unavailable for this model/parameter set.")
 
     implicit_temperature, implicit_elapsed = _run_temperature_matrix(implicit, steps)
-    reference_temperature, reference_elapsed = _run_temperature_matrix(reference, steps)
+    reference_temperature, reference_elapsed = _run_reference_expm_matrix(reference, steps)
     if not np.array_equal(implicit.node_ids, reference.node_ids):
         raise RuntimeError("Stepper comparison produced mismatched node ordering.")
     time_s = np.arange(steps + 1, dtype=float) * float(params.dt_s)
@@ -147,9 +204,7 @@ def compare_current_state_to_expm_multiply(
     )
     reference_elapsed = 0.0
     if target_time_s > 0.0:
-        start = time.perf_counter()
-        reference.step_forward()
-        reference_elapsed = time.perf_counter() - start
+        _, reference_elapsed = _run_reference_expm_matrix(reference, 1)
     if not np.array_equal(ordered_node_ids, reference.node_ids):
         raise RuntimeError("Current-state comparison produced mismatched node ordering.")
     reference_temperature = np.asarray(reference.temperatures_K, dtype=float).reshape(-1)
@@ -270,24 +325,13 @@ def _prepare_for_solver(
     *,
     solver: str,
 ) -> PreparedSimulation:
+    if solver not in {"implicit", "expm_multiply"}:
+        raise ValueError(f"Unknown solver {solver!r}.")
     local_matrices = _copy_matrix_payload(matrices)
     local_params = deepcopy(params)
-    if solver == "implicit":
-        local_params.implicit_sparse_simulation_enabled = True
-        local_params.fast_sparse_simulation_enabled = False
-    elif solver == "expm_multiply":
-        local_params.implicit_sparse_simulation_enabled = False
-        local_params.fast_sparse_simulation_enabled = False
-    else:
-        raise ValueError(f"Unknown solver {solver!r}.")
+    local_params.gpu_solver_enabled = False  # deterministic CPU comparison
     prepared = prepare_simulation(model, local_matrices, local_params)
-    # Force this comparison onto CPU paths even if optional GPU acceleration exists.
-    prepared.gpu_stepper = None
-    if solver == "expm_multiply":
-        prepared.sparse_implicit_stepper = None
-        prepared.fast_sparse_substeps = None
-    elif solver == "implicit":
-        prepared.fast_sparse_substeps = None
+    prepared.gpu_implicit_stepper = None
     return prepared
 
 
@@ -301,13 +345,9 @@ def _prepare_current_state_reference(
     local_params = deepcopy(params)
     local_params.dt_s = max(float(target_time_s), 1.0e-30)
     local_params.t_final_s = max(float(getattr(local_params, "t_final_s", 0.0)), float(target_time_s))
-    local_params.gpu_simulation_enabled = False
-    local_params.implicit_sparse_simulation_enabled = False
-    local_params.fast_sparse_simulation_enabled = False
+    local_params.gpu_solver_enabled = False
     prepared = prepare_simulation(model, dict(matrices), local_params)
-    prepared.gpu_stepper = None
-    prepared.sparse_implicit_stepper = None
-    prepared.fast_sparse_substeps = None
+    prepared.gpu_implicit_stepper = None
     prepared.initial_temperatures_K = np.asarray(initial_temperatures_K, dtype=float).reshape(-1).copy()
     prepared.reset()
     return prepared
@@ -333,6 +373,42 @@ def _run_temperature_matrix(prepared: PreparedSimulation, steps: int) -> tuple[n
         prepared.step_forward()
         rows.append(np.asarray(prepared.temperatures_K, dtype=float).copy())
     return np.vstack(rows), time.perf_counter() - start
+
+
+def _run_reference_expm_matrix(prepared: PreparedSimulation, steps: int) -> tuple[np.ndarray, float]:
+    """Exact matrix-exponential reference trajectory (zero-input / passive + radiation).
+
+    This is the accuracy reference the implicit solver is validated against. It
+    advances the affine linear system z(t+dt) = expm(A_aug*dt) z per step, with
+    the radiation term frozen per step (the same operator splitting the implicit
+    solver uses). Heater/controller inputs are not replayed here.
+    """
+    from scipy.sparse import bmat, csr_matrix
+    from scipy.sparse.linalg import expm_multiply
+
+    n = len(prepared.node_ids)
+    base_b = (
+        np.asarray(prepared.base_b, dtype=float).reshape(-1)
+        if prepared.base_b is not None
+        else np.zeros(n, dtype=float)
+    )
+    rows = [np.asarray(prepared.temperatures_K, dtype=float).copy()]
+    start = time.perf_counter()
+    for _ in range(max(1, int(steps))):
+        b = base_b + prepared._radiation_source_vector()
+        A_aug = bmat(
+            [
+                [csr_matrix(prepared.A), csr_matrix(b.reshape(-1, 1))],
+                [csr_matrix((1, n)), csr_matrix((1, 1))],
+            ],
+            format="csr",
+        )
+        prepared.z = np.asarray(expm_multiply(A_aug * float(prepared.params.dt_s), prepared.z), dtype=float)
+        prepared.z[-1] = 1.0
+        rows.append(np.asarray(prepared.temperatures_K, dtype=float).copy())
+    elapsed = time.perf_counter() - start
+    prepared.last_step_profile_ms = {"cpu_expm_multiply_ms": elapsed * 1000.0}
+    return np.vstack(rows), elapsed
 
 
 def _comparison_metrics(
@@ -386,14 +462,8 @@ def _step_count_for_time(time_s: float, dt_s: float) -> int:
 
 def _last_solver_name(prepared: PreparedSimulation) -> str:
     profile = prepared.last_step_profile_ms
-    if "cpu_sparse_implicit_step_ms" in profile:
-        return "implicit_sparse_cpu"
     if "cpu_expm_multiply_ms" in profile:
         return "expm_multiply"
-    if "cpu_fast_sparse_step_ms" in profile:
-        return "fast_sparse_cpu"
-    if "gpu_step_ms" in profile:
-        return "gpu_sparse"
-    if "dense_phi_matvec_ms" in profile:
-        return "dense_phi_matvec"
+    if "implicit_step_ms" in profile:
+        return "implicit_sparse_gpu" if profile.get("implicit_backend_gpu", 0.0) >= 1.0 else "implicit_sparse_cpu"
     return "unknown"

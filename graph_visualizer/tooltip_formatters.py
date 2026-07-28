@@ -69,8 +69,6 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"hold kP: {_fmt(getattr(attrs, 'controller_kp_hold', None))}",
                 f"hold kI: {_fmt(getattr(attrs, 'controller_ki_hold', None))}",
                 f"hold kD: {_fmt(getattr(attrs, 'controller_kd_hold', None))}",
-                f"MIMO lambda: {_fmt(getattr(attrs, 'controller_lambda_order', None))}",
-                f"MIMO mu: {_fmt(getattr(attrs, 'controller_mu_order', None))}",
             ]
         )
         warning = str(getattr(attrs, "heater_warning", "") or "")

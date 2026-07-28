@@ -1,0 +1,4617 @@
+{
+  "metadata": {
+    "graph_name": "insulated_block_with_constant_heating",
+    "created_at": "2026-07-21T01:00:02+00:00",
+    "updated_at": "2026-07-21T01:00:02+00:00",
+    "T_sur_K": 293.15,
+    "edge_mode": "auto",
+    "app_version": "graph_visualizer 0.1",
+    "notes": ""
+  },
+  "input_files": {},
+  "parameters": {},
+  "materials_used": [
+    "Copper"
+  ],
+  "component_mapping": {
+    "VALIDATION_BLOCK": "VALIDATION_BLOCK",
+    "VALIDATION_HEATER": "VALIDATION_HEATER"
+  },
+  "octree_cells": [
+    {
+      "cell_id": "cell_0",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -45.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_1",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -45.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_2",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -45.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_3",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -45.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_4",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -35.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_5",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -35.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_6",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -35.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_7",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -35.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_8",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -25.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_9",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -25.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_10",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -25.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_11",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -25.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_12",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -15.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_13",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -15.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_14",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -15.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_15",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -15.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_16",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -5.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_17",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -5.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_18",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -5.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_19",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -5.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_20",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        5.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_21",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        5.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_22",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        5.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_23",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        5.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_24",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        15.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_25",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        15.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_26",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        15.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_27",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        15.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_28",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        25.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_29",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        25.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_30",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        25.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_31",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        25.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_32",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        35.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_33",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        35.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_34",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        35.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_35",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        35.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_36",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        45.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_37",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        45.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_38",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        45.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_39",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        45.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "dominant_component": "VALIDATION_BLOCK",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    },
+    {
+      "cell_id": "cell_40",
+      "parent_id": null,
+      "children_ids": [],
+      "level": 0,
+      "center_mm": [
+        -51.0,
+        0.0,
+        0.0
+      ],
+      "size_mm": [
+        1.0,
+        20.0,
+        20.0
+      ],
+      "dominant_component": "VALIDATION_HEATER",
+      "dominant_material": "Copper",
+      "occupancy_fraction": 1.0,
+      "confidence": "high",
+      "warnings": []
+    }
+  ],
+  "graph_nodes": [
+    {
+      "node_id": 0,
+      "cell_id": "cell_0",
+      "center_mm": [
+        -45.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 1,
+      "cell_id": "cell_1",
+      "center_mm": [
+        -45.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 2,
+      "cell_id": "cell_2",
+      "center_mm": [
+        -45.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 3,
+      "cell_id": "cell_3",
+      "center_mm": [
+        -45.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 4,
+      "cell_id": "cell_4",
+      "center_mm": [
+        -35.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 5,
+      "cell_id": "cell_5",
+      "center_mm": [
+        -35.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 6,
+      "cell_id": "cell_6",
+      "center_mm": [
+        -35.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 7,
+      "cell_id": "cell_7",
+      "center_mm": [
+        -35.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 8,
+      "cell_id": "cell_8",
+      "center_mm": [
+        -25.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 9,
+      "cell_id": "cell_9",
+      "center_mm": [
+        -25.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 10,
+      "cell_id": "cell_10",
+      "center_mm": [
+        -25.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 11,
+      "cell_id": "cell_11",
+      "center_mm": [
+        -25.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 12,
+      "cell_id": "cell_12",
+      "center_mm": [
+        -15.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 13,
+      "cell_id": "cell_13",
+      "center_mm": [
+        -15.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 14,
+      "cell_id": "cell_14",
+      "center_mm": [
+        -15.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 15,
+      "cell_id": "cell_15",
+      "center_mm": [
+        -15.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 16,
+      "cell_id": "cell_16",
+      "center_mm": [
+        -5.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 17,
+      "cell_id": "cell_17",
+      "center_mm": [
+        -5.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 18,
+      "cell_id": "cell_18",
+      "center_mm": [
+        -5.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 19,
+      "cell_id": "cell_19",
+      "center_mm": [
+        -5.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 20,
+      "cell_id": "cell_20",
+      "center_mm": [
+        5.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 21,
+      "cell_id": "cell_21",
+      "center_mm": [
+        5.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 22,
+      "cell_id": "cell_22",
+      "center_mm": [
+        5.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 23,
+      "cell_id": "cell_23",
+      "center_mm": [
+        5.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 24,
+      "cell_id": "cell_24",
+      "center_mm": [
+        15.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 25,
+      "cell_id": "cell_25",
+      "center_mm": [
+        15.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 26,
+      "cell_id": "cell_26",
+      "center_mm": [
+        15.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 27,
+      "cell_id": "cell_27",
+      "center_mm": [
+        15.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 28,
+      "cell_id": "cell_28",
+      "center_mm": [
+        25.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 29,
+      "cell_id": "cell_29",
+      "center_mm": [
+        25.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 30,
+      "cell_id": "cell_30",
+      "center_mm": [
+        25.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 31,
+      "cell_id": "cell_31",
+      "center_mm": [
+        25.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 32,
+      "cell_id": "cell_32",
+      "center_mm": [
+        35.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 33,
+      "cell_id": "cell_33",
+      "center_mm": [
+        35.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 34,
+      "cell_id": "cell_34",
+      "center_mm": [
+        35.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 35,
+      "cell_id": "cell_35",
+      "center_mm": [
+        35.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 36,
+      "cell_id": "cell_36",
+      "center_mm": [
+        45.0,
+        -5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 37,
+      "cell_id": "cell_37",
+      "center_mm": [
+        45.0,
+        -5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 38,
+      "cell_id": "cell_38",
+      "center_mm": [
+        45.0,
+        5.0,
+        -5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 39,
+      "cell_id": "cell_39",
+      "center_mm": [
+        45.0,
+        5.0,
+        5.0
+      ],
+      "size_mm": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_BLOCK",
+      "material_name": "Copper",
+      "volume_m3": 1.0000000000000002e-06,
+      "mass_kg": 0.008960000000000001,
+      "C_J_K": 3.4496,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": false,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": null,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    },
+    {
+      "node_id": 40,
+      "cell_id": "cell_40",
+      "center_mm": [
+        -51.0,
+        0.0,
+        0.0
+      ],
+      "size_mm": [
+        1.0,
+        20.0,
+        20.0
+      ],
+      "level": 0,
+      "component_name": "VALIDATION_HEATER",
+      "material_name": "Copper",
+      "volume_m3": 4.0000000000000003e-07,
+      "mass_kg": 1e-09,
+      "C_J_K": 1e-06,
+      "initial_temperature_K": 293.15,
+      "occupancy_fraction": 1.0,
+      "is_heater": true,
+      "is_sensor": false,
+      "confidence": "high",
+      "warnings": [],
+      "radiation": {
+        "is_exposed": false,
+        "radiating_area_m2": 0.0,
+        "emissivity": 0.35,
+        "G_rad_W_K": 0.0,
+        "R_rad_K_W": null
+      },
+      "tags": {
+        "cryocooler": false,
+        "notes": "",
+        "heater_id": 40,
+        "sensor_id": null
+      },
+      "heater_control": {
+        "mode": "manual",
+        "pid": {
+          "kp": 0.0,
+          "ki": 0.0,
+          "kd": 0.0,
+          "lambda_order": 1.0,
+          "mu_order": 1.0,
+          "integral_leak_per_s": 0.0,
+          "setpoint": 293.15
+        },
+        "manual": {
+          "power": 0.0
+        },
+        "pid_state": {
+          "integral": 0.0,
+          "previous_error": null,
+          "error_history": []
+        }
+      },
+      "controller": {
+        "setpoint_K": 293.15,
+        "weight": 0.0,
+        "sensor_settling_time_s": 0.0,
+        "kp_coarse": 0.0,
+        "ki_coarse": 0.0,
+        "kp_hold": 0.0,
+        "ki_hold": 0.0,
+        "kd_coarse": 0.0,
+        "kd_hold": 0.0,
+        "lambda_order": 1.0,
+        "mu_order": 1.0,
+        "integral_leak_per_s": 0.0
+      },
+      "power_deposition_node_ids": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "power_deposition_weights": [
+        0.25,
+        0.25,
+        0.25,
+        0.25
+      ],
+      "heater_attached": true,
+      "heater_valid": true,
+      "sensor_monitor_only": false,
+      "sensor_valid": true,
+      "sensor_control_mode": "manual",
+      "sensor_manual_power_W": 0.0
+    }
+  ],
+  "graph_edges": [
+    {
+      "edge_id": "edge_0_1",
+      "node_i": 0,
+      "node_j": 1,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_1_2",
+      "node_i": 1,
+      "node_j": 2,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_2_3",
+      "node_i": 2,
+      "node_j": 3,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_3_4",
+      "node_i": 3,
+      "node_j": 4,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_4_5",
+      "node_i": 4,
+      "node_j": 5,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_5_6",
+      "node_i": 5,
+      "node_j": 6,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_6_7",
+      "node_i": 6,
+      "node_j": 7,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_7_8",
+      "node_i": 7,
+      "node_j": 8,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_8_9",
+      "node_i": 8,
+      "node_j": 9,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_9_10",
+      "node_i": 9,
+      "node_j": 10,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_10_11",
+      "node_i": 10,
+      "node_j": 11,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_11_12",
+      "node_i": 11,
+      "node_j": 12,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_12_13",
+      "node_i": 12,
+      "node_j": 13,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_13_14",
+      "node_i": 13,
+      "node_j": 14,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_14_15",
+      "node_i": 14,
+      "node_j": 15,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_15_16",
+      "node_i": 15,
+      "node_j": 16,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_16_17",
+      "node_i": 16,
+      "node_j": 17,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_17_18",
+      "node_i": 17,
+      "node_j": 18,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_18_19",
+      "node_i": 18,
+      "node_j": 19,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_19_20",
+      "node_i": 19,
+      "node_j": 20,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_20_21",
+      "node_i": 20,
+      "node_j": 21,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_21_22",
+      "node_i": 21,
+      "node_j": 22,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_22_23",
+      "node_i": 22,
+      "node_j": 23,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_23_24",
+      "node_i": 23,
+      "node_j": 24,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_24_25",
+      "node_i": 24,
+      "node_j": 25,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_25_26",
+      "node_i": 25,
+      "node_j": 26,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_26_27",
+      "node_i": 26,
+      "node_j": 27,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_27_28",
+      "node_i": 27,
+      "node_j": 28,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_28_29",
+      "node_i": 28,
+      "node_j": 29,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_29_30",
+      "node_i": 29,
+      "node_j": 30,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_30_31",
+      "node_i": 30,
+      "node_j": 31,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_31_32",
+      "node_i": 31,
+      "node_j": 32,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_32_33",
+      "node_i": 32,
+      "node_j": 33,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_33_34",
+      "node_i": 33,
+      "node_j": 34,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_34_35",
+      "node_i": 34,
+      "node_j": 35,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_35_36",
+      "node_i": 35,
+      "node_j": 36,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_36_37",
+      "node_i": 36,
+      "node_j": 37,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_37_38",
+      "node_i": 37,
+      "node_j": 38,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    },
+    {
+      "edge_id": "edge_38_39",
+      "node_i": 38,
+      "node_j": 39,
+      "edge_type": "internal_conduction",
+      "G_W_K": 4.010000000000001,
+      "shared_area_m2": 0.0,
+      "distance_m": 0.0,
+      "contact_confidence": "medium",
+      "source": "auto",
+      "warnings": []
+    }
+  ],
+  "warnings": [],
+  "heater_sensor_tags": {
+    "40": {
+      "cryocooler": false,
+      "notes": "",
+      "heater_id": 40,
+      "sensor_id": null
+    }
+  },
+  "controller_gain_matrix": {},
+  "validation_results": {}
+}

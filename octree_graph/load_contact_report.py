@@ -86,12 +86,20 @@ def _add_component_aliases(report: ContactReport) -> None:
 
 
 def _component_aliases(name: str) -> set[str]:
-    aliases = {name}
-    current = name
-    for _ in range(3):
-        stripped = re.sub(r"([_-])\d+$", "", current)
-        if stripped == current:
-            break
-        aliases.add(stripped)
-        current = stripped
-    return aliases
+    # Reduce a part identifier to matchable keys. The lookup sheet keys are full
+    # assembly paths with instance suffixes (".../V_MMC_..._18-8SS-50") while the
+    # GLB/graph names are leaf names with different indices ("V_MMC_..._18-8SS_1812",
+    # "Wire Routes^HISPEC-0030-A0016_2"). Reducing BOTH to a leaf (drop "/" and "^"
+    # prefixes) with trailing "-N"/"_N" indices stripped lets them match.
+    bases = {name, re.split(r"[/^]", name)[-1]}
+    aliases: set[str] = set()
+    for base in bases:
+        aliases.add(base)
+        current = base
+        for _ in range(4):
+            stripped = re.sub(r"([_-])\d+$", "", current)
+            if stripped == current:
+                break
+            aliases.add(stripped)
+            current = stripped
+    return {alias for alias in aliases if alias}
