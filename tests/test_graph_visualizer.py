@@ -2490,6 +2490,43 @@ class GraphVisualizerModelTests(unittest.TestCase):
             prepared.step_forward()
         self.assertEqual(prepared.controller_allocator_diagnostics.get("controller_scheme"), "modal_lqr")
 
+    def test_drop_inert_cells_removes_near_zero_capacitance(self) -> None:
+        import numpy as np
+        import scipy.sparse as sp
+
+        from graph_visualizer.modal_reduction import drop_inert_cells
+
+        # Four real cells (C ~ 0.05 J/K) chained by real conduction, plus two
+        # thermally-inert void cells (C ~ 1e-9) weakly bridged (g=1e-9) -- the
+        # 'ZERO MATTER' / unassigned pattern that hangs the slow-mode solve.
+        C = np.array([0.05, 0.06, 0.04, 0.05, 1.0e-9, 2.0e-9], dtype=float)
+        node_ids = np.array([10, 11, 12, 13, 90, 91], dtype=int)
+        Grad = np.zeros(6, dtype=float)
+        edges = [(0, 1, 1.0), (1, 2, 1.0), (2, 3, 1.0), (3, 4, 1.0e-9), (4, 5, 1.0e-9)]
+        L = np.zeros((6, 6), dtype=float)
+        for i, j, g in edges:
+            L[i, i] += g
+            L[j, j] += g
+            L[i, j] -= g
+            L[j, i] -= g
+        L = sp.csr_matrix(L)
+
+        Lk, Ck, Gradk, nidk, keep, info = drop_inert_cells(L, C, Grad, node_ids)
+        # the two near-zero-capacitance cells are dropped; the real cells remain
+        self.assertEqual(info["dropped"], 2)
+        self.assertEqual(info["kept"], 4)
+        self.assertTrue(np.array_equal(nidk, np.array([10, 11, 12, 13])))
+        self.assertEqual(Lk.shape, (4, 4))
+        self.assertTrue(np.all(Ck >= info["capacitance_floor_J_K"]))
+        self.assertTrue(np.array_equal(keep, np.array([True, True, True, True, False, False])))
+
+        # No-op when every cell is a genuine thermal cell.
+        Lk2, Ck2, _g2, nid2, _keep2, info2 = drop_inert_cells(
+            L[:4][:, :4], C[:4], Grad[:4], node_ids[:4]
+        )
+        self.assertEqual(info2["dropped"], 0)
+        self.assertTrue(np.array_equal(nid2, node_ids[:4]))
+
     def test_build_modal_controller_panel_wires_result_into_scheme(self) -> None:
         import os
 

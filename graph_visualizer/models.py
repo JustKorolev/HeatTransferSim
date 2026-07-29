@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from .material_library import material_defaults
+from .material_library import _is_null_material, material_defaults
 
 
 class EdgeMode(str, Enum):
@@ -634,6 +634,12 @@ class NodeProperties:
         self.cp_J_kgK = defaults["cp_J_kgK"]
         self.k_W_mK = defaults["k_W_mK"]
         self.emissivity = defaults["emissivity"]
+        # Null-material cells are modeled as G-10 insulation; recompute their mass
+        # from the insulation density (the stored mass came from the ~0 void
+        # density) so the capacitance is physical rather than degenerate.
+        if _is_null_material(self.material) and not self.C_manual_override:
+            occupancy = float(getattr(self, "occupancy_fraction", 1.0) or 1.0)
+            self.mass_kg = self.rho_kg_m3 * self.volume_m3 * occupancy
         self.recompute_heat_capacity()
 
     def recompute_heat_capacity(self) -> None:

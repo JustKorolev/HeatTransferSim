@@ -260,16 +260,16 @@
   },
   {
     "name": "ZERO MATTER",
-    "density_kg_m3": 1.0,
-    "cp_J_kgK": 1.0,
-    "k_W_mK": 1.0e-9,
-    "emissivity": 0.0
+    "density_kg_m3": 1800.0,
+    "cp_J_kgK": 1000.0,
+    "k_W_mK": 0.6,
+    "emissivity": 0.9
   },
   {
     "name": "Unassigned (ignored)",
-    "density_kg_m3": 1.0,
-    "cp_J_kgK": 1.0,
-    "k_W_mK": 1.0e-9,
-    "emissivity": 0.0
+    "density_kg_m3": 1800.0,
+    "cp_J_kgK": 1000.0,
+    "k_W_mK": 0.6,
+    "emissivity": 0.9
   }
 ]

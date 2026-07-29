@@ -141,7 +141,11 @@ for _curve, _names in [
     (_SS_304, ["aisi 304", "aisi 304 stainless steel", "18-8 stainless steel", "17-7ph stainless steel", "304 stainless steel", "aisi 303 stainless steel", "aisi 316 stainless steel", "aisi 316 stainless steel sheet (ss)"]),
     (_COPPER, ["copper", "ofhc copper"]),
     (_INVAR, ["invar36", "invar, al 36", "invar", "invar (fe-36ni)", "carpenter invar 36"]),
-    (_G10, ["phenolic", "g-10", "delrin 2700 nc010, low viscosity acetal copolymer (ss)", "delrin", "cryogenic g10-cr", "g-10 glass epoxy laminate", "fiberglass pcb"]),
+    (_G10, ["phenolic", "g-10", "delrin 2700 nc010, low viscosity acetal copolymer (ss)", "delrin", "cryogenic g10-cr", "g-10 glass epoxy laminate", "fiberglass pcb",
+            # Cells with no real material assignment are modeled as G-10 insulation
+            # (see material_library.INSULATION_MATERIAL_DEFAULTS): real cryo cp/k
+            # curves keep them in the thermal network instead of a disconnected void.
+            "zero matter", "unassigned (ignored)", "unassigned", "not assigned"]),
 ]:
     for _name in _names:
         _REGISTRY[_name] = _curve

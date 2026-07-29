@@ -115,10 +115,39 @@ def default_material_library() -> dict[str, dict[str, float]]:
     return deepcopy(DEFAULT_MATERIAL_LIBRARY)
 
 
+# Cells with no real material assignment ("ZERO MATTER" / "Unassigned" void
+# voxels) are modeled as G-10 fiberglass-epoxy INSULATION rather than vacuum: a
+# real (if weak) conductor with genuine heat capacity and NIST cryo curves (see
+# material_properties_cryo._G10, which also maps these names). This keeps them in
+# the thermal network -- a null material (k~1e-9) leaves them disconnected, which
+# injects a dense cluster of near-zero eigenvalues that stalls the modal-reduction
+# slow-mode solve -- and is physically closer to the truth (these are insulation
+# gaps, not vacuum). Overrides any degenerate library entry of the same name.
+INSULATION_MATERIAL_DEFAULTS: dict[str, float] = {  # matches the G-10 entry in materials.json
+    "rho_kg_m3": 1800.0,   # G-10 fiberglass-epoxy laminate
+    "cp_J_kgK": 1000.0,    # nominal; the NIST G-10 cryo curve overrides at runtime
+    "k_W_mK": 0.6,         # nominal normal-direction k; cryo curve overrides at runtime
+    "emissivity": 0.9,
+}
+_NULL_MATERIAL_NAMES = frozenset(
+    {"", "none", "not assigned", "unassigned", "unassigned (ignored)", "zero matter"}
+)
+
+
+def _is_null_material(material: str) -> bool:
+    """True for placeholder 'no real material' names (case/space-insensitive)."""
+    return " ".join(str(material or "").strip().lower().split()) in _NULL_MATERIAL_NAMES
+
+
 def material_defaults(
     material: str, library: dict[str, dict[str, float]] | None = None
 ) -> dict[str, float]:
-    """Return defaults for a material, falling back to the generic package."""
+    """Return defaults for a material, falling back to the generic package.
+
+    Placeholder 'no real material' cells are modeled as G-10 insulation (see
+    INSULATION_MATERIAL_DEFAULTS), regardless of any degenerate library entry."""
+    if _is_null_material(material):
+        return dict(INSULATION_MATERIAL_DEFAULTS)
     material_library = library or DEFAULT_MATERIAL_LIBRARY
     if material in material_library:
         return dict(material_library[material])

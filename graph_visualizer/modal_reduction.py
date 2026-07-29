@@ -114,6 +114,53 @@ def dc_gain_and_rga(Leff, F, S, monitor):
     return G, RGA
 
 
+def drop_inert_cells(
+    L: csr_matrix,
+    C: np.ndarray,
+    Grad: np.ndarray,
+    node_ids: np.ndarray,
+    *,
+    capacitance_floor_frac: float = 1.0e-3,
+) -> tuple[csr_matrix, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Remove thermally-inert cells before reduction.
+
+    Voxels assigned a null material ("ZERO MATTER" / "Unassigned") and the
+    heater/sensor marker nodes carry near-zero heat capacity (C ~ 1e-9 J/K) and
+    near-zero conduction (k ~ 1e-9 W/mK): they store no thermal state and couple
+    to nothing. But they are weakly bridged into the main component, so the
+    generalized eigenproblem (L + diag(Grad)) phi = lam C phi picks them up as a
+    dense cluster of spurious near-zero eigenvalues. That makes the symmetric
+    shift-invert slow-mode solve ill-conditioned -- the scaling D = 1/sqrt(C)
+    explodes -- and effectively non-convergent (it can hang for many minutes on a
+    large graph). Dropping them leaves the real thermal network.
+
+    A cell is kept when ``C >= capacitance_floor_frac * median(C)`` over the
+    positive-capacitance cells. This is a NO-OP on operators whose capacitances
+    were already floored (e.g. the octree-saved matrices, whose minimum is far
+    above the cut), and only trims genuinely degenerate cells otherwise.
+    Heater/sensor I/O is unaffected: F/S map to the real deposition/readout
+    cells, which are retained. Returns the trimmed (L, C, Grad, node_ids) plus
+    the boolean keep mask and an info dict.
+    """
+    C = np.asarray(C, dtype=float).reshape(-1)
+    Grad = np.asarray(Grad, dtype=float).reshape(-1)
+    node_ids = np.asarray(node_ids, dtype=int).reshape(-1)
+    L = csr_matrix(L)
+    positive = C[C > 0.0]
+    scale = float(np.median(positive)) if positive.size else 1.0
+    floor = max(0.0, float(capacitance_floor_frac)) * scale
+    keep = C >= floor
+    info = {
+        "dropped": int((~keep).sum()),
+        "kept": int(keep.sum()),
+        "capacitance_floor_J_K": float(floor),
+    }
+    if info["dropped"] == 0:
+        return L, C, Grad, node_ids, keep, info
+    Lk = L[keep][:, keep].tocsr()
+    return Lk, C[keep], Grad[keep], node_ids[keep], keep, info
+
+
 # ------------------------------------------------------------------ in-memory plant maps
 
 def heater_sensor_maps_from_model(model: Any, node_ids_full, main_rows):
@@ -234,10 +281,16 @@ class ModalDesignResult:
     slowest_tau_s: float
     hsv_above_1pct: int
     cond_dc_gain: float
+    inert_cells_dropped: int = 0
 
     def summary(self) -> str:
+        inert = (
+            f" ({self.inert_cells_dropped} inert cells dropped)"
+            if self.inert_cells_dropped
+            else ""
+        )
         return (
-            f"r={self.reduced_order} (from {self.n_modes} modes over {self.main_nodes} nodes); "
+            f"r={self.reduced_order} (from {self.n_modes} modes over {self.main_nodes} nodes{inert}); "
             f"{self.n_heaters} heaters, {self.n_controlled}/{self.n_sensors} controlled sensors; "
             f"reduced DC err {self.dc_gain_error:.1e}, step err {self.step_response_error:.1e}, "
             f"{'stable' if self.reduced_stable else 'UNSTABLE'}; cond(G)={self.cond_dc_gain:.0f}."
@@ -271,6 +324,15 @@ def design_modal_controller(
     Grad = np.asarray(Grad, dtype=float).reshape(-1) if Grad is not None else np.zeros_like(C)
     node_ids = np.asarray(node_ids, dtype=int).reshape(-1)
     L = csr_matrix(L)
+
+    total_nodes_full = int(C.size)
+    L, C, Grad, node_ids, _inert_keep, inert_info = drop_inert_cells(L, C, Grad, node_ids)
+    if inert_info["dropped"]:
+        _report(
+            progress,
+            f"Dropped {inert_info['dropped']} thermally-inert (null-material / marker) "
+            f"cells; {inert_info['kept']} thermal cells remain.",
+        )
 
     _report(progress, "Selecting largest connected component…")
     Lm, Cm, Gradm, _node_ids_m, main_rows, info = largest_connected_component(L, C, Grad, node_ids)
@@ -341,7 +403,7 @@ def design_modal_controller(
     hsv_norm = hsv / hsv[0] if hsv.size and hsv[0] > 0 else hsv
     return ModalDesignResult(
         path=str(out_path),
-        total_nodes=int(info["total_nodes"]),
+        total_nodes=total_nodes_full,
         main_nodes=main_nodes,
         components=int(info["components"]),
         n_modes=int(n_modes),
@@ -355,6 +417,7 @@ def design_modal_controller(
         slowest_tau_s=slowest_tau,
         hsv_above_1pct=int(np.sum(hsv_norm > 1e-2)),
         cond_dc_gain=float(np.linalg.cond(G)),
+        inert_cells_dropped=int(inert_info["dropped"]),
     )
 
 

@@ -2785,10 +2785,10 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         empty = ContactReport(component_materials={})
         self.assertEqual(_physical_material_name(obj, empty, known), "6061-T6 Aluminum")
 
-    def test_unresolved_material_is_inert_not_aluminum(self) -> None:
+    def test_unresolved_material_is_insulation_not_aluminum(self) -> None:
         # No spreadsheet entry and no material-bearing appearance/name -> the node
-        # gets the INERT default so it is ignored by the heat transfer, NOT faked
-        # as aluminum.
+        # gets the default material, which is modeled as G-10 INSULATION (not faked
+        # as aluminum, and not a disconnected near-zero 'vacuum' cell).
         from octree_graph.load_contact_report import ContactReport
         from octree_graph.materials import DEFAULT_ASSIGNED_MATERIAL_NAME, load_material_table
         from octree_graph.octree import _physical_material_name
@@ -2796,11 +2796,14 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         obj = SimpleNamespace(name="HISPEC-0030-P9999", material_name="color_128_128_128")
         result = _physical_material_name(obj, ContactReport(component_materials={}), {"Copper", "Invar, AL 36"})
         self.assertEqual(result, DEFAULT_ASSIGNED_MATERIAL_NAME)
-        # And that default resolves to a thermally-inert material (near-zero k, zero emissivity).
+        # That default resolves to G-10 insulation: weak-but-real conduction and a
+        # genuine heat capacity, so it participates in the thermal network as
+        # insulation instead of being an inert/disconnected cell.
         materials, _ = load_material_table()
-        inert = materials[DEFAULT_ASSIGNED_MATERIAL_NAME]
-        self.assertLess(inert.k_W_mK, 1.0e-6)
-        self.assertEqual(inert.emissivity, 0.0)
+        insulation = materials[DEFAULT_ASSIGNED_MATERIAL_NAME]
+        self.assertGreater(insulation.k_W_mK, 0.01)  # weak but real conduction (not ~0)
+        self.assertLess(insulation.k_W_mK, 5.0)       # still far below any metal
+        self.assertGreater(insulation.density_kg_m3 * insulation.cp_J_kgK, 1.0e5)  # real heat capacity
 
 
 if __name__ == "__main__":

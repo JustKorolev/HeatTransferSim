@@ -35,9 +35,13 @@ DEFAULT_MATERIAL = Material(
 )
 # A component whose material cannot be determined (not in the spreadsheet, marked
 # "unknown material", and not inferable from the GLB appearance/name) is assigned
-# this INERT material rather than a real one -- near-zero heat capacity, ~zero
-# conductivity and zero emissivity -- so it is effectively ignored by the heat
-# transfer instead of being silently faked as aluminum.
+# this material. It is modeled as G-10 fiberglass-epoxy INSULATION (see the
+# "Unassigned (ignored)" / "ZERO MATTER" entries in materials.json, which carry
+# G-10 properties, and material_properties_cryo, which maps them to the G-10 cryo
+# curve): a real, weakly-conducting solid rather than a faked structural metal.
+# Modeling it as insulation (instead of a near-zero "vacuum" material) keeps it in
+# the thermal network -- disconnected near-zero-capacity cells otherwise inject a
+# cluster of spurious near-zero eigenvalues that stalls the modal reduction.
 DEFAULT_ASSIGNED_MATERIAL_NAME = "Unassigned (ignored)"
 UNASSIGNED_MATERIAL_NAMES = {
     "",

@@ -89,8 +89,18 @@ class RegistryAndFallbackTests(unittest.TestCase):
     def test_unknown_material_uses_fallback(self):
         values = _cp("Unobtainium", [50.0, 100.0], fallback_cp=800.0)
         self.assertTrue(np.allclose(values, 800.0))
-        values_k = _k("ZERO MATTER", [50.0], fallback_k=1e-9)
+        values_k = _k("Vibranium", [50.0], fallback_k=1e-9)
         self.assertTrue(np.allclose(values_k, 1e-9))
+
+    def test_null_material_maps_to_insulation_curve(self):
+        # Cells with no real material ("ZERO MATTER" / "Unassigned") are modeled
+        # as G-10 insulation, so they resolve to the G-10 cryo curve (not the
+        # fallback). This keeps them in the thermal network.
+        self.assertTrue(mp.has_curve("ZERO MATTER"))
+        self.assertTrue(mp.has_curve("Unassigned (ignored)"))
+        g10_k = _k("G-10", [50.0])
+        self.assertTrue(np.allclose(_k("ZERO MATTER", [50.0]), g10_k))
+        self.assertTrue(np.allclose(_cp("Unassigned (ignored)", [50.0]), _cp("G-10", [50.0])))
 
     def test_unknown_material_without_fallback_raises(self):
         with self.assertRaises(KeyError):

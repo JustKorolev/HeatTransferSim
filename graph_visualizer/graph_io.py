@@ -13,7 +13,7 @@ import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix, issparse
 
 from .diagnostics import log_event
-from .material_library import default_material_library, material_defaults, normalize_material_library
+from .material_library import _is_null_material, default_material_library, material_defaults, normalize_material_library
 from .matrix_builder import (
     apply_conductance_matrix,
     build_matrices,
@@ -188,6 +188,14 @@ def _apply_loaded_material_properties(model: ThermalGraphModel) -> None:
         node.cp_J_kgK = float(defaults["cp_J_kgK"])
         node.k_W_mK = float(defaults["k_W_mK"])
         node.emissivity = float(defaults["emissivity"])
+        # Null-material cells are remapped to G-10 insulation; their stored mass
+        # was built from the ~0 void density, so recompute it from the insulation
+        # density (mass = rho * volume * occupancy) and refresh the capacitance.
+        # Real-material cells keep their build-time mass/C.
+        if _is_null_material(node.material) and not bool(getattr(node, "C_manual_override", False)):
+            occupancy = float(getattr(node, "occupancy_fraction", 1.0) or 1.0)
+            node.mass_kg = node.rho_kg_m3 * node.volume_m3 * occupancy
+            node.C_J_K = node.mass_kg * node.cp_J_kgK
 
 
 def _refresh_octree_auto_geometry(
