@@ -123,11 +123,16 @@ def default_material_library() -> dict[str, dict[str, float]]:
 # injects a dense cluster of near-zero eigenvalues that stalls the modal-reduction
 # slow-mode solve -- and is physically closer to the truth (these are insulation
 # gaps, not vacuum). Overrides any degenerate library entry of the same name.
-INSULATION_MATERIAL_DEFAULTS: dict[str, float] = {  # matches the G-10 entry in materials.json
+INSULATION_MATERIAL_DEFAULTS: dict[str, float] = {  # G-10 thermal props, but non-radiating
     "rho_kg_m3": 1800.0,   # G-10 fiberglass-epoxy laminate
     "cp_J_kgK": 1000.0,    # nominal; the NIST G-10 cryo curve overrides at runtime
     "k_W_mK": 0.6,         # nominal normal-direction k; cryo curve overrides at runtime
-    "emissivity": 0.9,
+    # Emissivity 0: these are interior/unknown insulation-filler cells. A nonzero
+    # emissivity would make them (cold, ~674k exposed faces) absorb enormous power
+    # from the warm ambient -- q = eps*sigma*A*(T_env^4 - T^4) > 0 for T<<T_env --
+    # which is both unphysical for insulation (low emissivity by design) and swamps
+    # the heater power. Zero keeps them conductive but radiatively inert.
+    "emissivity": 0.0,
 }
 _NULL_MATERIAL_NAMES = frozenset(
     {"", "none", "not assigned", "unassigned", "unassigned (ignored)", "zero matter"}

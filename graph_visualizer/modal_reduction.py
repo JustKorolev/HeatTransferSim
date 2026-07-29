@@ -31,6 +31,14 @@ from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import eigsh, splu
 
 
+# Grounding conductance (W/K) applied at cryocooler cells when forming the DC-gain
+# operator: large enough to pin them near their operating temperature (a fixed-T /
+# "the cryocooler holds the cold tip" assumption), so the DC gain becomes the pure
+# conduction resistance from each heater to the cold sink. Far above any graph
+# edge conductance (~<=15 W/K), so it dominates without ill-conditioning splu.
+CRYOCOOLER_DC_GROUND_W_K = 1.0e3
+
+
 # ------------------------------------------------------------------ reduction primitives
 # These are shared with tools/analyze_plant_modes.py (which imports them).
 
@@ -372,7 +380,29 @@ def design_modal_controller(
     Nx, Nu = servo_maps(Ar, Br, C_ctrl)
 
     _report(progress, "Exact steady-state DC gain + feedforward…")
-    G, _RGA = dc_gain_and_rga(Leff, F, S, monitor)
+    # Ground the DC gain at the CRYOCOOLER -- the stable, well-characterized heat
+    # sink -- using CONDUCTION ONLY, not radiation. Radiation's linearized sink
+    # drifts with ambient temperature (and is poorly modeled here), so baking it
+    # into the feedforward gain is fragile. All heaters/sensors sit in the same
+    # conductively-connected component as the cryocooler, so a cryocooler-grounded
+    # conduction gain is well-posed; the (uncertain) radiation load is left to the
+    # controller's integral. Fall back to radiation grounding only if the graph has
+    # no cryocooler cells (otherwise pure conduction L is singular).
+    main_node_ids = np.asarray(node_ids, dtype=int)[main_rows]
+    cryo_ground = np.array(
+        [
+            CRYOCOOLER_DC_GROUND_W_K if bool(getattr(model.nodes.get(int(v)), "has_cryocooler", False)) else 0.0
+            for v in main_node_ids
+        ],
+        dtype=float,
+    )
+    if float(cryo_ground.sum()) > 0.0:
+        L_dc = (csr_matrix(Lm) + diags(cryo_ground)).tocsr()
+        dc_ground = "cryocooler"
+    else:
+        L_dc = Leff  # no cryocooler present: radiation is the only available sink
+        dc_ground = "radiation"
+    G, _RGA = dc_gain_and_rga(L_dc, F, S, monitor)
     dc_lambda = 1.0e-3 * float(svd(G, compute_uv=False)[0]) ** 2
     dc_gain_pinv = np.linalg.solve(G.T @ G + dc_lambda * np.eye(G.shape[1]), G.T)
 
