@@ -1,0 +1,22 @@
+name: heatsim
+channels:
+  - conda-forge
+dependencies:
+  # --- Python ---
+  - python=3.11
+  # --- STEP / OpenCASCADE pipeline (conda-only, no pip wheel) ---
+  - pythonocc-core=7.9.0
+  - embreex            # fast BVH ray tests for solid fill
+  # --- core numerics ---
+  - numpy
+  - scipy
+  # --- geometry / graph build ---
+  - trimesh
+  - networkx
+  - openpyxl           # Materials.xlsx
+  # --- visualization / GUI (needed for viewer + simulation, not headless build) ---
+  - matplotlib
+  - pyvista
+  - pyvistaqt
+  - pyside6
+  - qtpy
