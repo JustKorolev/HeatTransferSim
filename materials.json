@@ -49,6 +49,13 @@
     "emissivity": 0.35
   },
   {
+    "name": "OFHC Copper",
+    "density_kg_m3": 8960.0,
+    "cp_J_kgK": 385.0,
+    "k_W_mK": 401.0,
+    "emissivity": 0.35
+  },
+  {
     "name": "Delrin 2700 NC010, Low Viscosity Acetal Copolymer (SS)",
     "density_kg_m3": 1410.0,
     "cp_J_kgK": 1460.0,
@@ -257,6 +264,48 @@
     "cp_J_kgK": 240.0,
     "k_W_mK": 90.0,
     "emissivity": 0.40
+  },
+  {
+    "name": "MLI (IMLI 5-layer)",
+    "density_kg_m3": 30.6,
+    "cp_J_kgK": 1170.0,
+    "k_W_mK": 6.8e-05,
+    "emissivity": 0.04
+  },
+  {
+    "name": "MLI (IMLI 10-layer)",
+    "density_kg_m3": 28.2,
+    "cp_J_kgK": 1170.0,
+    "k_W_mK": 7.5e-05,
+    "emissivity": 0.04
+  },
+  {
+    "name": "MLI (IMLI 15-layer)",
+    "density_kg_m3": 27.7,
+    "cp_J_kgK": 1170.0,
+    "k_W_mK": 7.7e-05,
+    "emissivity": 0.04
+  },
+  {
+    "name": "MLI (IMLI 20-layer)",
+    "density_kg_m3": 27.1,
+    "cp_J_kgK": 1170.0,
+    "k_W_mK": 7.7e-05,
+    "emissivity": 0.04
+  },
+  {
+    "name": "MLI (IMLI 30-layer)",
+    "density_kg_m3": 27.0,
+    "cp_J_kgK": 1170.0,
+    "k_W_mK": 7.7e-05,
+    "emissivity": 0.04
+  },
+  {
+    "name": "MLI (IMLI 40-layer)",
+    "density_kg_m3": 26.7,
+    "cp_J_kgK": 1170.0,
+    "k_W_mK": 7.8e-05,
+    "emissivity": 0.04
   },
   {
     "name": "ZERO MATTER",

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import re
 from types import SimpleNamespace
-from typing import Iterator
+from typing import Callable, Iterator
 
 import numpy as np
 
@@ -113,6 +113,7 @@ def build_graph(
     role_contact_tolerance_growth_factor: float = 2.0,
     max_heater_sensor_pair_distance_mm: float = 25.0,
     max_heaters_per_sensor: int = DEFAULT_MAX_HEATERS_PER_SENSOR,
+    component_contact_fn: "Callable[[str, str], bool] | None" = None,
 ) -> GraphBuildResult:
     contact_report = contact_report or ContactReport()
     solid = [cell for cell in leaves if not cell.is_empty]
@@ -173,7 +174,15 @@ def build_graph(
     meshes_by_component: dict[str, list[MeshObject]] = {}
     for obj in mesh_objects or []:
         meshes_by_component.setdefault(str(getattr(obj, "name", "") or ""), []).append(obj)
-    gap_detection = float(contact_gap_tolerance_mm) > 0.0 and bool(meshes_by_component)
+    # Component-to-component contact decision. With an exact B-rep contact function
+    # (STEP path) the "do these parts truly touch?" test is decided once per
+    # component pair on the real solids (OCC distance); otherwise it falls back to
+    # the per-interface tessellated-mesh containment test. Either way it's
+    # component-level, NOT raw voxel adjacency.
+    use_component_contact = component_contact_fn is not None
+    gap_detection = use_component_contact or (
+        float(contact_gap_tolerance_mm) > 0.0 and bool(meshes_by_component)
+    )
     suppressed_gap_interfaces = 0
     suppressed_contact_pairs: list[tuple[int, int]] = []
     gap_radiation_links: list[tuple[int, int, float]] = []
@@ -187,14 +196,20 @@ def build_graph(
         material_b = resolve_material(str(node_b["material_name"]), materials, warnings)
         same_component = node_a["component_name"] == node_b["component_name"]
         if not same_component and gap_detection:
-            face = _shared_face_rectangle(a, b)
-            if face is not None and not _interface_is_true_contact(
-                meshes_by_component.get(str(node_a["component_name"]), []),
-                meshes_by_component.get(str(node_b["component_name"]), []),
-                face,
-                float(contact_gap_tolerance_mm),
-                contains_backend,
-            ):
+            if use_component_contact:
+                gap_found = not component_contact_fn(
+                    str(node_a["component_name"]), str(node_b["component_name"])
+                )
+            else:
+                face = _shared_face_rectangle(a, b)
+                gap_found = face is not None and not _interface_is_true_contact(
+                    meshes_by_component.get(str(node_a["component_name"]), []),
+                    meshes_by_component.get(str(node_b["component_name"]), []),
+                    face,
+                    float(contact_gap_tolerance_mm),
+                    contains_backend,
+                )
+            if gap_found:
                 face_area_m2 = float(area_mm2 * 1.0e-6)
                 suppressed_gap_interfaces += 1
                 suppressed_contact_pairs.append((int(node_a["node_id"]), int(node_b["node_id"])))

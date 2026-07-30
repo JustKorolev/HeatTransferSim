@@ -102,4 +102,12 @@ def _component_aliases(name: str) -> set[str]:
                 break
             aliases.add(stripped)
             current = stripped
+    # STEP exports append descriptive suffixes the loop above can't strip
+    # ("HISPEC-0030-P0065_L = 80 mm", "..._R-SPEC", "..._DEFAULT"). Add the
+    # embedded canonical part code as an alias so those still match the sheet
+    # (whose keys are full assembly paths carrying the same code). Applied to
+    # both sheet keys and lookups, so both sides reduce to the code.
+    for code in re.findall(r"(?:HISPEC|COO)-\d+-[PA]\d+", name, flags=re.IGNORECASE):
+        aliases.add(code)
+        aliases.add(code.upper())
     return {alias for alias in aliases if alias}

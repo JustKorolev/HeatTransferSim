@@ -9,7 +9,7 @@ import heapq
 from itertools import product
 import math
 import os
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -44,6 +44,10 @@ class OctreeParams:
     dominant_fraction_accept: float = 0.95
     minority_fraction_ignore: float = 0.02
     material_contrast_refine_threshold: float = 5.0
+    # Refine cells whose dominant material has conductivity BELOW this (W/mK) down
+    # to min_cell_size, so low-k parts (G-10 / insulators, where steep thermal
+    # gradients live) get fine cells while high-k metal bulk stays coarse. 0 = off.
+    low_conductivity_refine_threshold: float = 0.0
     contact_refine_distance_mm: float = 10.0
     boundary_refine: bool = True
     max_leaf_cells: int | None = None
@@ -314,22 +318,48 @@ class TriangleSpatialIndex:
 
 
 def build_octree(
-    scene: GltfScene,
+    scene: "GltfScene | None",
     contact_report: ContactReport | None,
     materials: dict[str, Material],
     params: OctreeParams,
     warnings: list[str],
     diagnostics: OctreeDiagnostics | None = None,
     progress_callback: Callable[[dict], None] | None = None,
+    geometry_provider: "GeometryProvider | None" = None,
 ) -> list[OctreeCell]:
     contact_report = contact_report or ContactReport()
-    mins, maxs = scene.bounds_mm
+    known_materials = set(materials)
+    # Geometry backend: default is the triangle (GLB) path; a geometry_provider
+    # (e.g. the STEP B-rep backend) supplies bounds + per-cell classification and
+    # forces serial classification (its handles aren't picklable to workers).
+    if geometry_provider is not None:
+        mins, maxs = geometry_provider.bounds_mm
+    else:
+        mins, maxs = scene.bounds_mm
     center = (mins + maxs) * 0.5
     span = maxs - mins
     side = float(max(float(span[0]), float(span[1]), float(span[2])))
     root = (center, np.array([side, side, side], dtype=float))
     leaves: list[OctreeCell] = []
-    triangle_indices = _build_triangle_indices(scene.objects, params)
+    triangle_indices = (
+        {} if geometry_provider is not None else _build_triangle_indices(scene.objects, params)
+    )
+
+    def classify(center_arg: Any, size_arg: Any) -> CellClassification:
+        center_np = np.asarray(center_arg, dtype=float)
+        size_np = np.asarray(size_arg, dtype=float)
+        if geometry_provider is not None:
+            return geometry_provider.classify_cell(center_np, size_np)
+        return _classify_cell(
+            scene.objects,
+            triangle_indices,
+            center_np,
+            size_np,
+            contact_report,
+            params,
+            known_materials,
+            None,
+        )
 
     if diagnostics is not None:
         diagnostics.root_bounds_mm = {"min": mins.astype(float).tolist(), "max": maxs.astype(float).tolist()}
@@ -384,7 +414,7 @@ def build_octree(
             )
         )
 
-    worker_count = _resolve_voxel_worker_count(params)
+    worker_count = 1 if geometry_provider is not None else _resolve_voxel_worker_count(params)
     batch_size = max(1, int(params.voxel_batch_size))
 
     def handle_classified_cell(
@@ -426,6 +456,20 @@ def build_octree(
             sum(frac > params.minority_fraction_ignore for frac in classification.material_fractions.values()) > 1
         )
         high_contrast = contrast_exceeds(meaningful_materials, params.material_contrast_refine_threshold)
+        # Material/gradient-aware refinement: low-conductivity parts (G-10,
+        # insulators) carry steep gradients and need fine cells, while high-k metal
+        # bulk resolves fine with coarse cells. Refine cells whose dominant material
+        # is below the conductivity threshold down to min_cell_size.
+        low_conductivity_refinement = False
+        low_k_threshold = float(getattr(params, "low_conductivity_refine_threshold", 0.0) or 0.0)
+        if (
+            low_k_threshold > 0.0
+            and classification.occupied
+            and classification.dominant_material
+            and max_size_mm > params.min_cell_size_mm
+        ):
+            dominant_material = resolve_material(classification.dominant_material, materials, warnings)
+            low_conductivity_refinement = float(dominant_material.k_W_mK) < low_k_threshold
         needs_surface_refinement = params.boundary_refine and (
             classification.surface_hit or classification.near_surface_hit
         )
@@ -452,6 +496,7 @@ def build_octree(
             surface_complexity_refinement=surface_complexity_refinement,
             gap_preservation_refinement=gap_preservation_refinement,
             needs_surface_refinement=needs_surface_refinement,
+            low_conductivity_refinement=low_conductivity_refinement,
         )
         classification.refinement_score = refinement_score
         classification.refinement_reasons = tuple(refinement_reasons)
@@ -470,6 +515,7 @@ def build_octree(
             mixed_parts
             or mixed_materials
             or high_contrast
+            or low_conductivity_refinement
             or crowded_component_refinement
             or role_component_refinement
             or multi_surface_refinement
@@ -542,16 +588,7 @@ def build_octree(
     if worker_count <= 1:
         while queue:
             work_item = pop_cell()
-            classification = _classify_cell(
-                scene.objects,
-                triangle_indices,
-                np.asarray(work_item.center_mm, dtype=float),
-                np.asarray(work_item.size_mm, dtype=float),
-                contact_report,
-                params,
-                set(materials),
-                None,
-            )
+            classification = classify(work_item.center_mm, work_item.size_mm)
             handle_classified_cell(work_item, classification, remaining_batch_items=0)
     else:
         worker_objects = _prepare_worker_objects(scene.objects)
@@ -588,16 +625,7 @@ def build_octree(
             worker_count = 1
             for index, work_item in enumerate(batch):
                 remaining_batch = batch[index + 1 :]
-                classification = _classify_cell(
-                    scene.objects,
-                    triangle_indices,
-                    np.asarray(work_item.center_mm, dtype=float),
-                    np.asarray(work_item.size_mm, dtype=float),
-                    contact_report,
-                    params,
-                    set(materials),
-                    None,
-                )
+                classification = classify(work_item.center_mm, work_item.size_mm)
                 handle_classified_cell(
                     work_item,
                     classification,
@@ -605,23 +633,11 @@ def build_octree(
                 )
             while queue:
                 work_item = pop_cell()
-                classification = _classify_cell(
-                    scene.objects,
-                    triangle_indices,
-                    np.asarray(work_item.center_mm, dtype=float),
-                    np.asarray(work_item.size_mm, dtype=float),
-                    contact_report,
-                    params,
-                    set(materials),
-                    None,
-                )
+                classification = classify(work_item.center_mm, work_item.size_mm)
                 handle_classified_cell(work_item, classification, remaining_batch_items=0)
     leaves = _balance_adjacent_leaf_sizes(
         leaves,
-        scene,
-        triangle_indices,
-        contact_report,
-        materials,
+        classify,
         params,
         warnings,
         diagnostics,
@@ -647,10 +663,7 @@ def build_octree(
 
 def _balance_adjacent_leaf_sizes(
     leaves: list[OctreeCell],
-    scene: GltfScene,
-    triangle_indices: dict[int, "TriangleSpatialIndex"],
-    contact_report: ContactReport,
-    materials: dict[str, Material],
+    classify: Callable[[Any, Any], CellClassification],
     params: OctreeParams,
     warnings: list[str],
     diagnostics: OctreeDiagnostics | None,
@@ -692,16 +705,7 @@ def _balance_adjacent_leaf_sizes(
                 child_id = f"cell_{counter}"
                 counter += 1
                 child_center = center_mm + quarter * np.asarray(signs, dtype=float)
-                classification = _classify_cell(
-                    scene.objects,
-                    triangle_indices,
-                    child_center,
-                    child_size,
-                    contact_report,
-                    params,
-                    set(materials),
-                    None,
-                )
+                classification = classify(child_center, child_size)
                 if diagnostics is not None:
                     diagnostics.cells_tested += 1
                     diagnostics.max_depth_reached = max(diagnostics.max_depth_reached, int(leaf.level) + 1)
@@ -1048,17 +1052,37 @@ def _classify_cell(
     material_counts: Counter[str] = Counter()
     points = _sample_points(center_mm, size_mm, params.samples_per_cell)
     watertight_candidates = [obj for obj in candidate_objects if bool(getattr(obj, "watertight", False))]
-    for point in points:
+    if len(points) and watertight_candidates:
+        pts = np.asarray(points, dtype=float)
+        # Each point is claimed by the FIRST watertight candidate (in order) that
+        # contains it -- same as the old per-point/break loop, but batched: one
+        # containment call per candidate over all still-unclaimed in-bounds points.
+        remaining = np.ones(pts.shape[0], dtype=bool)
         for obj in watertight_candidates:
-            if not _point_in_object_bounds(point, obj):
+            if not remaining.any():
+                break
+            bounds = _object_bounds_tuple(obj)
+            if bounds is None:
+                continue
+            (bx0, by0, bz0), (bx1, by1, bz1) = bounds
+            in_bounds = (
+                remaining
+                & (pts[:, 0] >= bx0) & (pts[:, 0] <= bx1)
+                & (pts[:, 1] >= by0) & (pts[:, 1] <= by1)
+                & (pts[:, 2] >= bz0) & (pts[:, 2] <= bz1)
+            )
+            if not in_bounds.any():
                 continue
             try:
-                if _mesh_contains_point(obj, point, params):
-                    inside_counts[obj.name] += 1
-                    material_counts[_physical_material_name(obj, contact_report, known_materials)] += 1
-                    break
+                inside_sub = _mesh_contains_points(obj, pts[in_bounds], params)
             except Exception:
                 warnings.append(f"Inside/outside test failed for watertight mesh {obj.name}.")
+                continue
+            claimed = np.nonzero(in_bounds)[0][np.asarray(inside_sub, dtype=bool)]
+            if claimed.size:
+                inside_counts[obj.name] += int(claimed.size)
+                material_counts[_physical_material_name(obj, contact_report, known_materials)] += int(claimed.size)
+                remaining[claimed] = False
 
     surface_mesh_ids = {id(obj) for obj in surface_objects}
     inside_mesh_ids = {id(obj) for obj in watertight_candidates if inside_counts.get(obj.name, 0) > 0}
@@ -1199,6 +1223,7 @@ def _refinement_priority(
     surface_complexity_refinement: bool,
     gap_preservation_refinement: bool,
     needs_surface_refinement: bool,
+    low_conductivity_refinement: bool = False,
 ) -> tuple[float, tuple[str, ...]]:
     score = 0.0
     reasons: list[str] = []
@@ -1224,6 +1249,8 @@ def _refinement_priority(
         add("mixed_materials", 35.0)
     if high_contrast:
         add("material_contrast", 25.0)
+    if low_conductivity_refinement:
+        add("low_conductivity_material", 40.0)
     if needs_surface_refinement:
         add("surface_or_near_surface", 20.0)
     if classification.occupied and float(max(size_mm)) > float(params.max_cell_size_mm):
@@ -1446,6 +1473,72 @@ def _ray_contains_point(obj: MeshObject, point: np.ndarray) -> bool:
         return False
     unique_hits = np.unique(np.round(hits, decimals=8))
     return bool(unique_hits.size % 2 == 1)
+
+
+def _mesh_contains_points(obj: MeshObject, points: np.ndarray, params: OctreeParams) -> np.ndarray:
+    """Batched point-in-mesh test: one call for a whole array of points.
+
+    trimesh.contains() and the ray-parity fallback both vectorize over points, so
+    testing all of a cell's samples at once (instead of one call per point) is the
+    dominant speedup when FILLING watertight meshes (the STEP path). Returns a
+    boolean array aligned with ``points``."""
+    global _TRIMESH_CONTAINS_AVAILABLE
+    points = np.asarray(points, dtype=float)
+    if points.size == 0:
+        return np.zeros(0, dtype=bool)
+    if str(getattr(params, "contains_backend", "ray")).lower() != "ray" and _TRIMESH_CONTAINS_AVAILABLE is not False:
+        try:
+            result = np.asarray(obj.mesh.contains(points), dtype=bool)
+            _TRIMESH_CONTAINS_AVAILABLE = True
+            if result.shape[0] == points.shape[0]:
+                return result
+        except (ImportError, ModuleNotFoundError):
+            _TRIMESH_CONTAINS_AVAILABLE = False
+        except Exception:
+            pass
+    return _ray_contains_points(obj, points)
+
+
+def _ray_contains_points(obj: MeshObject, points: np.ndarray) -> np.ndarray:
+    """Vectorized odd/even ray test for an array of points (no trimesh needed).
+
+    Precomputes the per-triangle Moller-Trumbore terms ONCE, then tests each point
+    against all triangles. The parity ray runs to +infinity, so all triangles
+    must be considered (no cell-local culling)."""
+    points = np.asarray(points, dtype=float)
+    out = np.zeros(points.shape[0], dtype=bool)
+    if points.shape[0] == 0:
+        return out
+    triangles = _mesh_triangles(obj)
+    if triangles.size == 0:
+        return out
+    direction = np.array([1.0, 0.3713906763541037, 0.1937728766089219], dtype=float)
+    direction /= np.linalg.norm(direction)
+    eps = 1.0e-9
+    v0 = triangles[:, 0, :]
+    edge1 = triangles[:, 1, :] - v0
+    edge2 = triangles[:, 2, :] - v0
+    h = np.cross(np.broadcast_to(direction, edge2.shape), edge2)
+    a = np.einsum("ij,ij->i", edge1, h)
+    valid = np.abs(a) > eps
+    f = np.zeros_like(a)
+    f[valid] = 1.0 / a[valid]
+    for index in range(points.shape[0]):
+        s = points[index] - v0
+        u = f * np.einsum("ij,ij->i", s, h)
+        mask = valid & (u >= -eps) & (u <= 1.0 + eps)
+        if not mask.any():
+            continue
+        q = np.cross(s, edge1)
+        v = f * np.einsum("ij,j->i", q, direction)
+        mask &= (v >= -eps) & ((u + v) <= 1.0 + eps)
+        if not mask.any():
+            continue
+        t = f * np.einsum("ij,ij->i", edge2, q)
+        hits = t[mask & (t > eps)]
+        if hits.size and (np.unique(np.round(hits, decimals=8)).size % 2 == 1):
+            out[index] = True
+    return out
 
 
 def _objects_intersecting_bounds(

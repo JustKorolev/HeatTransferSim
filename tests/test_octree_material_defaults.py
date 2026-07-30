@@ -283,6 +283,31 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual(_physical_material_name(obj, report, set(materials)), "Copper")
 
+    def test_ofhc_copper_resolves_to_copper_grade_at_build_and_runtime(self) -> None:
+        # "OFHC Copper" is the exact name used in the mesh material spreadsheet and
+        # the cryo-property registry. It must resolve to a copper-grade conductor
+        # (k ~ 400 W/mK), NOT the generic fallback (k ~ 2 W/mK). A generic k made
+        # the runtime treat copper parts as near-insulation on load -> "ignored".
+        from octree_graph.materials import load_material_table
+
+        build_table, _ = load_material_table()  # the real materials.json
+        self.assertIn("OFHC Copper", build_table)
+        self.assertGreater(build_table["OFHC Copper"].k_W_mK, 100.0)
+        # Build path: the raw sheet name is preserved (exact known material) and it
+        # is copper-grade; the aliased "Copper" name is equivalent.
+        report = ContactReport(component_materials={"strap": "OFHC Copper"})
+        obj = SimpleNamespace(name="strap", material_name=None)
+        resolved = _physical_material_name(obj, report, set(build_table))
+        self.assertGreater(build_table[resolved].k_W_mK, 100.0)
+
+        # Runtime path: material_defaults must NOT fall back to the generic package.
+        try:
+            from graph_visualizer.material_library import default_material_library, material_defaults
+        except ModuleNotFoundError as exc:  # pragma: no cover
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+        library = default_material_library()
+        self.assertGreater(material_defaults("OFHC Copper", library)["k_W_mK"], 100.0)
+
     def test_infers_material_from_solidworks_component_tokens(self) -> None:
         materials = self.make_materials()
         materials["18-8 Stainless Steel"] = Material(
@@ -395,6 +420,33 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         self.assertEqual(args.voxel_workers, 1)
         self.assertIn("Disabled multiprocessing", warnings[0])
         self.assertTrue(any("Scene memory estimate" in message for message in logger.messages))
+
+    def test_cli_memory_guard_scales_workers_down_to_max_that_fits(self) -> None:
+        # When the requested worker count's payload is too large but a SMALLER
+        # count fits, the guard reduces to the largest feasible count instead of
+        # collapsing to serial. 100 triangles -> ~12000 B/worker, x2 spawn-peak
+        # factor = 24000 B/worker; with 4 requested and budget 0.7*80000=56000
+        # (fits 2 x 24000 but not 3), expect 2.
+        triangle = np.zeros((100, 3, 3), dtype=float)
+        obj = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+        obj.mesh.triangles = triangle
+        scene = GltfScene(
+            path=SimpleNamespace(),
+            objects=[obj],
+            bounds_mm=(np.array([-5.0, -5.0, -5.0]), np.array([5.0, 5.0, 5.0])),
+            warnings=[],
+        )
+        args = SimpleNamespace(voxel_workers=4)
+        warnings: list[str] = []
+        logger = SimpleNamespace(messages=[], log=lambda message: logger.messages.append(message))
+
+        with patch("octree_graph.cli._available_memory_bytes", return_value=80000), patch(
+            "octree_graph.cli._resolved_cli_voxel_workers", return_value=4
+        ):
+            _log_scene_memory_risk(scene, args, logger, warnings)
+
+        self.assertEqual(args.voxel_workers, 2)
+        self.assertTrue(any("Reduced voxel workers from 4 to 2" in message for message in warnings))
 
     def test_build_quality_counts_warning_tags(self) -> None:
         args = SimpleNamespace(max_cell_size_mm=4.0)

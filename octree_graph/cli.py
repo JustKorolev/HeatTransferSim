@@ -54,15 +54,83 @@ def main(argv: list[str] | None = None) -> None:
             raise
 
 
+# Above this many leaves, do NOT serialize the full octree_cells list into
+# graph.json / the checkpoint. It's a full duplicate of every leaf (the node
+# geometry is already authoritative in graph_nodes), so for large fills it just
+# doubles peak RAM at write time and bloats the JSON to multiple GB. It is
+# informational only -- nothing loads or simulates from it.
+_OCTREE_CELLS_PAYLOAD_LIMIT = 250_000
+
+# Thermally-negligible standard hardware / electrical / reference geometry that is
+# dropped by default (before role detection + voxelization) so it doesn't inflate
+# the cell count. Matched as case/separator-insensitive substrings of the component
+# name/path. Parts matching the configured heater/sensor substrings are NEVER
+# defeatured. Disable the whole list with --no-default-defeature.
+DEFAULT_DEFEATURE_SUBSTRINGS = [
+    # Fasteners / standard hardware (McMaster / Misumi), thermally negligible.
+    "SHCS", "SCREW", "WASHER", "NUT", "SPRING", "BELLEVILLE", "DOWEL", "STANDOFF",
+    # Electrical: PCBs, connectors, feedthroughs, flex cabling.
+    "PCB", "BREAKOUT", "FEEDTHROUGH", "FLEX", "MIBR", "FX23", "FFSD", "CONNECTOR",
+    # Reference / tooling geometry that isn't part of the thermal assembly.
+    "LAB TOOLS", "BALL TIP", "BUSHING", "BEAM ENVELOPE",
+]
+
+
+def _octree_cells_payload(leaves: list) -> list:
+    """Serialized octree cells for graph.json, or [] when there are too many
+    (see _OCTREE_CELLS_PAYLOAD_LIMIT) to avoid the write-time memory/size blowup."""
+    if len(leaves) > _OCTREE_CELLS_PAYLOAD_LIMIT:
+        return []
+    return [cell.__dict__ for cell in leaves]
+
+
+def _resolve_step_path(args: argparse.Namespace) -> Path | None:
+    """Return the STEP file to build from, or None to use the GLB pipeline.
+
+    Uses --step-file if given, else auto-detects a single .step/.stp in --mesh-dir.
+    """
+    explicit = getattr(args, "step_file", None)
+    if explicit:
+        path = Path(explicit)
+        if not path.is_file():
+            raise SystemExit(f"--step-file not found: {path}")
+        return path
+    mesh_dir = getattr(args, "mesh_dir", None)
+    if not mesh_dir:
+        return None
+    candidates = [
+        candidate
+        for candidate in sorted(Path(mesh_dir).glob("*"))
+        if candidate.is_file() and candidate.suffix.lower() in (".step", ".stp")
+    ]
+    return candidates[0] if candidates else None
+
+
 def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_log: "RunLogger") -> None:
     warnings: list[str] = []
     output = Path(args.output_root) / args.graph_name
     checkpointer = BuildCheckpointer(output, args)
     checkpointer.phase("started", {"graph_name": args.graph_name})
+    step_path = _resolve_step_path(args)
+    step_scene = None
     try:
-        progress.phase("Loading glTF scene")
-        gltf_path = _resolve_gltf_path(args)
-        scene = load_gltf_scene(gltf_path)
+        if step_path is not None:
+            # STEP path: tessellate each B-rep solid to a WATERTIGHT mesh so the
+            # existing triangle pipeline fills it (point-in-mesh containment)
+            # instead of shelling. Everything downstream -- ignore filters, role
+            # detection, contact/radiation, multiprocessing -- runs unchanged.
+            # step_scene keeps the B-rep solids for exact component-contact tests.
+            from .load_step import load_step_as_scene
+
+            progress.phase("Loading STEP assembly (tessellating solids)")
+            gltf_path = step_path
+            scene, step_scene = load_step_as_scene(
+                step_path, deflection_mm=float(getattr(args, "step_deflection_mm", 0.5))
+            )
+        else:
+            progress.phase("Loading glTF scene")
+            gltf_path = _resolve_gltf_path(args)
+            scene = load_gltf_scene(gltf_path)
         scene = _filter_ignored_components(scene, args, warnings)
         _log_scene_memory_risk(scene, args, run_log, warnings)
         progress.phase("Loading materials")
@@ -98,6 +166,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         dominant_fraction_accept=args.dominant_fraction_accept,
         minority_fraction_ignore=args.minority_fraction_ignore,
         material_contrast_refine_threshold=args.material_contrast_refine_threshold,
+        low_conductivity_refine_threshold=float(getattr(args, "low_conductivity_refine_threshold", 0.0) or 0.0),
         contact_refine_distance_mm=args.contact_refine_distance_mm,
         boundary_refine=args.boundary_refine,
         max_leaf_cells=args.max_leaf_cells,
@@ -120,6 +189,17 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         max_adjacent_leaf_size_ratio=args.max_adjacent_leaf_size_ratio,
         balance_refine_passes=args.balance_refine_passes,
     )
+    # STEP: build the EXACT per-component-pair B-rep contact test from the solids.
+    component_contact_fn = None
+    if step_scene is not None:
+        from .load_step import make_component_contact_fn
+
+        contact_tol_mm = (
+            float(getattr(args, "contact_gap_tolerance_mm", 0.0))
+            or float(getattr(args, "contact_detection_distance_mm", 0.0))
+            or 0.1
+        )
+        component_contact_fn = make_component_contact_fn(step_scene, contact_tol_mm)
     leaves, graph_result, diagnostics = _build_graph_with_optional_fallback(
         scene,
         voxel_scene,
@@ -131,6 +211,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         include_diagnostics=True,
         progress=progress,
         checkpointer=checkpointer,
+        component_contact_fn=component_contact_fn,
     )
     _raise_if_empty_graph(graph_result.nodes, leaves, args)
     connectivity_analysis = _graph_connectivity_analysis(graph_result.nodes, graph_result.edges)
@@ -154,6 +235,11 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     }
     if material_lookup_path:
         input_files["material_lookup"] = str(Path(material_lookup_path))
+    if len(leaves) > _OCTREE_CELLS_PAYLOAD_LIMIT:
+        warnings.append(
+            f"octree_cells omitted from graph.json ({len(leaves)} leaves > {_OCTREE_CELLS_PAYLOAD_LIMIT}) "
+            "to bound write-time memory and file size; graph_nodes/edges are authoritative."
+        )
     graph = {
         "metadata": {
             "graph_name": args.graph_name,
@@ -165,7 +251,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         "materials_used": {name: material.to_dict() for name, material in materials.items()},
         "component_mapping": {obj.name: obj.name for obj in scene.objects},
         "role_nodes": _role_components_payload(role_components),
-        "octree_cells": [cell.__dict__ for cell in leaves],
+        "octree_cells": _octree_cells_payload(leaves),
         "graph_nodes": graph_result.nodes,
         "graph_edges": graph_result.edges,
         "suppressed_contact_pairs": [[int(i), int(j)] for i, j in graph_result.suppressed_contact_pairs],
@@ -214,9 +300,194 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     _print_role_summary(graph_result.nodes)
 
 
+def _run_step_conversion(
+    args: argparse.Namespace, progress: "ConsoleProgress", run_log: "RunLogger", step_path: Path
+) -> None:
+    """STEP (B-rep) conversion path: fill solids exactly via OpenCASCADE, then
+    reuse the shared graph-assembly / matrix / write pipeline. Isolated from the
+    GLB path so the existing pipeline is untouched. Role (heater/sensor) detection
+    is not yet wired for STEP -- assign roles in the app after building."""
+    from .brep_geometry import BRepGeometryProvider
+    from .load_step import load_step_scene
+
+    warnings: list[str] = []
+    output = Path(args.output_root) / args.graph_name
+    output.mkdir(parents=True, exist_ok=True)
+    try:
+        progress.phase("Loading STEP assembly")
+        step_scene = load_step_scene(step_path)
+        warnings.extend(step_scene.warnings)
+        run_log.log(f"Loaded STEP {step_path.name}: {len(step_scene.solids)} solids.")
+        progress.phase("Loading materials")
+        material_lookup_path = _resolve_material_lookup_path(args.mesh_dir, getattr(args, "material_lookup", None))
+        contact_report = load_contact_report(material_lookup_path)
+        if not material_lookup_path:
+            warnings.append(
+                "No part->material lookup found (pass --material-lookup or place materials.xlsx in the mesh "
+                f"directory). Unresolved parts default to {DEFAULT_ASSIGNED_MATERIAL_NAME}."
+            )
+        materials, material_warnings = load_material_table(args.materials)
+        warnings.extend(contact_report.warnings)
+        warnings.extend(material_warnings)
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    crowded_refine_distance_mm, crowded_refine_neighbor_cells = _resolve_crowded_component_refine_margins(args)
+    params = OctreeParams(
+        min_cell_size_mm=args.min_cell_size_mm,
+        max_cell_size_mm=args.max_cell_size_mm,
+        max_depth=args.max_depth,
+        dominant_fraction_accept=args.dominant_fraction_accept,
+        minority_fraction_ignore=args.minority_fraction_ignore,
+        material_contrast_refine_threshold=args.material_contrast_refine_threshold,
+        low_conductivity_refine_threshold=float(getattr(args, "low_conductivity_refine_threshold", 0.0) or 0.0),
+        contact_refine_distance_mm=args.contact_refine_distance_mm,
+        boundary_refine=args.boundary_refine,
+        max_leaf_cells=args.max_leaf_cells,
+        samples_per_cell=args.samples_per_cell,
+        min_solid_fraction=args.min_solid_fraction,
+        bbox_fallback=args.bbox_fallback,
+        voxel_workers=args.voxel_workers,
+        voxel_batch_size=args.voxel_batch_size,
+        crowded_component_refine_count=args.crowded_component_refine_count,
+        crowded_component_refine_distance_mm=crowded_refine_distance_mm,
+        crowded_component_refine_neighbor_cells=crowded_refine_neighbor_cells,
+        adaptive_refine_priority=args.adaptive_refine_priority,
+        multi_surface_refine_count=args.multi_surface_refine_count,
+        surface_complexity_refine_threshold=args.surface_complexity_refine_threshold,
+        role_refine_component_names=(),
+        role_refine_distance_mm=args.role_refine_distance_mm,
+        role_refine_max_depth=args.role_refine_max_depth,
+        contains_backend=args.contains_backend,
+        balance_adjacent_leaf_sizes=args.balance_adjacent_leaf_sizes,
+        max_adjacent_leaf_size_ratio=args.max_adjacent_leaf_size_ratio,
+        balance_refine_passes=args.balance_refine_passes,
+    )
+    provider = BRepGeometryProvider(
+        step_scene,
+        contact_report,
+        materials,
+        params,
+        samples_per_axis=int(getattr(args, "step_samples_per_axis", 3)),
+    )
+    warnings.extend(provider.warnings)
+
+    diagnostics = OctreeDiagnostics(debug_leaves=bool(getattr(args, "octree_debug_leaves", False)))
+    progress.phase("Voxelizing octree (B-rep fill)")
+    leaves = build_octree(
+        None,
+        contact_report,
+        materials,
+        params,
+        warnings,
+        diagnostics=diagnostics,
+        progress_callback=(lambda event: progress.octree(event)),
+        geometry_provider=provider,
+    )
+    progress.phase("Building thermal graph")
+    graph_result = build_graph(
+        leaves,
+        contact_report,
+        materials,
+        warnings,
+        radiation_reference_temperature_K=args.radiation_reference_temperature_K,
+        contact_interface_conductance_W_m2K=float(
+            getattr(args, "contact_interface_conductance_W_m2K", DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K)
+        ),
+        contact_detection_distance_mm=_resolve_contact_detection_distance(args, params),
+        contact_gap_tolerance_mm=float(getattr(args, "contact_gap_tolerance_mm", 0.05)),
+        mesh_objects=None,  # B-rep: no triangle meshes; geometric contact suppression is skipped
+        contains_backend=str(getattr(args, "contains_backend", "trimesh")),
+        role_components=None,
+    )
+    _raise_if_empty_graph(graph_result.nodes, leaves, args)
+    connectivity_analysis = _graph_connectivity_analysis(graph_result.nodes, graph_result.edges)
+    _annotate_graph_warning_tags(graph_result.nodes, graph_result.edges, args, connectivity_analysis)
+    progress.phase("Building matrices")
+    matrices = build_matrices(
+        graph_result.nodes, graph_result.edges, dense_node_limit=args.dense_matrix_node_limit
+    )
+    input_files = {"step": str(step_path), "materials": str(Path(args.materials))}
+    if material_lookup_path:
+        input_files["material_lookup"] = str(Path(material_lookup_path))
+    component_names = {str(node.get("component_name", "")) for node in graph_result.nodes}
+    graph = {
+        "metadata": {
+            "graph_name": args.graph_name,
+            "app_version": "octree_graph 0.1",
+            "builder_source": _builder_source_payload(),
+            "input_kind": "step",
+        },
+        "input_files": input_files,
+        "parameters": _parameters_payload(args),
+        "materials_used": {name: material.to_dict() for name, material in materials.items()},
+        "component_mapping": {name: name.split("#")[0] for name in component_names if name},
+        "role_nodes": [],
+        "octree_cells": [cell.__dict__ for cell in leaves],
+        "graph_nodes": graph_result.nodes,
+        "graph_edges": graph_result.edges,
+        "suppressed_contact_pairs": [[int(i), int(j)] for i, j in graph_result.suppressed_contact_pairs],
+        "gap_radiation_links": [[int(i), int(j), float(a)] for i, j, a in graph_result.gap_radiation_links],
+        "warnings": graph_result.warnings,
+        "heater_sensor_tags": {},
+        "validation_results": {},
+        "connectivity_analysis": connectivity_analysis,
+        "diagnostics": diagnostics.to_dict(),
+    }
+    progress.phase("Validating graph")
+    errors, validation_warnings = validate_graph(graph, matrices)
+    graph["validation_results"] = {"errors": errors, "warnings": validation_warnings}
+    graph["build_quality"] = _build_quality_report(graph, args)
+    graph["oversized_node_summary"] = _oversized_node_summary(graph_result.nodes, args)
+    progress.phase("Writing outputs")
+    _write_outputs(output, graph, matrices, materials, warnings)
+    _atomic_write_text(
+        output / "validation_report.txt",
+        format_validation_report(graph, errors, validation_warnings),
+    )
+    if errors:
+        raise SystemExit(f"Graph written with validation errors; see {output / 'validation_report.txt'}")
+    progress.done()
+    run_log.log(f"Completed STEP graph with {len(graph_result.nodes)} nodes and {len(graph_result.edges)} edges.")
+    print(
+        f"Wrote STEP octree graph with {len(graph_result.nodes)} nodes and "
+        f"{len(graph_result.edges)} edges to {output}"
+    )
+    _print_role_summary(graph_result.nodes)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mesh-dir", required=True, help="Directory containing exactly one embedded .glb scene file.")
+    parser.add_argument("--mesh-dir", required=True, help="Directory containing exactly one embedded .glb scene file (GLB path), or a .step/.stp assembly (STEP path).")
+    parser.add_argument(
+        "--step-file",
+        default=None,
+        help="Path to a STEP (.step/.stp) B-rep assembly. If given (or a .step is found in --mesh-dir), the "
+        "B-rep pipeline is used: solids are filled exactly via OpenCASCADE point-in-solid tests instead of "
+        "shelling surface triangles. Requires pythonocc-core.",
+    )
+    parser.add_argument(
+        "--step-samples-per-axis",
+        type=int,
+        default=3,
+        help="STEP B-rep occupancy sampling: NxNxN interior points per cell for the point-in-solid fill test "
+        "(default 3 -> 27 samples). Higher = more accurate fill fraction, slower.",
+    )
+    parser.add_argument(
+        "--step-deflection-mm",
+        type=float,
+        default=0.5,
+        help="STEP tessellation linear deflection (mm) when converting B-rep solids to watertight meshes. "
+        "Smaller = finer triangles / truer curved surfaces, but slower and more memory. Default 0.5.",
+    )
+    parser.add_argument(
+        "--voxel-worker-memory-fraction",
+        type=float,
+        default=0.7,
+        help="Max fraction of currently-free RAM the parallel voxel workers' triangle payload may occupy "
+        "before multiprocessing is disabled (falls back to 1 worker). Raise toward 0.9 to use more RAM; "
+        "lower it if the machine thrashes. Default 0.7.",
+    )
     parser.add_argument("--materials", default="materials.json")
     parser.add_argument(
         "--material-lookup",
@@ -285,6 +556,26 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Case-insensitive CAD component name/path substring to remove before role detection, "
             "voxelization, and graph building. Repeat to ignore multiple component substrings."
+        ),
+    )
+    parser.add_argument(
+        "--no-default-defeature",
+        action="store_true",
+        help=(
+            "Disable the built-in defeature list (standard fasteners, PCBs/connectors/feedthroughs, "
+            "flex cabling, lab/reference geometry) that is dropped by default before voxelization. "
+            "Parts matching the heater/sensor substrings are never defeatured."
+        ),
+    )
+    parser.add_argument(
+        "--low-k-refine-threshold-w-mk",
+        dest="low_conductivity_refine_threshold",
+        type=float,
+        default=10.0,
+        help=(
+            "Material/gradient-aware refinement: cells whose dominant material conductivity is below this "
+            "(W/mK) refine down to --min-cell-size-mm, so low-k parts (G-10 / insulators, where steep "
+            "gradients live) get fine cells while high-k metal bulk stays coarse. 0 disables."
         ),
     )
     parser.add_argument("--dominant-fraction-accept", type=float, default=0.95)
@@ -646,6 +937,7 @@ def _build_graph_with_optional_fallback(
     include_diagnostics: bool = False,
     progress: "ConsoleProgress | None" = None,
     checkpointer: "BuildCheckpointer | None" = None,
+    component_contact_fn=None,
 ):
     if args.bbox_fallback:
         warnings.append(
@@ -673,6 +965,24 @@ def _build_graph_with_optional_fallback(
     )
     if checkpointer is not None:
         checkpointer.octree_complete(leaves, diagnostics)
+    mesh_objects_for_graph = list(getattr(voxel_scene, "objects", []) or [])
+    component_bounds_for_graph = _component_bounds_mm(voxel_scene)
+    if component_contact_fn is not None:
+        # STEP exact-contact path: graph assembly decides part contact on the
+        # B-rep solids, not the tessellated meshes, so release the (multi-GB)
+        # trimesh meshes now -- before the graph-assembly / write peak -- to
+        # reclaim RAM. _mesh_diagnostics tolerates obj.mesh == None.
+        import gc
+
+        for source in (voxel_scene, scene):
+            for obj in getattr(source, "objects", []) or []:
+                try:
+                    obj.mesh = None
+                except Exception:  # noqa: BLE001
+                    pass
+        gc.collect()
+        mesh_objects_for_graph = None
+        component_bounds_for_graph = None
     contact_distance_mm = _resolve_contact_detection_distance(args, params)
     if progress is not None:
         progress.phase("Building thermal graph")
@@ -691,15 +1001,16 @@ def _build_graph_with_optional_fallback(
         ),
         contact_detection_distance_mm=contact_distance_mm,
         contact_gap_tolerance_mm=float(getattr(args, "contact_gap_tolerance_mm", 0.05)),
-        mesh_objects=list(getattr(voxel_scene, "objects", []) or []),
+        mesh_objects=mesh_objects_for_graph,
         contains_backend=str(getattr(args, "contains_backend", "trimesh")),
-        component_bounds_mm=_component_bounds_mm(voxel_scene),
+        component_bounds_mm=component_bounds_for_graph,
         role_components=getattr(args, "role_components", None),
         role_contact_tolerance_mm=args.role_contact_tolerance_mm,
         role_contact_tolerance_max_mm=float(getattr(args, "role_contact_tolerance_max_mm", args.role_contact_tolerance_mm)),
         role_contact_tolerance_growth_factor=float(getattr(args, "role_contact_tolerance_growth_factor", 2.0)),
         max_heater_sensor_pair_distance_mm=float(getattr(args, "max_heater_sensor_pair_distance_mm", 25.0)),
         max_heaters_per_sensor=int(getattr(args, "max_heaters_per_sensor", DEFAULT_MAX_HEATERS_PER_SENSOR)),
+        component_contact_fn=component_contact_fn,
     )
     if checkpointer is not None:
         checkpointer.graph_complete(graph_result)
@@ -780,39 +1091,59 @@ def _filter_ignored_components(
     args: argparse.Namespace,
     warnings: list[str],
 ) -> GltfScene:
-    substrings = [
+    user_substrings = [
         _normalize_component_ignore_text(str(value))
         for value in (getattr(args, "ignore_component_substring", None) or [])
         if str(value).strip()
     ]
+    default_substrings = (
+        []
+        if getattr(args, "no_default_defeature", False)
+        else [_normalize_component_ignore_text(value) for value in DEFAULT_DEFEATURE_SUBSTRINGS]
+    )
+    substrings = list(dict.fromkeys(user_substrings + default_substrings))
     if not substrings:
         setattr(args, "ignored_component_names", [])
         return scene
+    # Never defeature parts that match the configured heater/sensor substrings --
+    # a default hardware token must not accidentally remove a role component.
+    role_substrings = [
+        _normalize_component_ignore_text(str(value))
+        for value in (
+            list(getattr(args, "heater_name_substring", None) or [])
+            + list(getattr(args, "sensor_name_substring", None) or [])
+        )
+        if str(value).strip()
+    ]
     kept = []
     ignored = []
     for obj in scene.objects:
         search_text = _ignored_component_search_text(obj)
+        if role_substrings and any(role in search_text for role in role_substrings):
+            kept.append(obj)
+            continue
         if any(substring in search_text for substring in substrings):
             ignored.append(obj)
         else:
             kept.append(obj)
     setattr(args, "ignored_component_names", [str(obj.name) for obj in ignored])
     if not ignored:
-        warnings.append(
-            "No CAD components matched --ignore-component-substring; "
-            f"configured substring(s): {', '.join(getattr(args, 'ignore_component_substring', []) or [])}."
-        )
+        if user_substrings:
+            warnings.append(
+                "No CAD components matched the ignore/defeature substrings; "
+                f"configured substring(s): {', '.join(getattr(args, 'ignore_component_substring', []) or [])}."
+            )
         return scene
     examples = ", ".join(str(obj.name) for obj in ignored[:8])
     extra = "" if len(ignored) <= 8 else f", ... and {len(ignored) - 8} more"
     warnings.append(
         f"Ignored {len(ignored)} CAD mesh object(s) before role detection and voxelization "
-        f"using --ignore-component-substring: {examples}{extra}."
+        f"(defeature + --ignore-component-substring): {examples}{extra}."
     )
     if not kept:
         raise ValueError(
-            "All CAD mesh objects were removed by --ignore-component-substring; "
-            "relax the ignored component substring(s)."
+            "All CAD mesh objects were removed by defeature/--ignore-component-substring; "
+            "relax the substrings or pass --no-default-defeature."
         )
     return _scene_with_objects(scene, kept)
 
@@ -882,6 +1213,12 @@ def _bounds_for_objects(objects: list) -> tuple[np.ndarray, np.ndarray] | None:
     return mins, maxs
 
 
+# Peak-RAM multiplier over the steady per-worker payload during ProcessPool spawn
+# (parent send-buffers + each worker's resident copy). Keeps the memory guard from
+# approving a worker count that spikes free RAM to ~0 at spawn.
+_WORKER_SPAWN_PEAK_FACTOR = 2.0
+
+
 def _log_scene_memory_risk(scene: GltfScene, args: argparse.Namespace, run_log: "RunLogger", warnings: list[str]) -> None:
     worker_count = _resolved_cli_voxel_workers(args.voxel_workers)
     triangle_count = 0
@@ -905,16 +1242,44 @@ def _log_scene_memory_risk(scene: GltfScene, args: argparse.Namespace, run_log: 
     if worker_count <= 1 or available_bytes is None:
         return
     estimated_parallel_bytes = estimated_per_worker_bytes * worker_count
-    if estimated_parallel_bytes <= available_bytes * 0.7:
+    # Fraction of currently-free RAM the parallel worker payload may occupy. Raise
+    # it (up to ~0.9) via --voxel-worker-memory-fraction to use more RAM before the
+    # guard scales workers down; the default keeps headroom so the box doesn't thrash.
+    fraction = float(getattr(args, "voxel_worker_memory_fraction", 0.7) or 0.7)
+    fraction = min(max(fraction, 0.1), 0.95)
+    budget_bytes = available_bytes * fraction
+    # Peak RAM during worker spawn is worse than the steady payload: the parent
+    # pickle-copies the payload to EACH worker (transient send-buffers in the
+    # parent) while each worker also allocates its own resident copy. Model the
+    # peak as ~2x the per-worker payload so the guard doesn't green-light a count
+    # that OOMs the machine at spawn (which drove free RAM to ~0 in testing).
+    spawn_peak_per_worker = estimated_per_worker_bytes * _WORKER_SPAWN_PEAK_FACTOR
+    estimated_parallel_bytes = spawn_peak_per_worker * worker_count
+    if estimated_parallel_bytes <= budget_bytes:
         return
-    message = (
-        "Disabled multiprocessing because the estimated copied triangle/index payload "
-        f"({_format_bytes(estimated_parallel_bytes)} across {worker_count} workers) is too large for "
-        f"available memory ({_format_bytes(available_bytes)}). Using --voxel-workers 1."
-    )
+    # Requested worker count doesn't fit -> use the MOST workers that do, rather
+    # than collapsing all the way to serial.
+    max_fit = int(budget_bytes // max(spawn_peak_per_worker, 1))
+    max_fit = max(1, min(worker_count, max_fit))
+    if max_fit >= worker_count:
+        return
+    if max_fit > 1:
+        message = (
+            f"Reduced voxel workers from {worker_count} to {max_fit}: the full payload "
+            f"({_format_bytes(estimated_parallel_bytes)} across {worker_count} workers) exceeds the memory "
+            f"budget ({_format_bytes(budget_bytes)} = {fraction:.0%} of {_format_bytes(available_bytes)} free); "
+            f"{max_fit} workers (~{_format_bytes(estimated_per_worker_bytes * max_fit)}) fit. Free RAM or raise "
+            "--voxel-worker-memory-fraction for more."
+        )
+    else:
+        message = (
+            "Disabled multiprocessing because even one worker's copied triangle/index payload "
+            f"({_format_bytes(estimated_per_worker_bytes)}) exceeds the memory budget "
+            f"({_format_bytes(budget_bytes)} of {_format_bytes(available_bytes)} free). Using --voxel-workers 1."
+        )
     warnings.append(message)
     run_log.log(message)
-    args.voxel_workers = 1
+    args.voxel_workers = max_fit
 
 
 def _resolved_cli_voxel_workers(requested: int) -> int:
@@ -1069,7 +1434,7 @@ class BuildCheckpointer:
                 "phase": "octree_complete",
                 "timestamp_utc": _utc_timestamp(),
                 "diagnostics": diagnostics.to_dict(),
-                "octree_cells": [cell.__dict__ for cell in leaves],
+                "octree_cells": _octree_cells_payload(leaves),
             },
         )
 
