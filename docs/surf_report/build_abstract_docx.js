@@ -17,7 +17,7 @@ const BODY =
   "Cryogenic astronomical instruments such as the HISPEC spectrograph must hold " +
   "large optical assemblies at a stable operating temperature near 55 K, yet their " +
   "thermal behavior is set by hundreds of thousands of coupled conduction and " +
-  "radiation pathways — far too many states to simulate in real time or to " +
+  "radiation pathways, far too many states to simulate in real time or to " +
   "design a controller against. This project develops an end-to-end pipeline that " +
   "turns a CAD assembly into a lumped thermal-network model and reduces it to a " +
   "compact form suitable for on-board control. From the instrument geometry an " +

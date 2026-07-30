@@ -8,7 +8,31 @@ const path = require("path");
 const {
   Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType,
   Table, TableRow, TableCell, WidthType, BorderStyle,
+  Math: OMath, MathRun, MathSubScript, MathSuperScript, MathSubSuperScript,
 } = require("docx");
+
+// ---- equations rendered as native Word (OMML) math ----
+const mr = (t) => new MathRun(t);
+const msub = (b, s) => new MathSubScript({ children: [mr(b)], subScript: [mr(s)] });
+const msup = (b, s) => new MathSuperScript({ children: [mr(b)], superScript: [mr(s)] });
+const msubsup = (b, s, p) => new MathSubSuperScript({ children: [mr(b)], subScript: [mr(s)], superScript: [mr(p)] });
+const EQMAP = {
+  eq_Ci: () => [msub("C", "i"), mr(" = ρ·"), msub("c", "p"), mr("·"), msub("V", "i")],
+  eq_Gij: () => [msub("G", "ij")],
+  eq_ode: () => [mr("C(T) Ṫ = −L(T) T + P + εσA("), msubsup("T", "env", "4"), mr(" − "), msup("T", "4"), mr(")")],
+  eq_yGu: () => [mr("y = G u")],
+  eq_pinv: () => [mr("u = "), msup("G", "+"), mr(" Δy")],
+  eq_ulim: () => [mr("0 ≤ u ≤ "), msub("u", "max")],
+  eq_uge: () => [mr("u ≥ 0")],
+  eq_ulem: () => [mr("u ≤ "), msub("u", "max")],
+  eq_ssfull: () => [mr("ẋ = A x + B u,  y = C x")],
+  eq_eig: () => [mr("(L + diag("), msub("G", "rad"), mr(")) φ = λ C φ")],
+  eq_orthon: () => [msup("Φ", "T"), mr(" C Φ = I")],
+  eq_modal: () => [msub("A", "mod"), mr(" = −diag(λ),  "), msub("B", "mod"), mr(" = "), msup("Φ", "T"),
+                   mr(" F,  "), msub("C", "out"), mr(" = S Φ")],
+  eq_uKx: () => [mr("u = −K x")],
+  eq_cost: () => [mr("∫("), msup("y", "T"), mr(" y + ρ "), msup("u", "T"), mr(" u) dt")],
+};
 
 const HERE = __dirname;
 const FONT = "Verdana";
@@ -21,21 +45,30 @@ const USABLE_DXA = 9360; // 12240 - 2*1440 margins
 const md = fs.readFileSync(path.join(HERE, "interim_report_2.md"), "utf8");
 const lines = md.split(/\r?\n/);
 
-// ---- inline **bold** / *italic* / `code` -> TextRun[] ----
+// ---- inline $eq$ math + **bold** / *italic* / `code` -> (TextRun|Math)[] ----
 function inlineRuns(text, base = {}) {
-  const runs = [];
-  const re = /(\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`)/g;
-  let last = 0, m;
-  const push = (t, opts) => { if (t) runs.push(new TextRun({ text: t, font: FONT, size: base.size || SZ, ...base, ...opts })); };
-  while ((m = re.exec(text)) !== null) {
-    push(text.slice(last, m.index));
-    if (m[2] !== undefined) push(m[2], { bold: true });
-    else if (m[3] !== undefined) push(m[3], { italics: true });
-    else if (m[4] !== undefined) push(m[4], {}); // code -> plain Verdana
-    last = re.lastIndex;
-  }
-  push(text.slice(last));
-  return runs.length ? runs : [new TextRun({ text: "", font: FONT, size: base.size || SZ, ...base })];
+  const out = [];
+  const parts = text.split(/\$([a-zA-Z_][a-zA-Z0-9_]*)\$/); // odd indices = equation keys
+  parts.forEach((seg, idx) => {
+    if (idx % 2 === 1) {
+      const f = EQMAP[seg];
+      if (f) { out.push(new OMath({ children: f() })); }
+      else out.push(new TextRun({ text: `$${seg}$`, font: FONT, size: base.size || SZ, ...base }));
+      return;
+    }
+    const re = /(\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`)/g;
+    let last = 0, m;
+    const push = (t, opts) => { if (t) out.push(new TextRun({ text: t, font: FONT, size: base.size || SZ, ...base, ...opts })); };
+    while ((m = re.exec(seg)) !== null) {
+      push(seg.slice(last, m.index));
+      if (m[2] !== undefined) push(m[2], { bold: true });
+      else if (m[3] !== undefined) push(m[3], { italics: true });
+      else if (m[4] !== undefined) push(m[4], {}); // code -> plain Verdana
+      last = re.lastIndex;
+    }
+    push(seg.slice(last));
+  });
+  return out.length ? out : [new TextRun({ text: "", font: FONT, size: base.size || SZ, ...base })];
 }
 
 const para = (text, opts = {}) => new Paragraph({ alignment: AlignmentType.LEFT, spacing: single, children: inlineRuns(text, opts) });
