@@ -9397,3 +9397,61 @@ KeyboardInterrupt
 [2026-07-30T00:44:26] editor refresh_all after viewer.draw
 [2026-07-30T00:44:27] editor refresh_all complete
 [2026-07-30T00:44:27] editor load_graph refresh_all complete
+[2026-07-30T14:53:27] crash diagnostics enabled path='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graph_visualizer_crash.log'
+[2026-07-30T14:53:30] editor refresh_all start nodes='0' edges='0' reset_camera='True'
+[2026-07-30T14:53:30] editor refresh_all visible nodes visible='0'
+[2026-07-30T14:53:30] editor refresh_all before viewer.draw
+[2026-07-30T14:53:30] pyvista draw start nodes='0' edges='0' reset_camera='True'
+[2026-07-30T14:53:30] pyvista draw visible prepared visible='0'
+[2026-07-30T14:53:30] pyvista draw complete
+[2026-07-30T14:53:30] editor refresh_all after viewer.draw
+[2026-07-30T14:53:30] editor refresh_all complete
+[2026-07-30T14:53:30] GraphVisualizerApp initialized crash_log='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graph_visualizer_crash.log'
+[2026-07-30T14:53:30] editor refresh_all start nodes='0' edges='0' reset_camera='True'
+[2026-07-30T14:53:30] editor refresh_all visible nodes visible='0'
+[2026-07-30T14:53:30] editor refresh_all before viewer.draw
+[2026-07-30T14:53:30] pyvista draw start nodes='0' edges='0' reset_camera='True'
+[2026-07-30T14:53:30] pyvista draw visible prepared visible='0'
+[2026-07-30T14:53:30] pyvista draw complete
+[2026-07-30T14:53:30] editor refresh_all after viewer.draw
+[2026-07-30T14:53:30] editor refresh_all complete
+[2026-07-30T14:53:44] editor load_graph start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\SMALL_FILL'
+[2026-07-30T14:53:44] load_graph_folder start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\SMALL_FILL'
+[2026-07-30T14:53:44] editor load_graph failed error="FileNotFoundError('Graph folder is incomplete/corrupted. Missing: graph3d.json')"
+Traceback (most recent call last):
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\app.py", line 1194, in load_graph
+    self.model, _matrices = load_graph_folder(folder)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\graph_io.py", line 96, in load_graph_folder
+    raise FileNotFoundError(
+FileNotFoundError: Graph folder is incomplete/corrupted. Missing: graph3d.json
+[2026-07-30T14:53:52] editor load_graph start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\SMALL_AFTER'
+[2026-07-30T14:53:52] load_graph_folder start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\SMALL_AFTER'
+[2026-07-30T14:53:52] load_graph_folder read octree graph.json
+[2026-07-30T14:55:02] load_graph_folder parsed octree graph nodes='1039189' edges='2846215'
+[2026-07-30T14:55:05] load_graph_folder model validated nodes='1039189' edges='2846215'
+[2026-07-30T14:55:05] load_graph_folder load octree matrix payload
+[2026-07-30T14:55:06] load_octree_matrix_payload sparse path nodes='1039189'
+[2026-07-30T14:55:09] load_graph_folder refresh octree auto geometry
+[2026-07-30T14:55:09] load_graph_folder preserve saved octree radiation
+[2026-07-30T14:55:10] load_graph_folder matrices validated keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']" has_dense_G='False' L_type='csr_matrix'
+[2026-07-30T14:55:10] load_graph_folder complete folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\SMALL_AFTER'
+[2026-07-30T14:55:10] editor load_graph loaded folder nodes='1039189' edges='2846215'
+[2026-07-30T14:55:11] editor load_graph refreshed sensor connections
+[2026-07-30T14:55:14] editor load_graph before refresh_all
+[2026-07-30T14:55:14] editor refresh_all start nodes='1039189' edges='2846215' reset_camera='True'
+[2026-07-30T14:55:15] editor refresh_all visible nodes visible='1039189'
+[2026-07-30T14:55:15] editor refresh_all before viewer.draw
+[2026-07-30T14:55:15] pyvista draw start nodes='1039189' edges='2846215' reset_camera='True'
+[2026-07-30T14:55:29] pyvista draw visible prepared visible='1039189'
+[2026-07-30T14:55:29] pyvista draw using batched renderer visible='1039189'
+[2026-07-30T14:55:29] pyvista draw_batched build mesh start visible='1039189'
+[2026-07-30T14:55:36] pyvista draw_batched create PolyData points='8313512' faces='6235134'
+[2026-07-30T14:55:36] pyvista draw_batched add_mesh rgb
+[2026-07-30T14:55:37] pyvista draw_batched complete
+[2026-07-30T14:55:37] pyvista draw batched mesh complete
+[2026-07-30T14:55:38] pyvista draw overlays complete
+[2026-07-30T14:55:38] pyvista draw finish_scene complete
+[2026-07-30T14:55:38] editor refresh_all after viewer.draw
+[2026-07-30T14:55:38] editor refresh_all complete
+[2026-07-30T14:55:38] editor load_graph refresh_all complete

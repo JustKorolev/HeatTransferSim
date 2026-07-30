@@ -1,0 +1,83 @@
+[
+  {
+    "experiment": "Insulated Block with Constant Heating",
+    "status": "PASS",
+    "metric": "average maximum absolute temperature error",
+    "value": 1.6711965145077556e-10,
+    "tolerance": 0.05,
+    "units": "K",
+    "warnings": []
+  },
+  {
+    "experiment": "Two-Block Thermal Exchange",
+    "status": "WARNING",
+    "metric": "hot block maximum absolute temperature error",
+    "value": 0.05724746234915301,
+    "tolerance": 0.05,
+    "units": "K",
+    "warnings": []
+  },
+  {
+    "experiment": "Two-Node Lumped Conductance",
+    "status": "PASS",
+    "metric": "hot block maximum absolute temperature error",
+    "value": 3.701359219121514e-10,
+    "tolerance": 1e-07,
+    "units": "K",
+    "warnings": []
+  },
+  {
+    "experiment": "One-Dimensional Prism Conduction",
+    "status": "PASS",
+    "metric": "x_over_L_0.25 maximum absolute temperature error",
+    "value": 1.018436010200844,
+    "tolerance": 3.0,
+    "units": "K",
+    "warnings": []
+  },
+  {
+    "experiment": "One-Dimensional Distributed Rod",
+    "status": "PASS",
+    "metric": "rod mode amplitude maximum absolute temperature error",
+    "value": 7.537665092050054e-30,
+    "tolerance": 1e-07,
+    "units": "K",
+    "warnings": []
+  },
+  {
+    "experiment": "Radiation Cooling (Lumped)",
+    "status": "PASS",
+    "metric": "average_temperature_K maximum absolute temperature error",
+    "value": 3.247506583647919e-07,
+    "tolerance": 0.5,
+    "units": "K",
+    "warnings": []
+  },
+  {
+    "experiment": "Temperature-Dependent Heating",
+    "status": "PASS",
+    "metric": "average_temperature_K maximum absolute temperature error",
+    "value": 0.032470360626358996,
+    "tolerance": 0.5,
+    "units": "K",
+    "warnings": []
+  },
+  {
+    "experiment": "Cryo Regime (heater + radiation + cp(T))",
+    "status": "PASS",
+    "metric": "average_temperature_K maximum absolute temperature error",
+    "value": 0.00017896678364337504,
+    "tolerance": 0.5,
+    "units": "K",
+    "warnings": []
+  },
+  {
+    "experiment": "Global Energy Conservation",
+    "status": "PASS",
+    "metric": "maximum energy imbalance",
+    "value": 0.0018232757524856424,
+    "tolerance": 36.429134602059506,
+    "units": "J",
+    "warnings": []
+  }
+]

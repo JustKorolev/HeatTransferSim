@@ -106,8 +106,45 @@ def _resolve_step_path(args: argparse.Namespace) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _require_embree(args: argparse.Namespace, run_log: "RunLogger") -> None:
+    """Fail fast unless embreex-accelerated containment is available.
+
+    Without embreex, point-in-solid tests fall back to a pure-Python ray test
+    (~60x slower), which makes full graph builds impractical. Checked before any
+    expensive loading/tessellation so the user is not left waiting for a slow run.
+    Pass --allow-slow-contains to override."""
+    from .octree import embree_active
+
+    active = embree_active()
+    if bool(getattr(args, "allow_slow_contains", False)):
+        if not active:
+            run_log.log(
+                "WARNING: embreex is not active; using the pure-Python containment "
+                "fallback (~60x slower) because --allow-slow-contains was passed."
+            )
+        return
+    if not active:
+        raise SystemExit(
+            "embreex is required for graph building. Without it, point-in-solid "
+            "containment falls back to a pure-Python ray test that is ~60x slower and "
+            "makes full builds impractical.\n"
+            "  Install it in the active environment:  pip install embreex\n"
+            "  Verify:  python -c \"import trimesh; print(type(trimesh.creation.box().ray).__module__)\"\n"
+            "           (expect 'trimesh.ray.ray_pyembree')\n"
+            "  To build slowly anyway, pass --allow-slow-contains."
+        )
+    if str(getattr(args, "contains_backend", "trimesh")) == "ray":
+        raise SystemExit(
+            "embreex is active, but --contains-backend=ray forces the slow pure-Python "
+            "containment path. Use --contains-backend=trimesh (default) to use embreex, "
+            "or pass --allow-slow-contains to override."
+        )
+    run_log.log("embreex active: point-in-solid containment is BVH-accelerated.")
+
+
 def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_log: "RunLogger") -> None:
     warnings: list[str] = []
+    _require_embree(args, run_log)
     output = Path(args.output_root) / args.graph_name
     checkpointer = BuildCheckpointer(output, args)
     checkpointer.phase("started", {"graph_name": args.graph_name})
@@ -715,6 +752,15 @@ def build_parser() -> argparse.ArgumentParser:
             "BVH (Embree/rtree) and is much faster on high-triangle CAD; it falls back to 'ray' "
             "automatically when those native deps are unavailable. Force 'ray' for the pure-NumPy "
             "all-triangle test (portable but slow on complex meshes)."
+        ),
+    )
+    parser.add_argument(
+        "--allow-slow-contains",
+        action="store_true",
+        help=(
+            "Permit graph building without embreex. By default the build aborts if embreex is not "
+            "active, because the pure-Python containment fallback is ~60x slower and makes full "
+            "builds impractical. Only pass this if you knowingly accept the slow path."
         ),
     )
     parser.add_argument(

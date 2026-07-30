@@ -58,6 +58,8 @@ from octree_graph.octree import (
     OctreeDiagnostics,
     OctreeParams,
     _adjacent_balance_refinement_targets,
+    _build_triangle_indices,
+    _classify_cell,
     _crowded_component_refine_margin_mm,
     _mesh_contains_point,
     _mesh_triangles,
@@ -67,6 +69,7 @@ from octree_graph.octree import (
     _refinement_priority,
     _sample_points,
     _triangle_intersects_aabb,
+    ObjectBoundsIndex,
     TriangleSpatialIndex,
     build_octree,
 )
@@ -2021,6 +2024,146 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         )
 
         self.assertEqual([obj.name for obj in hits], ["valid"])
+
+    def test_object_bounds_index_matches_bruteforce_reference(self) -> None:
+        """Vectorized ObjectBoundsIndex must return exactly the same objects, in
+        the same order, as an inclusive-overlap brute-force loop -- across random
+        boxes plus adversarial touching/degenerate/non-finite cases."""
+
+        def brute_force(objects, qmin, qmax):
+            qmin = np.asarray(qmin, dtype=float)
+            qmax = np.asarray(qmax, dtype=float)
+            if qmin.shape != (3,) or qmax.shape != (3,):
+                return []
+            if not (np.isfinite(qmin).all() and np.isfinite(qmax).all()):
+                return []
+            lo = np.minimum(qmin, qmax)
+            hi = np.maximum(qmin, qmax)
+            hits = []
+            for obj in objects:
+                bmin, bmax = obj.bounds_mm
+                bmin = np.asarray(bmin, dtype=float)
+                bmax = np.asarray(bmax, dtype=float)
+                if not (np.isfinite(bmin).all() and np.isfinite(bmax).all()):
+                    continue  # object with no usable bounds is skipped
+                omin = np.minimum(bmin, bmax)
+                omax = np.maximum(bmin, bmax)
+                if bool(np.all(omax >= lo) and np.all(hi >= omin)):
+                    hits.append(obj)
+            return hits
+
+        rng = np.random.default_rng(20260730)
+        objects = []
+        for i in range(40):
+            lo = rng.uniform(-10.0, 10.0, size=3)
+            ext = rng.uniform(0.0, 4.0, size=3)  # includes zero-extent (degenerate) boxes
+            objects.append(_mesh_object(f"obj{i}", "Copper", lo.tolist(), (lo + ext).tolist()))
+        # A couple of objects with non-finite bounds that must always be skipped.
+        objects.append(_mesh_object("naninf", "Copper", [float("nan"), 0.0, 0.0], [1.0, 1.0, 1.0]))
+
+        index = ObjectBoundsIndex.build(objects)
+
+        queries = [
+            (np.array([0.0, 0.0, 0.0]), np.array([1.0, 1.0, 1.0])),
+            (np.array([-100.0, -100.0, -100.0]), np.array([-99.0, -99.0, -99.0])),  # far outside
+            (np.array([2.0, 2.0, 2.0]), np.array([2.0, 2.0, 2.0])),  # degenerate point query
+            (np.array([5.0, 5.0, 5.0]), np.array([-5.0, -5.0, -5.0])),  # reversed
+            (np.array([float("nan"), 0.0, 0.0]), np.array([1.0, 1.0, 1.0])),  # invalid -> []
+        ]
+        for _ in range(200):
+            a = rng.uniform(-12.0, 12.0, size=3)
+            b = rng.uniform(-12.0, 12.0, size=3)
+            queries.append((a, b))
+        # Adversarial: queries whose faces exactly touch object faces (inclusive
+        # overlap must count these as hits).
+        for obj in objects[:5]:
+            bmin, bmax = obj.bounds_mm
+            queries.append((np.asarray(bmax, dtype=float), np.asarray(bmax, dtype=float) + 1.0))
+            queries.append((np.asarray(bmin, dtype=float) - 1.0, np.asarray(bmin, dtype=float)))
+
+        for qmin, qmax in queries:
+            expected = [obj.name for obj in brute_force(objects, qmin, qmax)]
+            actual = [obj.name for obj in index.query(qmin, qmax)]
+            self.assertEqual(actual, expected, msg=f"mismatch for query {qmin} .. {qmax}")
+            # And the reused-index path must equal the standalone helper.
+            helper = [obj.name for obj in _objects_intersecting_bounds(objects, qmin, qmax)]
+            self.assertEqual(helper, expected, msg=f"helper mismatch for query {qmin} .. {qmax}")
+
+    def test_interior_fill_matches_full_reclassification(self) -> None:
+        """Interior-fill inheritance must yield exactly the occupancy/component/
+        material that a full containment sweep would. Build an octree whose
+        interiors are heavily subdivided (so inheritance fires), then re-classify
+        every emitted leaf from scratch (which never uses inheritance) and require
+        an exact match."""
+        try:
+            import trimesh
+        except Exception:  # pragma: no cover - trimesh is a hard dep of the build
+            self.skipTest("trimesh not available")
+
+        materials = {
+            "Copper": Material(
+                name="Copper", density_kg_m3=8960.0, cp_J_kgK=385.0, k_W_mK=401.0, emissivity=0.35
+            ),
+            DEFAULT_ASSIGNED_MATERIAL_NAME: Material(
+                name=DEFAULT_ASSIGNED_MATERIAL_NAME,
+                density_kg_m3=2700.0,
+                cp_J_kgK=896.0,
+                k_W_mK=167.0,
+                emissivity=0.09,
+            ),
+        }
+
+        def make_box(name, material, center, ext):
+            box = trimesh.creation.box(extents=ext)
+            box.apply_translation(center)
+            return MeshObject(
+                name=name,
+                material_name=material,
+                mesh=box,
+                vertices_mm=np.asarray(box.vertices, dtype=float),
+                bounds_mm=(np.asarray(box.bounds[0]), np.asarray(box.bounds[1])),
+                watertight=True,
+                scene_path=name,
+            )
+
+        objects = [
+            make_box("A", "Copper", [0.0, 0.0, 0.0], [20.0, 20.0, 20.0]),
+            make_box("B", DEFAULT_ASSIGNED_MATERIAL_NAME, [40.0, 0.0, 0.0], [16.0, 16.0, 16.0]),
+        ]
+        all_min = np.min([o.bounds_mm[0] for o in objects], axis=0)
+        all_max = np.max([o.bounds_mm[1] for o in objects], axis=0)
+        scene = GltfScene(
+            path=SimpleNamespace(), objects=objects, bounds_mm=(all_min, all_max), warnings=[]
+        )
+        params = OctreeParams(
+            min_cell_size_mm=2.0,
+            max_cell_size_mm=4.0,  # forces deep interior subdivision -> inheritance fires
+            max_depth=12,
+            samples_per_cell=27,
+            contains_backend="trimesh",
+        )
+
+        leaves = build_octree(scene, ContactReport(), materials, params, warnings=[])
+        occupied = [leaf for leaf in leaves if leaf.occupancy]
+        self.assertGreater(len(occupied), 100, "expected many interior leaves to exercise fill")
+
+        triangle_indices = _build_triangle_indices(scene.objects, params)
+        bounds_index = ObjectBoundsIndex.build(scene.objects)
+        for leaf in leaves:
+            reference = _classify_cell(
+                scene.objects,
+                triangle_indices,
+                np.asarray(leaf.center_mm, dtype=float),
+                np.asarray(leaf.size_mm, dtype=float),
+                ContactReport(),
+                params,
+                set(materials),
+                None,
+                bounds_index,
+            )
+            self.assertEqual(bool(leaf.occupancy), bool(reference.occupancy), leaf.cell_id)
+            self.assertEqual(leaf.dominant_component, reference.dominant_component, leaf.cell_id)
+            self.assertEqual(leaf.dominant_material, reference.dominant_material, leaf.cell_id)
 
     def test_mesh_triangles_sanitizes_native_mesh_triangle_data(self) -> None:
         class BadTriangleMesh:
