@@ -98,6 +98,7 @@ class GraphVisualizerApp:
         self.autosave_enabled = False
         self.selected_node_id: int | None = None
         self.selected_node_ids: set[int] = set()
+        self._hidden_components: set[str] = set()
         self.inputs: dict[str, Any] = {}
         self._building_form = False
         self._syncing_conduction_ui = False
@@ -621,6 +622,19 @@ class GraphVisualizerApp:
         self.component_material_label = self.QtWidgets.QLabel("")
         self.component_material_label.setWordWrap(True)
         form.addRow("", self.component_material_label)
+        visibility_row = self.QtWidgets.QHBoxLayout()
+        self.component_hide_checkbox = self.QtWidgets.QCheckBox("Hide component")
+        self.component_hide_checkbox.setToolTip(
+            "Hide the selected component's cells from the 3D and 2D views. "
+            "View-only: the thermal model and simulation are unaffected."
+        )
+        self.component_hide_checkbox.toggled.connect(self._handle_component_hide_toggled)
+        unhide_all = self.QtWidgets.QPushButton("Unhide All")
+        unhide_all.setToolTip("Restore visibility of every component hidden via the checkbox.")
+        unhide_all.clicked.connect(self.unhide_all_components)
+        visibility_row.addWidget(self.component_hide_checkbox, 1)
+        visibility_row.addWidget(unhide_all)
+        form.addRow("visibility", visibility_row)
         self.left_layout.addWidget(box)
 
     def _build_bulk_role_assignment_controls(self) -> None:
@@ -1080,6 +1094,7 @@ class GraphVisualizerApp:
             return
         node = self.model.nodes[self.selected_node_id]
         self._load_node_into_form(node)
+        self._select_component_in_tools(node.component_name)
         self._refresh_details()
         self.viewer.select_nodes(set(self.selected_node_ids), active_node_id=self.selected_node_id)
         self.two_d_view.selected_node_ids = set(self.selected_node_ids)
@@ -1178,6 +1193,7 @@ class GraphVisualizerApp:
         self.autosave_enabled = False
         self.selected_node_id = None
         self.selected_node_ids = set()
+        self._hidden_components.clear()
         self.dirty = False
         self.cancel_draw_preview()
         self._sync_metadata_widgets()
@@ -1203,6 +1219,7 @@ class GraphVisualizerApp:
             self.autosave_enabled = True
             self.selected_node_id = None
             self.selected_node_ids = set()
+            self._hidden_components.clear()
             self.dirty = False
             self.cancel_draw_preview()
             self._sync_metadata_widgets()
@@ -1865,6 +1882,8 @@ class GraphVisualizerApp:
                 continue
             if component != "All" and node.component_name != component:
                 continue
+            if node.component_name in self._hidden_components:
+                continue
             if not node_matches_level_filter(node, min_level, max_level):
                 continue
             if not node_matches_heater_sensor_filters(node, heater_only, sensor_only):
@@ -2308,6 +2327,7 @@ class GraphVisualizerApp:
         if not hasattr(self, "component_temp_combo"):
             return
         component = self.component_temp_combo.currentText()
+        self._sync_component_hide_checkbox(component)
         if not component:
             if hasattr(self, "component_cryocooler_label"):
                 self.component_cryocooler_label.setText("")
@@ -2329,6 +2349,56 @@ class GraphVisualizerApp:
                 if total
                 else "No cells in component"
             )
+
+    def _sync_component_hide_checkbox(self, component: str) -> None:
+        """Reflect the hidden state of ``component`` in the Hide checkbox."""
+        if not hasattr(self, "component_hide_checkbox"):
+            return
+        self.component_hide_checkbox.blockSignals(True)
+        self.component_hide_checkbox.setEnabled(bool(component))
+        self.component_hide_checkbox.setChecked(
+            bool(component) and component in self._hidden_components
+        )
+        self.component_hide_checkbox.blockSignals(False)
+
+    def _select_component_in_tools(self, component_name: str) -> None:
+        """Point the Component Tools combo at ``component_name`` (e.g. after a pick)."""
+        if not component_name or not hasattr(self, "component_temp_combo"):
+            return
+        index = self.component_temp_combo.findText(component_name)
+        if index >= 0:
+            self.component_temp_combo.setCurrentIndex(index)
+        self._sync_component_hide_checkbox(component_name)
+
+    def _handle_component_hide_toggled(self, checked: bool) -> None:
+        if not hasattr(self, "component_temp_combo"):
+            return
+        component = self.component_temp_combo.currentText()
+        if not component:
+            return
+        if checked:
+            self._hidden_components.add(component)
+        else:
+            self._hidden_components.discard(component)
+        self._refresh_all(reset_camera=False)
+        self._set_status(
+            f"Hid component: {component}." if checked else f"Unhid component: {component}."
+        )
+
+    def unhide_all_components(self, *_: Any) -> None:
+        if not self._hidden_components:
+            self._set_status("No components are hidden.")
+            return
+        count = len(self._hidden_components)
+        self._hidden_components.clear()
+        current = (
+            self.component_temp_combo.currentText()
+            if hasattr(self, "component_temp_combo")
+            else ""
+        )
+        self._sync_component_hide_checkbox(current)
+        self._refresh_all(reset_camera=False)
+        self._set_status(f"Unhid {count} component(s).")
 
     def _handle_component_initial_temperature_changed(self, *_: Any) -> None:
         if self._building_form:
