@@ -931,30 +931,88 @@ def _resolve_voxel_worker_count(params: OctreeParams) -> int:
     return max(1, requested)
 
 
-def _prepare_worker_objects(objects: list[MeshObject]) -> list[MeshObject]:
-    worker_objects: list[MeshObject] = []
+@dataclass
+class _WorkerMeshPayload:
+    """Picklable per-object payload sent to octree workers: raw vertex/face arrays
+    plus metadata. Workers reconstruct a real ``trimesh.Trimesh`` from these so their
+    containment tests run on EMBREE (like the serial path) instead of the ~60x-slower
+    pure-Python ray fallback. Sending arrays (not a live Trimesh, whose embree ray
+    engine isn't picklable) keeps it serializable, and vertices+faces are smaller
+    than triangle soup because shared vertices aren't duplicated."""
+
+    name: str
+    material_name: str | None
+    vertices: np.ndarray
+    faces: np.ndarray
+    bounds_mm: tuple
+    watertight: bool
+    scene_path: str | None
+
+
+def _mesh_vertices_faces(obj: MeshObject) -> tuple[np.ndarray, np.ndarray]:
+    """Vertices+faces for an object's mesh; falls back to exploding the triangle
+    soup into per-triangle vertices if the mesh has no face topology."""
+    mesh = getattr(obj, "mesh", None)
+    verts = getattr(mesh, "vertices", None)
+    faces = getattr(mesh, "faces", None)
+    if verts is not None and faces is not None:
+        verts = np.asarray(verts, dtype=float)
+        faces = np.asarray(faces)
+        if verts.ndim == 2 and verts.shape[1] == 3 and faces.ndim == 2 and faces.shape[1] == 3 and len(faces):
+            return np.ascontiguousarray(verts), np.ascontiguousarray(faces, dtype=np.int64)
+    triangles = np.asarray(_mesh_triangles(obj), dtype=float)
+    if triangles.ndim == 3 and triangles.shape[0] > 0:
+        exploded = triangles.reshape(-1, 3)
+        return (
+            np.ascontiguousarray(exploded),
+            np.arange(exploded.shape[0], dtype=np.int64).reshape(-1, 3),
+        )
+    return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=np.int64)
+
+
+def _reconstruct_worker_mesh(payload: "_WorkerMeshPayload"):
+    """Rebuild a real embree-capable ``trimesh.Trimesh`` in the worker; fall back to
+    the raw triangle-soup mesh (pure-Python ray path) only if trimesh is unavailable."""
+    if payload.faces.shape[0] and payload.vertices.shape[0]:
+        try:
+            import trimesh
+
+            return trimesh.Trimesh(
+                vertices=payload.vertices, faces=payload.faces, process=False, validate=False
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    if payload.faces.shape[0] and payload.vertices.shape[0]:
+        triangles = payload.vertices[payload.faces]
+    else:
+        triangles = np.empty((0, 3, 3), dtype=float)
+    return _TriangleMesh(triangles=triangles)
+
+
+def _prepare_worker_objects(objects: list[MeshObject]) -> list["_WorkerMeshPayload"]:
+    payloads: list[_WorkerMeshPayload] = []
     for obj in objects:
-        triangles = np.array(_mesh_triangles(obj), dtype=float, copy=True)
         bounds = _object_bounds_tuple(obj)
         if bounds is None:
             continue
         bounds_min, bounds_max = bounds
-        worker_objects.append(
-            MeshObject(
+        vertices, faces = _mesh_vertices_faces(obj)
+        payloads.append(
+            _WorkerMeshPayload(
                 name=obj.name,
                 material_name=obj.material_name,
-                mesh=_TriangleMesh(triangles=triangles),
-                vertices_mm=np.empty((0, 3), dtype=float),
+                vertices=vertices,
+                faces=faces,
                 bounds_mm=(np.asarray(bounds_min, dtype=float), np.asarray(bounds_max, dtype=float)),
                 watertight=bool(obj.watertight),
                 scene_path=getattr(obj, "scene_path", None),
             )
         )
-    return worker_objects
+    return payloads
 
 
 def _init_octree_worker(
-    objects: list[MeshObject],
+    objects: list["_WorkerMeshPayload"],
     contact_report: ContactReport,
     params: OctreeParams,
     known_materials: set[str],
@@ -969,10 +1027,25 @@ def _init_octree_worker(
     global _WORKER_PARAMS
     global _WORKER_KNOWN_MATERIALS
 
-    _TRIMESH_CONTAINS_AVAILABLE = False
+    # None (not False): let the first containment call detect and use embree, same as
+    # the serial path. Forcing False here made every worker fall back to the ~60x
+    # slower pure-Python ray test -- which is why multiprocessing never actually sped
+    # voxelization up. Workers reconstruct real trimeshes below so embree is available.
+    _TRIMESH_CONTAINS_AVAILABLE = None
     _TRIANGLE_CACHE = {}
     _TRIANGLE_INDEX_CACHE = {}
-    _WORKER_OBJECTS = objects
+    _WORKER_OBJECTS = [
+        MeshObject(
+            name=payload.name,
+            material_name=payload.material_name,
+            mesh=_reconstruct_worker_mesh(payload),
+            vertices_mm=np.empty((0, 3), dtype=float),
+            bounds_mm=payload.bounds_mm,
+            watertight=payload.watertight,
+            scene_path=payload.scene_path,
+        )
+        for payload in objects
+    ]
     _WORKER_CONTACT_REPORT = contact_report
     _WORKER_PARAMS = params
     _WORKER_KNOWN_MATERIALS = set(known_materials)
