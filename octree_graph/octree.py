@@ -643,64 +643,80 @@ def build_octree(
             classification = classify_work_item(work_item)
             handle_classified_cell(work_item, classification, remaining_batch_items=0)
     else:
-        worker_objects = _prepare_worker_objects(scene.objects)
-        batch: list[_CellWorkItem] = []
-        try:
+        # Self-healing multiprocessing. A worker OOM surfaces as a BrokenProcessPool;
+        # rather than collapse the ENTIRE remaining build to serial (which is what
+        # made real runs crawl), retry the remaining cells with HALF the workers --
+        # which need proportionally less RAM -- stepping down until it fits or we
+        # reach serial. The in-flight batch is held in ``pending_batch`` so a failure
+        # re-runs exactly those cells: none dropped, none double-counted (a failed
+        # ``executor.map`` raises before any of its results are handled).
+        pending_batch: list[_CellWorkItem] = []
+
+        def _drain_with_pool(mp_workers: int) -> None:
+            nonlocal pending_batch
+            worker_objects = _prepare_worker_objects(scene.objects)
             with ProcessPoolExecutor(
-                max_workers=worker_count,
+                max_workers=mp_workers,
                 initializer=_init_octree_worker,
                 initargs=(worker_objects, contact_report, params, set(materials)),
             ) as executor:
-                while queue:
-                    batch: list[_CellWorkItem] = []
-                    while queue and len(batch) < batch_size:
-                        work_item = pop_cell()
-                        # Interior-fill items need no containment -- handle them in
-                        # this process instead of paying a worker IPC round-trip.
-                        if work_item.inherited_component is not None:
-                            handle_classified_cell(
-                                work_item,
-                                _interior_fill_classification(
-                                    work_item.inherited_component, work_item.inherited_material
-                                ),
-                                remaining_batch_items=0,
-                            )
-                        else:
-                            batch.append(work_item)
-                    if not batch:
-                        continue
+                while queue or pending_batch:
+                    if pending_batch:
+                        batch = pending_batch
+                    else:
+                        batch = []
+                        while queue and len(batch) < batch_size:
+                            work_item = pop_cell()
+                            # Interior-fill items need no containment -- handle them
+                            # in-process instead of paying a worker IPC round-trip.
+                            if work_item.inherited_component is not None:
+                                handle_classified_cell(
+                                    work_item,
+                                    _interior_fill_classification(
+                                        work_item.inherited_component, work_item.inherited_material
+                                    ),
+                                    remaining_batch_items=0,
+                                )
+                            else:
+                                batch.append(work_item)
+                        if not batch:
+                            continue
+                    pending_batch = batch  # in-flight; cleared only after success
                     classifications = list(
                         executor.map(
                             _classify_cell_work_item,
                             batch,
-                            chunksize=max(1, min(8, batch_size // max(worker_count, 1))),
+                            chunksize=max(1, min(8, batch_size // max(mp_workers, 1))),
                         )
                     )
                     for index, (work_item, classification) in enumerate(zip(batch, classifications)):
-                        remaining_batch = batch[index + 1 :]
                         handle_classified_cell(
-                            work_item,
-                            classification,
-                            remaining_batch_items=len(remaining_batch),
+                            work_item, classification, remaining_batch_items=len(batch) - index - 1
                         )
-        except Exception as exc:
-            warnings.append(
-                "Multiprocessing octree classification failed; falling back to sequential classification "
-                f"for the remaining cells. Worker error: {type(exc).__name__}: {exc}"
-            )
-            worker_count = 1
-            for index, work_item in enumerate(batch):
-                remaining_batch = batch[index + 1 :]
-                classification = classify_work_item(work_item)
-                handle_classified_cell(
-                    work_item,
-                    classification,
-                    remaining_batch_items=len(remaining_batch),
+                    pending_batch = []
+
+        while worker_count > 1:
+            try:
+                _drain_with_pool(worker_count)
+                break
+            except Exception as exc:  # noqa: BLE001
+                next_workers = worker_count // 2
+                warnings.append(
+                    f"Multiprocessing octree classification failed at {worker_count} worker(s) "
+                    f"({type(exc).__name__}: {exc}); retrying remaining cells at {next_workers} "
+                    "worker(s)." + (" Continuing serially." if next_workers <= 1 else "")
                 )
-            while queue:
-                work_item = pop_cell()
-                classification = classify_work_item(work_item)
-                handle_classified_cell(work_item, classification, remaining_batch_items=0)
+                worker_count = next_workers
+        # Serial drain: any re-queued in-flight batch, then the rest of the queue.
+        for index, work_item in enumerate(pending_batch):
+            handle_classified_cell(
+                work_item, classify_work_item(work_item),
+                remaining_batch_items=len(pending_batch) - index - 1,
+            )
+        pending_batch = []
+        while queue:
+            work_item = pop_cell()
+            handle_classified_cell(work_item, classify_work_item(work_item), remaining_batch_items=0)
     leaves = _balance_adjacent_leaf_sizes(
         leaves,
         classify,

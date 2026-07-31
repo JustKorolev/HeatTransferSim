@@ -427,9 +427,10 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
     def test_cli_memory_guard_scales_workers_down_to_max_that_fits(self) -> None:
         # When the requested worker count's payload is too large but a SMALLER
         # count fits, the guard reduces to the largest feasible count instead of
-        # collapsing to serial. 100 triangles -> ~12000 B/worker, x2 spawn-peak
-        # factor = 24000 B/worker; with 4 requested and budget 0.7*80000=56000
-        # (fits 2 x 24000 but not 3), expect 2.
+        # collapsing to serial. 100 triangles -> triangle_bytes=7200, index=4800,
+        # bvh=7200 (embree) = 19200 B/worker, x2 spawn-peak = 38400 B/worker; with 4
+        # requested and budget 0.7*120000=84000 (fits 2 x 38400=76800 but not 3),
+        # expect 2.
         triangle = np.zeros((100, 3, 3), dtype=float)
         obj = _mesh_object("body_panel", "Copper", [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
         obj.mesh.triangles = triangle
@@ -443,7 +444,7 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         warnings: list[str] = []
         logger = SimpleNamespace(messages=[], log=lambda message: logger.messages.append(message))
 
-        with patch("octree_graph.cli._available_memory_bytes", return_value=80000), patch(
+        with patch("octree_graph.cli._available_memory_bytes", return_value=120000), patch(
             "octree_graph.cli._resolved_cli_voxel_workers", return_value=4
         ):
             _log_scene_memory_risk(scene, args, logger, warnings)
@@ -1946,7 +1947,8 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
         solid = [leaf for leaf in leaves if not leaf.is_empty]
         self.assertEqual(len(solid), 1)
         self.assertEqual(solid[0].dominant_component, "thin_panel")
-        self.assertIn("falling back to sequential", " ".join(warnings))
+        # worker_count=2 fails -> retries at 1 -> serial drain completes the build.
+        self.assertIn("Continuing serially", " ".join(warnings))
         self.assertIn("range_iterator", " ".join(warnings))
 
     def test_sample_points_are_symmetric_for_low_sample_counts(self) -> None:

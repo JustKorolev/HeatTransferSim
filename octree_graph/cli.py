@@ -1314,7 +1314,13 @@ def _log_scene_memory_risk(scene: GltfScene, args: argparse.Namespace, run_log: 
             triangle_count += int(triangles.shape[0])
             triangle_bytes += int(triangles.nbytes)
     index_bytes = triangle_count * 2 * 3 * np.dtype(float).itemsize
-    estimated_per_worker_bytes = triangle_bytes + index_bytes
+    # Each worker ALSO builds an embree BVH over its meshes on the first containment
+    # query -- roughly the scene size again. Omitting it made the guard green-light a
+    # worker count that fit at spawn but OOM'd once the BVHs materialized (a worker
+    # dies -> BrokenProcessPool -> the whole build silently drops to serial). Count it
+    # so the provisioned worker count actually fits through steady state.
+    bvh_bytes = triangle_bytes
+    estimated_per_worker_bytes = triangle_bytes + index_bytes + bvh_bytes
     available_bytes = _available_memory_bytes()
     run_log.log(
         "Scene memory estimate: "
