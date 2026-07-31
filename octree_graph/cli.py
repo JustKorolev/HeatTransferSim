@@ -226,17 +226,16 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         max_adjacent_leaf_size_ratio=args.max_adjacent_leaf_size_ratio,
         balance_refine_passes=args.balance_refine_passes,
     )
-    # STEP: build the EXACT per-component-pair B-rep contact test from the solids.
-    component_contact_fn = None
+    # STEP: exact per-component-pair B-rep contact. Built inside
+    # _build_graph_with_optional_fallback so it can be precomputed in parallel
+    # from the adjacent-pair list once voxelization is done.
+    contact_tol_mm = None
     if step_scene is not None:
-        from .load_step import make_component_contact_fn
-
         contact_tol_mm = (
             float(getattr(args, "contact_gap_tolerance_mm", 0.0))
             or float(getattr(args, "contact_detection_distance_mm", 0.0))
             or 0.1
         )
-        component_contact_fn = make_component_contact_fn(step_scene, contact_tol_mm)
     leaves, graph_result, diagnostics = _build_graph_with_optional_fallback(
         scene,
         voxel_scene,
@@ -248,7 +247,9 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         include_diagnostics=True,
         progress=progress,
         checkpointer=checkpointer,
-        component_contact_fn=component_contact_fn,
+        step_scene=step_scene,
+        step_path=step_path,
+        contact_tol_mm=contact_tol_mm,
     )
     _raise_if_empty_graph(graph_result.nodes, leaves, args)
     connectivity_analysis = _graph_connectivity_analysis(graph_result.nodes, graph_result.edges)
@@ -983,7 +984,9 @@ def _build_graph_with_optional_fallback(
     include_diagnostics: bool = False,
     progress: "ConsoleProgress | None" = None,
     checkpointer: "BuildCheckpointer | None" = None,
-    component_contact_fn=None,
+    step_scene=None,
+    step_path=None,
+    contact_tol_mm=None,
 ):
     if args.bbox_fallback:
         warnings.append(
@@ -1011,6 +1014,42 @@ def _build_graph_with_optional_fallback(
     )
     if checkpointer is not None:
         checkpointer.octree_complete(leaves, diagnostics)
+    # STEP exact contact: enumerate the adjacent component pairs and decide each on
+    # the B-rep solids. BRepExtrema is slow and GIL-bound, so on multi-worker runs
+    # precompute all pairs across PROCESSES (each worker re-loads solids only, no
+    # tessellation) and hand build_graph a lookup with a serial exact fallback.
+    component_contact_fn = None
+    if step_scene is not None and contact_tol_mm is not None:
+        from .load_step import make_component_contact_fn, parallel_component_contact
+        from .graph_builder import enumerate_inter_component_adjacent_pairs
+
+        serial_contact = make_component_contact_fn(step_scene, float(contact_tol_mm))
+        component_contact_fn = serial_contact
+        workers = int(getattr(args, "voxel_workers", 1) or 1)
+        if workers > 1 and step_path is not None:
+            adjacent_pairs = enumerate_inter_component_adjacent_pairs(leaves)
+            if adjacent_pairs:
+                if progress is not None:
+                    progress.phase("Precomputing B-rep contact")
+                try:
+                    contact_cache = parallel_component_contact(
+                        str(step_path), adjacent_pairs, float(contact_tol_mm), workers
+                    )
+
+                    def component_contact_fn(name_a, name_b, _cache=contact_cache, _fallback=serial_contact):
+                        cached = _cache.get(frozenset((name_a, name_b)))
+                        return _fallback(name_a, name_b) if cached is None else cached
+
+                    warnings.append(
+                        f"Precomputed exact B-rep contact for {len(contact_cache)} adjacent component "
+                        f"pair(s) across {workers} worker process(es)."
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(
+                        f"Parallel contact precompute failed ({type(exc).__name__}: {exc}); "
+                        "falling back to serial exact B-rep contact."
+                    )
+                    component_contact_fn = serial_contact
     mesh_objects_for_graph = list(getattr(voxel_scene, "objects", []) or [])
     component_bounds_for_graph = _component_bounds_mm(voxel_scene)
     if component_contact_fn is not None:

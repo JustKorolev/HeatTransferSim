@@ -34,7 +34,7 @@ from graph_visualizer.graph_io import (
     load_graph_folder,
     save_graph_folder,
 )
-from graph_visualizer.material_library import default_material_library
+from graph_visualizer.material_library import default_material_library, is_unassigned_material
 from graph_visualizer.mimo_controller import (
     allocate_thermal_rate_qp,
     weighted_rms_error,
@@ -5569,6 +5569,15 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertNotEqual(edge_curve_for_positions(1, 2, positions, 0.2), 0.0)
         clear_positions = {1: (0.0, 0.0), 2: (2.0, 0.0), 3: (1.0, 1.0)}
         self.assertEqual(edge_curve_for_positions(1, 2, clear_positions, 0.2), 0.0)
+
+    def test_is_unassigned_material_hides_unassigned_but_not_zero_matter(self) -> None:
+        # Unmatched CAD parts default to "Unassigned (ignored)" and must be hidden.
+        for hidden in ("Unassigned (ignored)", "Not assigned", "unassigned", "none", "", None):
+            self.assertTrue(is_unassigned_material(hidden), hidden)
+        # ZERO MATTER is a deliberate inert-void assignment and stays visible;
+        # so does any real material. Case/space-insensitive.
+        for visible in ("ZERO MATTER", "zero matter", " Zero  Matter ", "6061-T6 Aluminum", "MLI (IMLI 20-layer)"):
+            self.assertFalse(is_unassigned_material(visible), visible)
 
 
 

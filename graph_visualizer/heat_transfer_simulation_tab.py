@@ -23,6 +23,7 @@ from .graph_io import has_generated_role_contact_edges, load_graph_folder, save_
 from .matrix_builder import build_matrices, refresh_geometry_edges, refresh_radiation_from_exposed_faces
 from .modal_reduction import design_modal_controller
 from .models import EdgeMode, ThermalGraphModel
+from .material_library import is_unassigned_material
 from .pyvista_widget import GraphPyVistaWidget
 from .role_pairing import sensor_readout_temperature_K
 from .simulation_model import PreparedSimulation, prepare_simulation, save_trajectory
@@ -117,6 +118,8 @@ class HeatTransferSimulationTab:
         on_select_node: Callable[[int], None] | None = None,
         on_status: Callable[[str, bool], None] | None = None,
         on_controller_gain_matrix_changed: Callable[[], None] | None = None,
+        hide_unassigned_getter: Callable[[], bool] | None = None,
+        on_hide_unassigned_toggled: Callable[[bool], None] | None = None,
     ) -> None:
         self.QtCore = qt.QtCore
         self.QtGui = QtGui
@@ -126,6 +129,8 @@ class HeatTransferSimulationTab:
         self.on_select_node = on_select_node
         self.on_status = on_status
         self.on_controller_gain_matrix_changed = on_controller_gain_matrix_changed
+        self._hide_unassigned_getter = hide_unassigned_getter or (lambda: True)
+        self.on_hide_unassigned_toggled = on_hide_unassigned_toggled
         self.model: ThermalGraphModel | None = None
         self.folder: Path | None = None
         self.matrices: dict[str, np.ndarray] = {}
@@ -264,9 +269,20 @@ class HeatTransferSimulationTab:
         self.show_heaters = self._checkbox("Heaters", True, self._handle_marker_toggle)
         self.show_sensors = self._checkbox("Sensors", True, self._handle_marker_toggle)
         self.show_coolers = self._checkbox("Cryocoolers", True, self._handle_marker_toggle)
+        self.hide_unassigned_checkbox = self._checkbox(
+            "Hide unassigned",
+            bool(self._hide_unassigned_getter()),
+            self._handle_hide_unassigned_toggled,
+        )
+        self.hide_unassigned_checkbox.setToolTip(
+            "Hide cells with no assigned material (e.g. 'Unassigned (ignored)', 'Not assigned'). "
+            "'ZERO MATTER' cells stay visible. Synced with the editor; view-only, the simulation "
+            "is unaffected."
+        )
         toggles.addWidget(self.show_heaters)
         toggles.addWidget(self.show_sensors)
         toggles.addWidget(self.show_coolers)
+        toggles.addWidget(self.hide_unassigned_checkbox)
         toggles.addWidget(self.QtWidgets.QLabel("Opacity"))
         self.opacity_slider = self._view_slider(5, 100, 34, self._handle_visual_control_changed)
         toggles.addWidget(self.opacity_slider)
@@ -2567,6 +2583,30 @@ class HeatTransferSimulationTab:
             combo.setCurrentText(self._controller_scheme_labels.get(scheme, "PID + QP allocator"))
             combo.blockSignals(False)
 
+    def _visible_node_ids(self) -> set[int] | None:
+        """Node set to draw. ``None`` means all; otherwise unassigned-material cells
+        are filtered out (``ZERO MATTER`` stays visible via ``is_unassigned_material``)."""
+        if self.model is None or not self._hide_unassigned_getter():
+            return None
+        return {
+            int(node_id)
+            for node_id, node in self.model.nodes.items()
+            if not is_unassigned_material(node.material)
+        }
+
+    def _handle_hide_unassigned_toggled(self, *_: Any) -> None:
+        if self.on_hide_unassigned_toggled is not None:
+            self.on_hide_unassigned_toggled(bool(self.hide_unassigned_checkbox.isChecked()))
+
+    def set_hide_unassigned_material(self, enabled: bool) -> None:
+        """Reflect the shared hide-unassigned state and redraw the sim view."""
+        if hasattr(self, "hide_unassigned_checkbox"):
+            self.hide_unassigned_checkbox.blockSignals(True)
+            self.hide_unassigned_checkbox.setChecked(bool(enabled))
+            self.hide_unassigned_checkbox.blockSignals(False)
+        if self.model is not None:
+            self._draw_current(reset_camera=False)
+
     def _draw_current(self, reset_camera: bool) -> None:
         if self.model is None:
             return
@@ -2588,6 +2628,7 @@ class HeatTransferSimulationTab:
         self.viewer.draw(
             self.model,
             reset_camera=reset_camera,
+            visible_node_ids=self._visible_node_ids(),
             node_scalar_values=self._temperature_values(),
             scalar_cmap="jet",
             scalar_clim=self._temperature_clim(),

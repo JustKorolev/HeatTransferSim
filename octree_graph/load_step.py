@@ -258,19 +258,46 @@ def _bbox_gap_mm(lo_a, hi_a, lo_b, hi_b) -> float:
     return gap
 
 
+def _solids_by_name(step_scene: StepScene) -> dict[str, list["StepSolid"]]:
+    by_name: dict[str, list[StepSolid]] = {}
+    for solid in step_scene.solids:
+        by_name.setdefault(solid.name or "", []).append(solid)
+    return by_name
+
+
+def _pair_contact_from_solids(by_name, name_a: str, name_b: str, tol: float) -> bool:
+    """True iff any solid of A is within ``tol`` of any solid of B, by exact OCC
+    distance. bbox-prefiltered. Shared by the serial and parallel contact paths."""
+    from OCC.Core.BRepExtrema import BRepExtrema_DistShapeShape
+
+    for solid_a in by_name.get(name_a, []):
+        lo_a, hi_a = solid_a.bounds_mm
+        for solid_b in by_name.get(name_b, []):
+            lo_b, hi_b = solid_b.bounds_mm
+            if _bbox_gap_mm(lo_a, hi_a, lo_b, hi_b) > tol:
+                continue  # bboxes already farther apart than tolerance
+            try:
+                distance = BRepExtrema_DistShapeShape(solid_a.shape, solid_b.shape).Value()
+            except Exception:
+                return True  # can't measure -> assume contact (don't suppress)
+            if distance <= tol:
+                return True
+    return False
+
+
 def make_component_contact_fn(step_scene: StepScene, tolerance_mm: float):
     """Return ``contact(name_a, name_b) -> bool``: True iff any solid of component
     A comes within ``tolerance_mm`` of any solid of component B, by EXACT B-rep
     distance (OpenCASCADE ``BRepExtrema_DistShapeShape``). Cached per unordered
     pair and bbox-prefiltered, so it's computed at most once per component pair
     that actually has a voxel interface. This is the "do the parts truly touch?"
-    test, decided on the real solids instead of voxel adjacency or tessellation."""
-    from OCC.Core.BRepExtrema import BRepExtrema_DistShapeShape
+    test, decided on the real solids instead of voxel adjacency or tessellation.
 
+    Serial. For large assemblies, precompute all adjacent pairs in parallel with
+    :func:`parallel_component_contact` and wrap the result as a lookup; this stays
+    as the exact fallback for any pair not precomputed."""
     tol = float(tolerance_mm)
-    by_name: dict[str, list[StepSolid]] = {}
-    for solid in step_scene.solids:
-        by_name.setdefault(solid.name or "", []).append(solid)
+    by_name = _solids_by_name(step_scene)
     cache: dict[frozenset, bool] = {}
 
     def contact(name_a: str, name_b: str) -> bool:
@@ -278,26 +305,56 @@ def make_component_contact_fn(step_scene: StepScene, tolerance_mm: float):
         cached = cache.get(key)
         if cached is not None:
             return cached
-        solids_a = by_name.get(name_a, [])
-        solids_b = by_name.get(name_b, [])
-        result = False
-        for solid_a in solids_a:
-            lo_a, hi_a = solid_a.bounds_mm
-            for solid_b in solids_b:
-                lo_b, hi_b = solid_b.bounds_mm
-                if _bbox_gap_mm(lo_a, hi_a, lo_b, hi_b) > tol:
-                    continue  # bboxes already farther apart than tolerance
-                try:
-                    distance = BRepExtrema_DistShapeShape(solid_a.shape, solid_b.shape).Value()
-                except Exception:
-                    result = True  # can't measure -> assume contact (don't suppress)
-                    break
-                if distance <= tol:
-                    result = True
-                    break
-            if result:
-                break
+        result = _pair_contact_from_solids(by_name, name_a, name_b, tol)
         cache[key] = result
         return result
 
     return contact
+
+
+# --- Parallel exact contact precompute -------------------------------------
+# BRepExtrema is GIL-bound (threads give no speedup) and OCC shapes are not
+# picklable, so we parallelize across PROCESSES: each worker re-loads the STEP
+# solids once (no tessellation) and computes its share of the adjacent-pair
+# distances. Results are byte-identical to the serial path.
+
+_CONTACT_WORKER: dict[str, Any] = {}
+
+
+def _init_contact_worker(step_path: str, tolerance_mm: float) -> None:
+    _CONTACT_WORKER["by_name"] = _solids_by_name(load_step_scene(step_path))
+    _CONTACT_WORKER["tol"] = float(tolerance_mm)
+
+
+def _contact_worker_pair(pair: tuple[str, str]) -> bool:
+    return _pair_contact_from_solids(
+        _CONTACT_WORKER["by_name"], pair[0], pair[1], _CONTACT_WORKER["tol"]
+    )
+
+
+def parallel_component_contact(
+    step_path: str,
+    pairs,
+    tolerance_mm: float,
+    workers: int,
+    chunksize: int = 16,
+) -> dict[frozenset, bool]:
+    """Compute exact B-rep contact for every ``(name_a, name_b)`` pair in ``pairs``
+    across ``workers`` processes; return ``{frozenset({a, b}): bool}``. Falls back
+    to serial in-process if only one worker is requested."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    pair_list = [tuple(p) for p in pairs]
+    if not pair_list:
+        return {}
+    workers = max(1, int(workers))
+    if workers == 1:
+        _init_contact_worker(str(step_path), float(tolerance_mm))
+        return {frozenset(p): _contact_worker_pair(p) for p in pair_list}
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=_init_contact_worker,
+        initargs=(str(step_path), float(tolerance_mm)),
+    ) as executor:
+        results = list(executor.map(_contact_worker_pair, pair_list, chunksize=chunksize))
+    return {frozenset(p): bool(r) for p, r in zip(pair_list, results)}

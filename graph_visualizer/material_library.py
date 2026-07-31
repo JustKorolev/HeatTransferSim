@@ -144,6 +144,21 @@ def _is_null_material(material: str) -> bool:
     return " ".join(str(material or "").strip().lower().split()) in _NULL_MATERIAL_NAMES
 
 
+def is_unassigned_material(material: str) -> bool:
+    """True for cells with no assigned material, EXCLUDING deliberate ``ZERO MATTER``.
+
+    Used by the viewer's "hide unassigned material" filter. Unmatched CAD parts
+    default to ``"Unassigned (ignored)"`` (octree_graph.materials.
+    DEFAULT_ASSIGNED_MATERIAL_NAME); those, along with ``"Not assigned"`` / empty /
+    ``"none"`` / ``"unassigned"``, are considered unassigned. ``ZERO MATTER`` is a
+    deliberate inert-void assignment (keep-out volume) and stays visible, so it is
+    explicitly not treated as unassigned here even though ``_is_null_material``
+    groups it with the null placeholders for thermal-property purposes."""
+    if " ".join(str(material or "").strip().lower().split()) == "zero matter":
+        return False
+    return _is_null_material(material)
+
+
 def material_defaults(
     material: str, library: dict[str, dict[str, float]] | None = None
 ) -> dict[str, float]:

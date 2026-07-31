@@ -1398,6 +1398,23 @@ def _node_pair_key(node_a: dict, node_b: dict) -> tuple[int, int]:
     return tuple(sorted((int(node_a["node_id"]), int(node_b["node_id"]))))
 
 
+def enumerate_inter_component_adjacent_pairs(cells: list[OctreeCell]) -> set[frozenset]:
+    """Distinct ``frozenset({component_a, component_b})`` pairs that share adjacent
+    cells and belong to different components -- i.e. exactly the pairs the contact
+    loop will query ``component_contact_fn`` on. Enumerating these up front lets the
+    exact B-rep contact be precomputed in parallel instead of lazily per pair.
+
+    A (bounded) superset is fine: extra precomputed pairs cost a little work but the
+    contact loop only reads the ones it needs."""
+    pairs: set[frozenset] = set()
+    for cell, other in _candidate_cell_pairs(cells, 0.0):
+        comp_a = getattr(cell, "dominant_component", None)
+        comp_b = getattr(other, "dominant_component", None)
+        if comp_a and comp_b and comp_a != comp_b:
+            pairs.add(frozenset((str(comp_a), str(comp_b))))
+    return pairs
+
+
 def _candidate_cell_pairs(cells: list[OctreeCell], max_gap_mm: float) -> Iterator[tuple[OctreeCell, OctreeCell]]:
     bucket_size = _cell_pair_bucket_size(cells, max_gap_mm)
     buckets = _cell_bucket_index(cells, bucket_size, max_gap_mm)

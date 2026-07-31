@@ -30,7 +30,7 @@ from .graph_io import (
     save_graph_folder,
 )
 from .heat_transfer_simulation_tab import HeatTransferSimulationTab
-from .material_library import default_material_library
+from .material_library import default_material_library, is_unassigned_material
 from .matrix_builder import (
     refresh_auto_edges,
     refresh_geometry_edges,
@@ -99,6 +99,7 @@ class GraphVisualizerApp:
         self.selected_node_id: int | None = None
         self.selected_node_ids: set[int] = set()
         self._hidden_components: set[str] = set()
+        self._hide_unassigned_material = True
         self.inputs: dict[str, Any] = {}
         self._building_form = False
         self._syncing_conduction_ui = False
@@ -283,6 +284,8 @@ class GraphVisualizerApp:
             on_select_node=self.select_node,
             on_status=self._set_status,
             on_controller_gain_matrix_changed=self._handle_controller_gain_matrix_changed,
+            hide_unassigned_getter=lambda: self._hide_unassigned_material,
+            on_hide_unassigned_toggled=self._set_hide_unassigned_material,
         )
         self.thermal_validation_tab = ThermalValidationTab(
             self,
@@ -635,6 +638,15 @@ class GraphVisualizerApp:
         visibility_row.addWidget(self.component_hide_checkbox, 1)
         visibility_row.addWidget(unhide_all)
         form.addRow("visibility", visibility_row)
+        self.hide_unassigned_checkbox = self.QtWidgets.QCheckBox("Hide unassigned material")
+        self.hide_unassigned_checkbox.setToolTip(
+            "Hide cells with no assigned material (e.g. 'Unassigned (ignored)', 'Not assigned') "
+            "from the 3D/2D views and the Heat Transfer Simulation tab. 'ZERO MATTER' cells stay "
+            "visible. View-only: the thermal model and simulation are unaffected. On by default."
+        )
+        self.hide_unassigned_checkbox.setChecked(self._hide_unassigned_material)
+        self.hide_unassigned_checkbox.toggled.connect(self._set_hide_unassigned_material)
+        form.addRow("", self.hide_unassigned_checkbox)
         self.left_layout.addWidget(box)
 
     def _build_bulk_role_assignment_controls(self) -> None:
@@ -1884,6 +1896,8 @@ class GraphVisualizerApp:
                 continue
             if node.component_name in self._hidden_components:
                 continue
+            if self._hide_unassigned_material and is_unassigned_material(node.material):
+                continue
             if not node_matches_level_filter(node, min_level, max_level):
                 continue
             if not node_matches_heater_sensor_filters(node, heater_only, sensor_only):
@@ -2384,6 +2398,18 @@ class GraphVisualizerApp:
         self._set_status(
             f"Hid component: {component}." if checked else f"Unhid component: {component}."
         )
+
+    def _set_hide_unassigned_material(self, enabled: bool) -> None:
+        """Toggle hiding of unassigned-material cells across the editor and sim tab."""
+        enabled = bool(enabled)
+        self._hide_unassigned_material = enabled
+        if hasattr(self, "hide_unassigned_checkbox"):
+            self.hide_unassigned_checkbox.blockSignals(True)
+            self.hide_unassigned_checkbox.setChecked(enabled)
+            self.hide_unassigned_checkbox.blockSignals(False)
+        if hasattr(self, "simulation_tab"):
+            self.simulation_tab.set_hide_unassigned_material(enabled)
+        self._refresh_all(reset_camera=False)
 
     def unhide_all_components(self, *_: Any) -> None:
         if not self._hidden_components:
