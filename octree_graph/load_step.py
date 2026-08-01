@@ -338,23 +338,41 @@ def parallel_component_contact(
     tolerance_mm: float,
     workers: int,
     chunksize: int = 16,
+    warnings: "list[str] | None" = None,
 ) -> dict[frozenset, bool]:
     """Compute exact B-rep contact for every ``(name_a, name_b)`` pair in ``pairs``
-    across ``workers`` processes; return ``{frozenset({a, b}): bool}``. Falls back
-    to serial in-process if only one worker is requested."""
+    across ``workers`` processes; return ``{frozenset({a, b}): bool}``.
+
+    Each worker re-loads the FULL B-rep (heavy), so too many workers can OOM ->
+    BrokenProcessPool. Self-healing: on a pool failure, retry with HALF the workers
+    (less simultaneous B-rep load) down to serial, so we still get whatever
+    parallelism fits instead of collapsing straight to the slow serial path."""
     from concurrent.futures import ProcessPoolExecutor
 
     pair_list = [tuple(p) for p in pairs]
     if not pair_list:
         return {}
     workers = max(1, int(workers))
-    if workers == 1:
+    if workers == 1:  # explicit serial request -> compute in-process
         _init_contact_worker(str(step_path), float(tolerance_mm))
         return {frozenset(p): _contact_worker_pair(p) for p in pair_list}
-    with ProcessPoolExecutor(
-        max_workers=workers,
-        initializer=_init_contact_worker,
-        initargs=(str(step_path), float(tolerance_mm)),
-    ) as executor:
-        results = list(executor.map(_contact_worker_pair, pair_list, chunksize=chunksize))
-    return {frozenset(p): bool(r) for p, r in zip(pair_list, results)}
+    while True:
+        try:
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_init_contact_worker,
+                initargs=(str(step_path), float(tolerance_mm)),
+            ) as executor:
+                results = list(executor.map(_contact_worker_pair, pair_list, chunksize=chunksize))
+            return {frozenset(p): bool(r) for p, r in zip(pair_list, results)}
+        except Exception as exc:  # noqa: BLE001 -- typically BrokenProcessPool (worker OOM)
+            next_workers = workers // 2
+            if warnings is not None:
+                warnings.append(
+                    f"Parallel B-rep contact at {workers} worker(s) failed "
+                    f"({type(exc).__name__}: {exc}); "
+                    + (f"retrying at {next_workers} worker(s)." if next_workers > 1 else "using serial fallback.")
+                )
+            if next_workers <= 1:
+                raise  # let the caller reuse its already-loaded serial contact
+            workers = next_workers

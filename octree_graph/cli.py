@@ -1025,7 +1025,11 @@ def _build_graph_with_optional_fallback(
 
         serial_contact = make_component_contact_fn(step_scene, float(contact_tol_mm))
         component_contact_fn = serial_contact
-        workers = int(getattr(args, "voxel_workers", 1) or 1)
+        # Each contact worker re-loads the FULL B-rep (much heavier than a voxel
+        # worker's tessellated meshes), so start conservatively -- fewer workers,
+        # less simultaneous B-rep memory -- and let parallel_component_contact's
+        # self-healing retry step down further if even that OOMs.
+        workers = max(1, min(int(getattr(args, "voxel_workers", 1) or 1), 4))
         if workers > 1 and step_path is not None:
             adjacent_pairs = enumerate_inter_component_adjacent_pairs(leaves)
             if adjacent_pairs:
@@ -1033,7 +1037,7 @@ def _build_graph_with_optional_fallback(
                     progress.phase("Precomputing B-rep contact")
                 try:
                     contact_cache = parallel_component_contact(
-                        str(step_path), adjacent_pairs, float(contact_tol_mm), workers
+                        str(step_path), adjacent_pairs, float(contact_tol_mm), workers, warnings=warnings
                     )
 
                     def component_contact_fn(name_a, name_b, _cache=contact_cache, _fallback=serial_contact):
