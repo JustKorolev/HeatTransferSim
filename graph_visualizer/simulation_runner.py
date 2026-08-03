@@ -139,6 +139,13 @@ class SimulationRunner:
             d.mkdir(parents=True, exist_ok=True)
         self._install_signal_handlers()
         self._log_event("run_start", f"graph={self.graph_name} out={self.out_dir}")
+        # Graph load can take a while with no visible progress; publish a status so
+        # the GUI/`tail` shows the run is alive (and the user doesn't stop it early).
+        _atomic_write_json(
+            self.status_path,
+            {"status": "preparing (loading graph)", "progress": 0.0,
+             "updated": datetime.now().isoformat(timespec="seconds")},
+        )
         try:
             self._write_config_and_provenance()
             prepared, params, C_diag, sensors, heaters, cryo_idx = self._prepare()
@@ -224,6 +231,8 @@ class SimulationRunner:
         last_ckpt_wall = time.time()
         step = 0
         base_dt = float(params.dt_s)
+        accepted = False  # bound before the loop so a 0-iteration run finalizes cleanly
+        state = None
 
         while not self._should_stop():
             t_now = self._current_time(prepared, step, base_dt)
@@ -274,6 +283,12 @@ class SimulationRunner:
             if step % max(1, self.cfg.status_interval_steps) == 0:
                 self._update_status(step, state.time_s)
 
+        if step == 0:
+            self._log_event(
+                "no_steps",
+                f"loop ran 0 steps (stopped/cancelled during setup, or t_final<=0). "
+                f"t_final={self.cfg.t_final_s:g}s",
+            )
         # final checkpoint + status
         self._checkpoint(prepared, state if accepted else None, step)
         self._update_status(step, self._series.get("time_s", [0.0])[-1] if self._series.get("time_s") else 0.0)
