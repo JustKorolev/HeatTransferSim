@@ -19,7 +19,7 @@ import traceback
 from typing import Any
 
 import numpy as np
-from scipy.sparse import issparse
+from scipy.sparse import csr_matrix, issparse, save_npz
 
 from .graph_builder import (
     DEFAULT_CONTACT_INTERFACE_CONDUCTANCE_W_M2K,
@@ -2228,7 +2228,14 @@ def _write_browser_matrix_exports(output: Path, matrices: dict[str, np.ndarray])
     if "L" in matrices:
         L_value = matrices["L"]
         if issparse(L_value):
-            L_coo = L_value.tocoo()
+            L_csr = L_value.tocsr()
+        else:
+            L_csr = csr_matrix(np.asarray(L_value, dtype=float))
+        save_npz(str(output / "L_sparse.npz"), L_csr)
+        # Only emit the (much larger) COO JSON for graphs small enough that the
+        # browser can still load it; the binary .npz is authoritative otherwise.
+        if L_csr.nnz <= 4_000_000:
+            L_coo = L_csr.tocoo()
             payload = {
                 "shape": list(L_coo.shape),
                 "format": "coo",
@@ -2237,17 +2244,6 @@ def _write_browser_matrix_exports(output: Path, matrices: dict[str, np.ndarray])
                 "data": L_coo.data.astype(float).tolist(),
             }
             _atomic_write_json(output / "L_sparse.json", payload)
-            return
-        L = np.asarray(L_value, dtype=float)
-        row, col = np.nonzero(L)
-        payload = {
-            "shape": list(L.shape),
-            "format": "coo",
-            "row": row.astype(int).tolist(),
-            "col": col.astype(int).tolist(),
-            "data": L[row, col].astype(float).tolist(),
-        }
-        _atomic_write_json(output / "L_sparse.json", payload)
 
 
 def _atomic_write_json(path: Path, payload: object, indent: int | None = None) -> None:

@@ -10,7 +10,7 @@ import os
 import tempfile
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix, issparse
+from scipy.sparse import coo_matrix, csr_matrix, issparse, load_npz, save_npz
 
 from .diagnostics import log_event
 from .material_library import _is_null_material, default_material_library, material_defaults, normalize_material_library
@@ -316,7 +316,7 @@ def _load_octree_matrix_payload(folder: Path, model: ThermalGraphModel) -> dict[
         return matrices
 
     log_event("load_octree_matrix_payload sparse path", nodes=len(node_ids))
-    sparse_l = _load_sparse_laplacian(folder / "L_sparse.json")
+    sparse_l = _load_sparse_laplacian_preferred(folder)
     matrices["L"] = sparse_l if sparse_l is not None else _sparse_laplacian_from_model(model, node_ids)
     model.octree_graph_data.setdefault("warnings", [])
     model.octree_graph_data["warnings"].append(
@@ -372,6 +372,24 @@ def _dense_conductance_from_model(model: ThermalGraphModel, node_ids: np.ndarray
             j = index[edge.target]
             G[i, j] = G[j, i] = max(0.0, float(edge.Gij_W_K))
     return G
+
+
+def _load_sparse_laplacian_npz(path: Path) -> csr_matrix | None:
+    if not path.exists():
+        return None
+    try:
+        loaded = load_npz(str(path))
+    except (OSError, ValueError):
+        return None
+    return loaded.tocsr()
+
+
+def _load_sparse_laplacian_preferred(folder: Path) -> csr_matrix | None:
+    """Prefer the binary CSR ``.npz``; fall back to the legacy COO JSON."""
+    sparse_l = _load_sparse_laplacian_npz(folder / "L_sparse.npz")
+    if sparse_l is not None:
+        return sparse_l
+    return _load_sparse_laplacian(folder / "L_sparse.json")
 
 
 def _load_sparse_laplacian(path: Path) -> csr_matrix | None:
@@ -518,7 +536,7 @@ def _save_octree_graph_folder_lightweight(
     _atomic_write_json(folder / MATERIAL_FILE, material_library, indent=2)
     if len(model.nodes) > _DENSE_OCTREE_MATRIX_NODE_LIMIT and _has_existing_octree_matrix_payload(folder):
         matrices = _base_octree_matrix_payload(model, np.array(model.ordered_node_ids(), dtype=int))
-        sparse_l = _load_sparse_laplacian(folder / "L_sparse.json")
+        sparse_l = _load_sparse_laplacian_preferred(folder)
         if sparse_l is not None:
             matrices["L"] = sparse_l
         else:
@@ -533,7 +551,7 @@ def _save_octree_graph_folder_lightweight(
 
 
 def _has_existing_octree_matrix_payload(folder: Path) -> bool:
-    return any((folder / name).exists() for name in ("L_sparse.json", "L.npy", "G.npy", MATRIX_FILE))
+    return any((folder / name).exists() for name in ("L_sparse.npz", "L_sparse.json", "L.npy", "G.npy", MATRIX_FILE))
 
 
 def _save_octree_outputs(model: ThermalGraphModel, matrices: dict[str, np.ndarray], folder: Path) -> None:
@@ -605,25 +623,23 @@ def _write_browser_matrix_exports(matrices: dict[str, np.ndarray], folder: Path)
     if "L" in matrices:
         L = matrices["L"]
         if issparse(L):
-            coo = L.tocoo()
+            L_csr = L.tocsr()
+        else:
+            dense = np.asarray(L, dtype=float)
+            if dense.ndim != 2:
+                return
+            L_csr = csr_matrix(dense)
+        save_npz(str(folder / "L_sparse.npz"), L_csr)
+        # Only emit the (much larger) COO JSON for graphs small enough that the
+        # browser can still load it; the binary .npz is authoritative otherwise.
+        if L_csr.nnz <= 4_000_000:
+            coo = L_csr.tocoo()
             payload = {
                 "shape": list(coo.shape),
                 "format": "coo",
                 "row": coo.row.astype(int).tolist(),
                 "col": coo.col.astype(int).tolist(),
                 "data": coo.data.astype(float).tolist(),
-            }
-            _atomic_write_json(folder / "L_sparse.json", payload)
-            return
-        dense = np.asarray(L, dtype=float)
-        if dense.ndim == 2:
-            row, col = np.nonzero(dense)
-            payload = {
-                "shape": list(dense.shape),
-                "format": "coo",
-                "row": row.astype(int).tolist(),
-                "col": col.astype(int).tolist(),
-                "data": dense[row, col].astype(float).tolist(),
             }
             _atomic_write_json(folder / "L_sparse.json", payload)
 
