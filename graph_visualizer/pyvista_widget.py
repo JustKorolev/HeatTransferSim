@@ -31,6 +31,10 @@ _CUBE_FACE_TEMPLATE = (
     (0, 2, 6, 4),
     (1, 5, 7, 3),
 )
+# Maps the eight _CUBE_CORNER_SIGNS entries to VTK_HEXAHEDRON node ordering
+# (bottom quad 0-1-2-3 CCW, then the matching top quad 4-5-6-7). Needed so the
+# hexahedra can be surface-extracted to cull interior faces.
+_HEX_VTK_ORDER = (0, 1, 3, 2, 4, 5, 7, 6)
 
 
 class GraphPyVistaWidget:
@@ -1253,6 +1257,109 @@ class GraphPyVistaWidget:
         self._enable_interaction_observers_once()
         self.safe_render()
 
+    @staticmethod
+    def _dedup_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Collapse coincident cube corners so neighbouring cells share point ids.
+
+        Returns (unique_points, inverse) where ``inverse`` maps each of the input
+        rows to its representative point. Shared points let surface extraction
+        recognise (and drop) faces internal to a solid block of cells.
+        """
+        pts = np.ascontiguousarray(points, dtype=float)
+        if pts.size == 0:
+            return pts, np.zeros(0, dtype=np.int64)
+        scale = float(np.max(np.abs(pts)))
+        tol = max(scale, 1.0) * 1.0e-9
+        quantized = np.round(pts / tol).astype(np.int64)
+        view = np.ascontiguousarray(quantized).view(
+            np.dtype((np.void, quantized.dtype.itemsize * quantized.shape[1]))
+        ).reshape(-1)
+        _unique, first_index, inverse = np.unique(view, return_index=True, return_inverse=True)
+        unique_points = pts[first_index]
+        return unique_points, np.asarray(inverse, dtype=np.int64).reshape(-1)
+
+    def _extract_hex_surface(
+        self,
+        node_ids_arr: np.ndarray,
+        points: np.ndarray,
+        scalar_per_node: np.ndarray | None,
+        rgb_per_node: np.ndarray | None,
+    ) -> Any:
+        """Build a VTK_HEXAHEDRON grid and surface-extract it to drop interior faces.
+
+        Cell data (``node_id`` and the scalar/rgb array) is one value per hex on
+        the grid; surface extraction copies it to each generated boundary face, so
+        picking and in-place scalar/colour updates keep working on the result.
+        """
+        n = int(node_ids_arr.shape[0])
+        order = np.asarray(_HEX_VTK_ORDER, dtype=np.int64)
+        conn_local = np.arange(n, dtype=np.int64)[:, None] * 8 + order[None, :]  # (n, 8)
+        unique_points, inverse = self._dedup_points(points)
+        point_ids = inverse[conn_local]  # (n, 8) into unique_points
+        cells = np.hstack([np.full((n, 1), 8, dtype=np.int64), point_ids]).reshape(-1)
+        hex_type = int(getattr(self.pv.CellType, "HEXAHEDRON", 12))
+        cell_types = np.full(n, hex_type, dtype=np.uint8)
+        grid = self.pv.UnstructuredGrid(cells, cell_types, unique_points)
+        grid.cell_data["node_id"] = node_ids_arr.astype(np.int64)
+        if scalar_per_node is not None:
+            grid.cell_data["temperature_K"] = np.asarray(scalar_per_node, dtype=float)
+        elif rgb_per_node is not None:
+            grid.cell_data["cell_rgb"] = np.asarray(rgb_per_node)
+        try:
+            surface = grid.extract_surface(algorithm="dataset_surface")
+        except TypeError:
+            # Older pyvista without the ``algorithm`` keyword.
+            surface = grid.extract_surface()
+        return surface
+
+    def _full_face_cell_mesh(
+        self,
+        node_ids_arr: np.ndarray,
+        points: np.ndarray,
+        scalar_per_node: np.ndarray | None,
+        rgb_per_node: np.ndarray | None,
+    ) -> Any:
+        """Fully-enumerated 6-quad-per-cell PolyData (no interior-face culling)."""
+        n = int(node_ids_arr.shape[0])
+        face_template = np.array(_CUBE_FACE_TEMPLATE, dtype=np.int64)
+        base = (np.arange(n, dtype=np.int64) * 8)[:, None, None]
+        cell_faces = (base + face_template[None, :, :]).reshape(n * 6, 4)
+        faces = np.hstack([np.full((n * 6, 1), 4, dtype=np.int64), cell_faces]).reshape(-1)
+        mesh = self.pv.PolyData(points, faces)
+        mesh.cell_data["node_id"] = np.repeat(node_ids_arr, 6)
+        if scalar_per_node is not None:
+            mesh.cell_data["temperature_K"] = np.repeat(np.asarray(scalar_per_node, dtype=float), 6)
+        elif rgb_per_node is not None:
+            mesh.cell_data["cell_rgb"] = np.repeat(np.asarray(rgb_per_node), 6, axis=0)
+        return mesh
+
+    def _build_batched_cell_mesh(
+        self,
+        node_ids_arr: np.ndarray,
+        points: np.ndarray,
+        scalar_per_node: np.ndarray | None,
+        rgb_per_node: np.ndarray | None,
+    ) -> Any:
+        """Surface-culled hex mesh for the batched cell view, with a safe fallback.
+
+        Interior faces of a solid block of cells are dropped (~6M faces at 1M
+        cells become the outer shell), while ``cell_data["node_id"]`` is preserved
+        per surface face so picking and scalar/colour updates are unaffected.
+        """
+        n = int(node_ids_arr.shape[0])
+        try:
+            mesh = self._extract_hex_surface(node_ids_arr, points, scalar_per_node, rgb_per_node)
+            if mesh is not None and int(getattr(mesh, "n_cells", 0)) > 0 and "node_id" in mesh.cell_data:
+                log_event(
+                    "pyvista draw_batched hex surface",
+                    cells=n,
+                    surface_faces=int(mesh.n_cells),
+                )
+                return mesh
+        except Exception:  # noqa: BLE001 - degrade to the full-face mesh on any failure
+            log_event("pyvista draw_batched hex surface failed; using full-face mesh", cells=n)
+        return self._full_face_cell_mesh(node_ids_arr, points, scalar_per_node, rgb_per_node)
+
     def _draw_batched(
         self,
         model: ThermalGraphModel,
@@ -1295,27 +1402,17 @@ class GraphPyVistaWidget:
         # Eight cube corners per node (broadcast), then flatten to points.
         signs = np.array(_CUBE_CORNER_SIGNS, dtype=float)
         points = (centers[:, None, :] + half[:, None, :] * signs[None, :, :]).reshape(n * 8, 3)
-        # Six quad faces per node in VTK "[4, i0, i1, i2, i3, ...]" layout.
-        face_template = np.array(_CUBE_FACE_TEMPLATE, dtype=np.int64)
-        base = (np.arange(n, dtype=np.int64) * 8)[:, None, None]
-        cell_faces = (base + face_template[None, :, :]).reshape(n * 6, 4)
-        faces = np.hstack(
-            [np.full((n * 6, 1), 4, dtype=np.int64), cell_faces]
-        ).reshape(-1)
-        cell_node_ids = np.repeat(node_ids_arr, 6)
-        log_event("pyvista draw_batched create PolyData", points=int(points.shape[0]), faces=int(cell_node_ids.shape[0]))
-        mesh = self.pv.PolyData(points, faces)
-        mesh.cell_data["node_id"] = cell_node_ids
         if node_scalar_values is not None:
             scalar_per_node = np.array(
                 [float(node_scalar_values.get(int(node_id), np.nan)) for node_id in node_ids_arr],
                 dtype=float,
             )
-            mesh.cell_data["temperature_K"] = np.repeat(scalar_per_node, 6)
+            rgb_per_node = None
         else:
+            scalar_per_node = None
             per_node_rgb = self._batched_base_rgb(node_ids_arr, materials_list, node_colors)
-            per_node_rgb = self._depth_adjust_rgb_vectorized(per_node_rgb, centers, committed_bounds)
-            mesh.cell_data["cell_rgb"] = np.repeat(per_node_rgb, 6, axis=0)
+            rgb_per_node = self._depth_adjust_rgb_vectorized(per_node_rgb, centers, committed_bounds)
+        mesh = self._build_batched_cell_mesh(node_ids_arr, points, scalar_per_node, rgb_per_node)
         self._batched_mesh = mesh
         mesh_kwargs = {
             "opacity": self._cell_opacity(node_scalar_values is not None, False, True),
