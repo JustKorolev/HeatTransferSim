@@ -27,6 +27,7 @@ from .material_library import is_unassigned_material
 from .pyvista_widget import GraphPyVistaWidget
 from .role_pairing import sensor_readout_temperature_K
 from .simulation_model import PreparedSimulation, prepare_simulation, save_trajectory
+from .simulation_runner import RunConfig, SimulationRunner
 from .simulation_parameters import (
     SimulationParameters,
     apply_initial_temperature_parameter_payload,
@@ -568,6 +569,22 @@ class HeatTransferSimulationTab:
         reset_controller = self.QtWidgets.QPushButton("Reset MIMO Integrators")
         reset_controller.clicked.connect(self.reset_controller_integrators)
         form.addRow(reset_controller)
+        # Headless overnight run: no live visualization, everything saved to
+        # simulations/<graph>/<timestamp>/ (recommended for large graphs).
+        headless_row = self.QtWidgets.QHBoxLayout()
+        self.run_headless_button = self.QtWidgets.QPushButton("Run Headless (save, no viz)")
+        self.run_headless_button.setToolTip(
+            "Run the full closed-loop simulation with NO live visualization, saving all data, "
+            "plots, checkpoints and a report to simulations/<graph>/<timestamp>/. "
+            "The window stays responsive; tail status.json for progress. Recommended for large graphs."
+        )
+        self.run_headless_button.clicked.connect(self.run_headless_simulation)
+        self.stop_headless_button = self.QtWidgets.QPushButton("Stop Headless Run")
+        self.stop_headless_button.clicked.connect(self.stop_headless_simulation)
+        self.stop_headless_button.setEnabled(False)
+        headless_row.addWidget(self.run_headless_button)
+        headless_row.addWidget(self.stop_headless_button)
+        form.addRow(headless_row)
 
     def _add_stepper_diagnostic_controls(self, form: Any) -> None:
         box, diag_form = self._section("Solver Diagnostic")
@@ -1124,6 +1141,12 @@ class HeatTransferSimulationTab:
 
     def play(self) -> None:
         if not self._simulation_worker_active():
+            # Guard the live path: large graphs are slow to visualize, and a
+            # modal-LQR run without its controller artifact should be confirmed.
+            if not self._large_graph_viz_warn_ok():
+                return
+            if not self._confirm_controller_ok():
+                return
             self._apply_pending_runtime_changes()
         if self.prepared is None or self._simulation_reinitialize_pending:
             self.initialize_simulation()
@@ -1133,6 +1156,134 @@ class HeatTransferSimulationTab:
             return
         self.timer.start(self._playback_timer_interval_ms())
         self.step_forward()
+
+    # -- large-graph / controller guards + headless runs -------------------- #
+    def _large_graph_viz_warn_ok(self) -> bool:
+        warn_nodes = 250_000
+        n = len(self.model.nodes) if self.model is not None else 0
+        if n <= warn_nodes or getattr(self, "_large_graph_viz_ack", False):
+            return True
+        reply = self.QtWidgets.QMessageBox.question(
+            self.widget,
+            "Large graph",
+            f"This graph has {n:,} nodes. Live visualization will be slow and memory-heavy.\n\n"
+            "For large / overnight runs use 'Run Headless (save, no viz)' instead.\n\n"
+            "Play WITH visualization anyway?",
+            self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
+            self.QtWidgets.QMessageBox.No,
+        )
+        if reply != self.QtWidgets.QMessageBox.Yes:
+            return False
+        self._large_graph_viz_ack = True  # don't nag again this session
+        return True
+
+    def _controller_selected_scheme(self) -> str:
+        labels_to_key = {v: k for k, v in getattr(self, "_controller_scheme_labels", {}).items()}
+        return labels_to_key.get(self.controller_scheme_combo.currentText(), "pid_qp")
+
+    def _modal_controller_path(self) -> Path | None:
+        explicit = str(getattr(self.params, "modal_controller_path", "") or "")
+        if explicit and Path(explicit).exists():
+            return Path(explicit)
+        if self.folder is not None and (self.folder / "modal_controller.npz").exists():
+            return self.folder / "modal_controller.npz"
+        return None
+
+    def _confirm_controller_ok(self) -> bool:
+        if self.input_mode.currentText() != "heater_inputs":
+            return True  # controller isn't used in this input mode
+        if self._controller_selected_scheme() != "modal_lqr":
+            return True  # PID+QP needs no artifact
+        if self._modal_controller_path() is not None:
+            return True
+        reply = self.QtWidgets.QMessageBox.question(
+            self.widget,
+            "No controller selected",
+            "Modal LQR is selected but no 'modal_controller.npz' was found for this graph.\n\n"
+            "The run will fall back to the PID+QP controller. Run anyway?",
+            self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
+            self.QtWidgets.QMessageBox.No,
+        )
+        return reply == self.QtWidgets.QMessageBox.Yes
+
+    def run_headless_simulation(self) -> None:
+        """Launch the full closed-loop run with no visualization, saving everything
+        to simulations/<graph>/<timestamp>/. Runs in a background thread; the window
+        stays responsive and a poll timer re-enables the button when it finishes."""
+        if getattr(self, "_headless_thread", None) is not None and self._headless_thread.is_alive():
+            self._status("A headless run is already in progress.", True)
+            return
+        if self.model is None or self.folder is None:
+            self._status("Load a graph before running.", True)
+            return
+        if not self._confirm_controller_ok():
+            return
+        self.params = self._read_params()
+        setpoints = {
+            int(nid): float(getattr(node, "controller_setpoint_K", 293.15))
+            for nid, node in self.model.nodes.items()
+            if getattr(node, "is_sensor", False)
+        }
+        ctrl = self._modal_controller_path()
+        cfg = RunConfig(
+            graph_folder=str(self.folder),
+            controller_path=str(ctrl) if ctrl is not None else None,
+            allow_no_controller=ctrl is None,
+            setpoints_K=setpoints,
+            dt_s=float(self.params.dt_s),
+            t_final_s=float(self.params.t_final_s),
+            gpu_solver_enabled=bool(self.params.gpu_solver_enabled),
+        )
+        self._headless_cancel = threading.Event()
+        self._headless_runner = SimulationRunner(cfg, cancel_event=self._headless_cancel)
+        out_dir = self._headless_runner.out_dir
+
+        def _target() -> None:
+            try:
+                self._headless_runner.run()
+                log_event("headless simulation complete", out=str(out_dir))
+            except Exception as exc:  # noqa: BLE001
+                log_exception("headless simulation failed", exc)
+
+        self._headless_thread = threading.Thread(target=_target, name="headless-sim", daemon=True)
+        self._headless_thread.start()
+        self.run_headless_button.setEnabled(False)
+        self.stop_headless_button.setEnabled(True)
+        self._status(f"Headless run started -> {out_dir}  (tail status.json for progress)", False)
+        if getattr(self, "_headless_poll_timer", None) is None:
+            self._headless_poll_timer = self.QtCore.QTimer(self.widget)
+            self._headless_poll_timer.timeout.connect(self._poll_headless_status)
+        self._headless_poll_timer.start(1000)
+
+    def stop_headless_simulation(self) -> None:
+        cancel = getattr(self, "_headless_cancel", None)
+        if cancel is not None:
+            cancel.set()
+            self._status("Stopping headless run (finalizing artifacts)...", False)
+
+    def _poll_headless_status(self) -> None:
+        thread = getattr(self, "_headless_thread", None)
+        runner = getattr(self, "_headless_runner", None)
+        if thread is None or not thread.is_alive():
+            if getattr(self, "_headless_poll_timer", None) is not None:
+                self._headless_poll_timer.stop()
+            self.run_headless_button.setEnabled(True)
+            self.stop_headless_button.setEnabled(False)
+            if runner is not None:
+                self._status(f"Headless run finished: {runner._exit_status}  ({runner.out_dir})", False)
+            return
+        if runner is not None:
+            try:
+                import json as _json
+
+                data = _json.loads(runner.status_path.read_text(encoding="utf-8"))
+                self._status(
+                    f"Headless: t={data.get('sim_time_s', 0):.0f}/{data.get('t_final_s', 0):.0f}s "
+                    f"({100 * data.get('progress', 0):.0f}%) step={data.get('step', 0)}",
+                    False,
+                )
+            except Exception:
+                pass
 
     def _refresh_matrices_for_run(self) -> None:
         if self.model is None:
