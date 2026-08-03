@@ -73,6 +73,12 @@ strongly, so heat capacity and conductivity use temperature-dependent curves
 cp(T), k(T) sourced from NIST cryogenic data rather than room-temperature
 constants.
 
+![Fig. 1 — Graph builder output](figures/fig_graph_builder.png)
+
+Figure 1. Graph-builder output for CRYOSTAT_V2: the octree voxel grid (about
+471,000 cells) colored by assigned material, shown in a cross-section cut through
+the enclosure. This is the geometry the thermal network is built on.
+
 ### 1.2 Validation against analytical references
 
 Before trusting the simulator to design controllers, I checked that its heat
@@ -102,15 +108,15 @@ maximum absolute deviation from the reference over the run:
 The most important row is the cryo regime (heater input, radiation, and
 temperature-dependent cp(T) together), which is the actual HISPEC operating
 regime, where the simulator tracks the analytical reference to 1.8×10⁻⁴ K. Figure
-5 overlays the simulated and analytical curves for that case and for radiation
+2 overlays the simulated and analytical curves for that case and for radiation
 cooling; they are visually indistinguishable. The only non-PASS is the two-block
 exchange, which lands marginally over its 0.05 K tolerance (0.057 K). These results
 are in line with what I expected: with the solver well resolved, the simulation
 reproduces the physics to well within any tolerance that matters for control.
 
-![Fig. 5 — Thermal validation](figures/fig5_validation.png)
+![Fig. 2 — Thermal validation](figures/fig5_validation.png)
 
-Figure 5. Simulated (dashed) vs. analytical (solid) temperature for the cryo
+Figure 2. Simulated (dashed) vs. analytical (solid) temperature for the cryo
 regime and radiation-cooling experiments; max errors about 10⁻⁴ K and 10⁻⁷ K.
 
 ### 1.3 The problem: hollow shells
@@ -141,16 +147,16 @@ gain matrix G (28 controlled sensors × 33 heaters; $eq_yGu$) is well-conditione
 (condition number about 37, entries 0.04 to 0.87 K/W) and shows that coupling is
 pervasive: on average 26.8 of the 33 heaters significantly influence each sensor,
 and the relative gain array has a mean best-pairing value of 1.47 (1.0 would mean
-perfectly decoupled loops). Figure 4 shows the structure: clear dominant pairings,
+perfectly decoupled loops). Figure 3 shows the structure: clear dominant pairings,
 but with large off-diagonal coupling blocks. The system also has two structural
 difficulties carried over from Report 1: it is underactuated in sensor space (80
 sensors, 40 heaters on the real device), and the heaters are one-sided actuators
 that can only add heat, not remove it, so an overshoot must wait for passive or
 cryocooler cooling.
 
-![Fig. 4 — Heater-to-sensor coupling](figures/fig4_coupling.png)
+![Fig. 3 — Heater-to-sensor coupling](figures/fig4_coupling.png)
 
-Figure 4. Row-normalized steady-state gain |G| (earlier well-conditioned build).
+Figure 3. Row-normalized steady-state gain |G| (earlier well-conditioned build).
 The off-diagonal energy within each block is the cross-coupling that rules out
 independent single-loop control.
 
@@ -201,22 +207,22 @@ in two stages:
    and observability Lyapunov equations for the 120-state model, take the Hankel
    singular values from their gramian factors (each measuring a mode's joint
    controllability and observability), and apply square-root balancing to keep the
-   top r = 30. The Hankel values (Fig. 1) fall off a cliff, dropping about four
+   top r = 30. The Hankel values (Fig. 4) fall off a cliff, dropping about four
    orders of magnitude by mode 10 and reaching machine precision by mode 45, so 30
    states capture essentially all of the input/output behavior. The reduced
    30-state model reproduces the full model's steady-state gain to 1.3×10⁻³ and its
-   step response to 1.5×10⁻³ (about 0.15%; Fig. 2), and is stable. This is the key
+   step response to 1.5×10⁻³ (about 0.15%; Fig. 5), and is stable. This is the key
    result that makes everything downstream trustworthy: the model is small enough
    to run on the target microcontroller yet faithful to the real dynamics.
 
-![Fig. 1 — Hankel singular values](figures/fig1_hsv.png)
+![Fig. 4 — Hankel singular values](figures/fig1_hsv.png)
 
-Figure 1. Hankel singular values (normalized); r = 30 (dashed) retains all
+Figure 4. Hankel singular values (normalized); r = 30 (dashed) retains all
 meaningful input/output dynamics.
 
-![Fig. 2 — Full vs. reduced step response](figures/fig2_step_overlay.png)
+![Fig. 5 — Full vs. reduced step response](figures/fig2_step_overlay.png)
 
-Figure 2. Full (120-mode) vs. reduced (r = 30) step response for the dominant
+Figure 5. Full (120-mode) vs. reduced (r = 30) step response for the dominant
 heater-to-sensor pair; the reduction preserves the input/output map to about
 0.15%.
 
@@ -229,16 +235,16 @@ weight ρ = 0.3. The supporting pieces use a Tikhonov regularization fraction of
 tool here: it produces an optimal, fully coordinated multivariable law, where every
 heater's command uses the entire state estimate, so the controller actively works
 with the cross-coupling instead of fighting it, which is exactly what independent
-PID loops cannot do. Figure 3 shows this directly: K is dense, and several heaters
+PID loops cannot do. Figure 6 shows this directly: K is dense, and several heaters
 draw on shared modes. Around the LQR core sit three supporting pieces: a static
 state estimator that reconstructs the 30 states from the 72 sensor readings, a
 regularized steady-state feedforward that supplies the open-loop power to reach a
 setpoint, and an integral term that removes residual offset from model error and
 the uncertain radiation load.
 
-![Fig. 3 — Reduced-order LQR gain](figures/fig3_lqr_gain.png)
+![Fig. 6 — Reduced-order LQR gain](figures/fig3_lqr_gain.png)
 
-Figure 3. LQR feedback gain K (u = −Kx); its density shows genuinely coordinated
+Figure 6. LQR feedback gain K (u = −Kx); its density shows genuinely coordinated
 multivariable control across all 33 heaters.
 
 The main drawback: one-sided inputs. LQR is optimal for unconstrained,

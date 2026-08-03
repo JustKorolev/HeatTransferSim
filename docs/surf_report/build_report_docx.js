@@ -163,7 +163,7 @@ const doc = new Document({
 });
 
 Packer.toBuffer(doc).then((buf) => {
-  const out = path.join(HERE, "interim_report_2.docx");
+  const out = path.join(HERE, process.argv[2] || "interim_report_2.docx");
   fs.writeFileSync(out, buf);
   console.log("wrote", out, `(${(buf.length/1024).toFixed(0)} KB)`);
 });
