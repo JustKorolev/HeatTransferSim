@@ -294,6 +294,11 @@ class SimulationRunner:
         self._update_status(step, self._series.get("time_s", [0.0])[-1] if self._series.get("time_s") else 0.0)
 
     def _step_is_bad(self, temps, prev, dt, thr) -> tuple[bool, str]:
+        # Only genuine SOLVER failures reject-and-halve (smaller dt can help those):
+        # non-finite results and hard out-of-bounds (runaway). A high temperature
+        # RATE is a divergence INDICATOR, not a solver failure -- halving dt only
+        # raises rate = dT/dt, so it must NOT trigger the retry (it's a soft warning
+        # in _collect instead). This is what doom-looped on stiff/artifact graphs.
         if not np.all(np.isfinite(temps)):
             return True, "non-finite temperatures (NaN/Inf)"
         tmax = float(np.max(temps))
@@ -302,10 +307,6 @@ class SimulationRunner:
             return True, f"max T {tmax:.3g}K > {thr.max_temperature_K:g}K"
         if tmin < thr.min_temperature_K:
             return True, f"min T {tmin:.3g}K < {thr.min_temperature_K:g}K"
-        if dt > 0 and prev.shape == temps.shape:
-            rate = float(np.max(np.abs(temps - prev))) / dt
-            if rate > thr.max_temperature_rate_K_per_s:
-                return True, f"|dT/dt| {rate:.3g}K/s > {thr.max_temperature_rate_K_per_s:g}"
         return False, ""
 
     # -- readouts / logging ------------------------------------------------- #
@@ -316,6 +317,12 @@ class SimulationRunner:
         s.setdefault("avg_temp_K", []).append(float(np.mean(temps)))
         s.setdefault("max_temp_K", []).append(float(np.max(temps)))
         s.setdefault("min_temp_K", []).append(float(np.min(temps)))
+        # Max temperature rate -- soft divergence indicator (logged, not fatal).
+        if dt > 0 and prev.shape == temps.shape:
+            rate = float(np.max(np.abs(temps - prev))) / dt
+            s.setdefault("max_temp_rate_K_per_s", []).append(rate)
+            if rate > thr.max_temperature_rate_K_per_s:
+                self._log_event("high_temp_rate", f"t={state.time_s:.1f}s max|dT/dt|={rate:.3g}K/s (soft)")
         # sensor temps + tracking error
         if sensor_ix:
             sens = temps[sensor_ix]
