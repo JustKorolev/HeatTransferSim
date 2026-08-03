@@ -82,6 +82,11 @@ class SimulationParameters:
     implicit_sparse_simulation_method: str = "tr_bdf2"
     implicit_sparse_simulation_rtol: float = 1.0e-6
     implicit_sparse_simulation_maxiter: int = 300
+    # Preconditioner for the implicit CG/BiCGSTAB solves. Plain Jacobi (diagonal)
+    # is the default; block-Jacobi inverts small contiguous diagonal blocks and
+    # can cut CG iterations on ill-conditioned cryogenic systems at some setup cost.
+    implicit_sparse_block_jacobi_enabled: bool = False
+    implicit_sparse_block_jacobi_size: int = 64
     implicit_sparse_adaptive_substeps_enabled: bool = True
     implicit_sparse_adaptive_target_delta_K: float = 1.0
     implicit_sparse_adaptive_max_substeps: int = 4

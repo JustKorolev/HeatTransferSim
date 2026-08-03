@@ -90,6 +90,8 @@ class SparseImplicitStepper:
     adaptive_max_substeps: int = 4
     residual_check_enabled: bool = True
     backend: str = "cpu"
+    block_jacobi_enabled: bool = False
+    block_jacobi_size: int = 64
     gamma: float = 2.0 - float(np.sqrt(2.0))
     last_info: int = 0
     last_iterations: int = 0
@@ -98,6 +100,7 @@ class SparseImplicitStepper:
     last_relative_residual_norm: float = 0.0
     last_predicted_delta_K: float = 0.0
     _stage_cache: dict[int, tuple[Any, Any | None, Any, Any | None]] = field(default_factory=dict)
+    _block_partition_cache: dict[tuple[int, int], dict[str, Any]] = field(default_factory=dict, repr=False)
     _backend_modules: dict[str, Any] | None = field(default=None, repr=False)
     _operator_device: Any = field(default=None, repr=False)
     _capacitance_device: Any = field(default=None, repr=False)
@@ -192,7 +195,7 @@ class SparseImplicitStepper:
             raise RuntimeError(f"{self.solver} received an invalid implicit update right-hand side.")
         if float(xp.linalg.norm(rhs)) <= 0.0:
             return temperatures.copy()
-        preconditioner = self._jacobi_preconditioner(system_matrix)
+        preconditioner = self._make_preconditioner(system_matrix)
         result = self._solve_linear(system_matrix, rhs, preconditioner, xp.zeros_like(temperatures))
         if result.shape != temperatures.shape or not bool(xp.all(xp.isfinite(result))):
             raise RuntimeError(f"{self.solver} returned an invalid temperature vector.")
@@ -255,12 +258,18 @@ class SparseImplicitStepper:
             stage2_matrix = (stage2_scale * identity - operator).tocsr()
         cached = (
             stage1_matrix,
-            self._jacobi_preconditioner(stage1_matrix),
+            self._make_preconditioner(stage1_matrix),
             stage2_matrix,
-            self._jacobi_preconditioner(stage2_matrix),
+            self._make_preconditioner(stage2_matrix),
         )
         self._stage_cache[key] = cached
         return cached
+
+    def _make_preconditioner(self, matrix: Any) -> Any:
+        """Pick the preconditioner for ``matrix`` based on the configured strategy."""
+        if bool(self.block_jacobi_enabled) and int(self.block_jacobi_size) > 1:
+            return self._block_jacobi_preconditioner(matrix)
+        return self._jacobi_preconditioner(matrix)
 
     def _jacobi_preconditioner(self, matrix: Any) -> Any:
         xp = self._be["xp"]
@@ -268,6 +277,75 @@ class SparseImplicitStepper:
         valid = xp.isfinite(diagonal) & (xp.abs(diagonal) > 1.0e-30)
         inv_diagonal = xp.where(valid, 1.0 / xp.where(valid, diagonal, 1.0), 0.0)
         return self._be["LinearOperator"](matrix.shape, matvec=lambda values: inv_diagonal * values)
+
+    def _block_partition(self, n: int, block_size: int) -> dict[str, Any]:
+        """Contiguous block layout for ``n`` nodes; cached because it depends only
+        on (n, block_size), not on the matrix values (which change per stage)."""
+        key = (int(n), int(block_size))
+        cached = self._block_partition_cache.get(key)
+        if cached is not None:
+            return cached
+        xp = self._be["xp"]
+        num_blocks = (int(n) + int(block_size) - 1) // int(block_size)
+        layout = {
+            "num_blocks": int(num_blocks),
+            "block_size": int(block_size),
+            "padded_n": int(num_blocks * int(block_size)),
+            "diag_index": xp.arange(int(block_size)),
+        }
+        self._block_partition_cache[key] = layout
+        return layout
+
+    def _block_jacobi_preconditioner(self, matrix: Any) -> Any:
+        """Block-Jacobi preconditioner: invert small contiguous diagonal blocks.
+
+        The N nodes are split into contiguous blocks of ``block_jacobi_size``; the
+        dense diagonal sub-block of each is inverted and applied as a batched
+        matmul, which works identically on scipy (CPU) and cupyx (GPU) arrays.
+        Falls back to plain Jacobi if the blocks cannot be inverted.
+        """
+        xp = self._be["xp"]
+        n = int(matrix.shape[0])
+        block_size = max(1, int(self.block_jacobi_size))
+        if n == 0 or block_size <= 1:
+            return self._jacobi_preconditioner(matrix)
+        layout = self._block_partition(n, block_size)
+        num_blocks = layout["num_blocks"]
+        padded_n = layout["padded_n"]
+        diag_index = layout["diag_index"]
+
+        # Dense (num_blocks, block_size, block_size) stack of the contiguous
+        # diagonal blocks. Initialise to identity so the trailing partial block's
+        # padding (local index >= remainder) inverts to identity and acts as a
+        # no-op on the zero-padded tail of the vector.
+        blocks = xp.zeros((num_blocks, block_size, block_size), dtype=float)
+        blocks[:, diag_index, diag_index] = 1.0
+        coo = matrix.tocoo()
+        rows = xp.asarray(coo.row)
+        cols = xp.asarray(coo.col)
+        data = xp.asarray(coo.data, dtype=float)
+        same_block = (rows // block_size) == (cols // block_size)
+        block_of = rows[same_block] // block_size
+        local_i = rows[same_block] % block_size
+        local_j = cols[same_block] % block_size
+        blocks[block_of, local_i, local_j] = data[same_block]
+        try:
+            inv_blocks = xp.linalg.inv(blocks)
+        except Exception:  # noqa: BLE001 - singular block; degrade gracefully
+            return self._jacobi_preconditioner(matrix)
+
+        def _matvec(values: Any) -> Any:
+            vec = values.reshape(-1)
+            if padded_n != n:
+                buffer = xp.zeros(padded_n, dtype=vec.dtype)
+                buffer[:n] = vec
+            else:
+                buffer = vec
+            reshaped = buffer.reshape(num_blocks, block_size)
+            applied = xp.einsum("kij,kj->ki", inv_blocks, reshaped).reshape(-1)
+            return applied[:n]
+
+        return self._be["LinearOperator"](matrix.shape, matvec=_matvec)
 
     def _adaptive_substep_count(self, temperatures: Any, source: Any) -> int:
         xp = self._be["xp"]
@@ -2188,6 +2266,8 @@ def _build_implicit_stepper(
             adaptive_max_substeps=max(1, int(getattr(params, "implicit_sparse_adaptive_max_substeps", 4))),
             residual_check_enabled=bool(getattr(params, "implicit_sparse_residual_check_enabled", True)),
             backend="gpu" if is_gpu else "cpu",
+            block_jacobi_enabled=bool(getattr(params, "implicit_sparse_block_jacobi_enabled", False)),
+            block_jacobi_size=max(1, int(getattr(params, "implicit_sparse_block_jacobi_size", 64))),
         )
         if is_gpu:
             # Resolve the CuPy modules now so any import/JIT error is caught here.
@@ -2195,9 +2275,14 @@ def _build_implicit_stepper(
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"{'GPU' if is_gpu else 'CPU'} implicit solver unavailable; setup failed: {exc}")
         return None
+    precond = (
+        f"block-jacobi({int(getattr(params, 'implicit_sparse_block_jacobi_size', 64))})"
+        if bool(getattr(params, "implicit_sparse_block_jacobi_enabled", False))
+        else "jacobi"
+    )
     warnings.append(
         f"{'GPU' if is_gpu else 'CPU'} implicit {method} solver enabled "
-        f"(solver={solver}, rtol={rtol:g}, maxiter={maxiter})."
+        f"(solver={solver}, rtol={rtol:g}, maxiter={maxiter}, precond={precond})."
     )
     return stepper
 

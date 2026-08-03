@@ -12,7 +12,9 @@ one remaining choice -- how each SPD solve is performed -- and measures its
 setup cost, per-solve cost, memory, and accuracy on a real saved graph.
 
 Methods (each skipped cleanly if its library is missing):
+  cg_none     scipy CG, no preconditioner (baseline iteration count)
   cg_jacobi   scipy CG + Jacobi preconditioner, rebuilt every solve (current)
+  cg_bjac     scipy CG + block-Jacobi (contiguous dense-block inverses)
   superlu     scipy SuperLU factorization, factored once, reused (SciPy-only)
   cholmod     scikit-sparse CHOLMOD Cholesky, factored once, reused
   amg_cg      pyamg smoothed-aggregation AMG as a CG preconditioner, built once
@@ -32,8 +34,8 @@ import time
 from pathlib import Path
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix, diags
-from scipy.sparse.linalg import cg, splu
+from scipy.sparse import coo_matrix, csr_matrix, diags, load_npz
+from scipy.sparse.linalg import LinearOperator, cg, splu
 
 GAMMA = 2.0 - np.sqrt(2.0)  # TR-BDF2 stage parameter, matches SparseImplicitStepper
 
@@ -50,18 +52,22 @@ def load_operator(folder: Path) -> tuple[np.ndarray, csr_matrix, np.ndarray]:
         if T0_path.exists()
         else np.full_like(C, 293.15)
     )
-    with (folder / "L_sparse.json").open() as handle:
-        payload = json.load(handle)
-    shape = tuple(int(v) for v in payload["shape"])
-    L = coo_matrix(
-        (
-            np.asarray(payload["data"], dtype=float),
-            (np.asarray(payload["row"], dtype=int), np.asarray(payload["col"], dtype=int)),
-        ),
-        shape=shape,
-    ).tocsr()
-    if C.size != shape[0]:
-        raise ValueError(f"C length {C.size} does not match L shape {shape}.")
+    npz_path = folder / "L_sparse.npz"
+    if npz_path.exists():
+        L = load_npz(npz_path).tocsr()
+    else:
+        with (folder / "L_sparse.json").open() as handle:
+            payload = json.load(handle)
+        shape = tuple(int(v) for v in payload["shape"])
+        L = coo_matrix(
+            (
+                np.asarray(payload["data"], dtype=float),
+                (np.asarray(payload["row"], dtype=int), np.asarray(payload["col"], dtype=int)),
+            ),
+            shape=shape,
+        ).tocsr()
+    if C.size != L.shape[0]:
+        raise ValueError(f"C length {C.size} does not match L shape {L.shape}.")
     return C, L, T0
 
 
@@ -97,20 +103,76 @@ def rss_mb() -> float | None:
 
 
 # --------------------------------------------------------------------------- #
-# Method runners: each returns dict(setup_s, solve_s, rel_err, rel_resid, note)
+# Preconditioner builders
 # --------------------------------------------------------------------------- #
-def bench_cg_jacobi(M, b, x_true, solves, rtol):
-    inv_diag = 1.0 / M.diagonal()
-    from scipy.sparse.linalg import LinearOperator
+def build_block_jacobi(M: csr_matrix, block_size: int) -> LinearOperator:
+    """Contiguous block-Jacobi preconditioner (matches SparseImplicitStepper)."""
+    n = M.shape[0]
+    num_blocks = (n + block_size - 1) // block_size
+    padded_n = num_blocks * block_size
+    blocks = np.zeros((num_blocks, block_size, block_size), dtype=float)
+    idx = np.arange(block_size)
+    blocks[:, idx, idx] = 1.0
+    coo = M.tocoo()
+    same = (coo.row // block_size) == (coo.col // block_size)
+    blocks[coo.row[same] // block_size, coo.row[same] % block_size, coo.col[same] % block_size] = coo.data[same]
+    inv_blocks = np.linalg.inv(blocks)
 
-    prec = LinearOperator(M.shape, matvec=lambda v: inv_diag * v)
+    def matvec(v):
+        vec = np.asarray(v, dtype=float).reshape(-1)
+        buf = np.zeros(padded_n) if padded_n != n else vec
+        if padded_n != n:
+            buf[:n] = vec
+        applied = np.einsum("kij,kj->ki", inv_blocks, buf.reshape(num_blocks, block_size)).reshape(-1)
+        return applied[:n]
+
+    return LinearOperator(M.shape, matvec=matvec)
+
+
+def _cg_with_count(M, b, prec, rtol):
+    """One CG solve; returns (x, info, iterations)."""
+    iters = 0
+
+    def _cb(_xk):
+        nonlocal iters
+        iters += 1
+
+    x, info = cg(M, b, rtol=rtol, atol=0.0, maxiter=5000, M=prec, callback=_cb)
+    return x, info, iters
+
+
+# --------------------------------------------------------------------------- #
+# Method runners: each returns dict(setup_s, solve_s, rel_err, rel_resid, iters, note)
+# --------------------------------------------------------------------------- #
+def bench_cg_none(M, b, x_true, solves, rtol):
+    t0 = time.perf_counter()
+    for _ in range(solves):
+        x, info, iters = _cg_with_count(M, b, None, rtol)
+    solve_s = (time.perf_counter() - t0) / solves
+    return _result(0.0, solve_s, M, b, x, x_true, iters=iters, note=f"info={info}")
+
+
+def bench_cg_jacobi(M, b, x_true, solves, rtol):
     # No reusable setup: Jacobi is rebuilt each solve in the real code, so we
     # fold its (tiny) cost into per-solve timing.
     t0 = time.perf_counter()
     for _ in range(solves):
-        x, info = cg(M, b, rtol=rtol, atol=0.0, maxiter=2000, M=prec)
+        inv_diag = 1.0 / M.diagonal()
+        prec = LinearOperator(M.shape, matvec=lambda v: inv_diag * v)
+        x, info, iters = _cg_with_count(M, b, prec, rtol)
     solve_s = (time.perf_counter() - t0) / solves
-    return _result(0.0, solve_s, M, b, x, x_true, note=f"info={info}")
+    return _result(0.0, solve_s, M, b, x, x_true, iters=iters, note=f"info={info}")
+
+
+def bench_cg_bjac(M, b, x_true, solves, rtol, block_size=64):
+    t0 = time.perf_counter()
+    prec = build_block_jacobi(M, block_size)
+    setup_s = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    for _ in range(solves):
+        x, info, iters = _cg_with_count(M, b, prec, rtol)
+    solve_s = (time.perf_counter() - t0) / solves
+    return _result(setup_s, solve_s, M, b, x, x_true, iters=iters, note=f"block={block_size} info={info}")
 
 
 def bench_superlu(M, b, x_true, solves, rtol):
@@ -148,9 +210,9 @@ def bench_amg_cg(M, b, x_true, solves, rtol):
     setup_s = time.perf_counter() - t0
     t0 = time.perf_counter()
     for _ in range(solves):
-        x, info = cg(M, b, rtol=rtol, atol=0.0, maxiter=2000, M=prec)
+        x, info, iters = _cg_with_count(M, b, prec, rtol)
     solve_s = (time.perf_counter() - t0) / solves
-    return _result(setup_s, solve_s, M, b, x, x_true, note=f"levels={len(ml.levels)}")
+    return _result(setup_s, solve_s, M, b, x, x_true, iters=iters, note=f"levels={len(ml.levels)}")
 
 
 def bench_gpu_cg(M, b, x_true, solves, rtol):
@@ -166,16 +228,22 @@ def bench_gpu_cg(M, b, x_true, solves, rtol):
     b_gpu = cp.asarray(b)
     cp.cuda.Stream.null.synchronize()
     setup_s = time.perf_counter() - t0
+    iters = 0
+
+    def _cb(_xk):
+        nonlocal iters
+        iters += 1
+
     t0 = time.perf_counter()
     for _ in range(solves):
-        x_gpu, info = cp_cg(M_gpu, b_gpu, rtol=rtol, atol=0.0, maxiter=2000, M=prec)
+        x_gpu, info = cp_cg(M_gpu, b_gpu, rtol=rtol, atol=0.0, maxiter=5000, M=prec, callback=_cb)
     cp.cuda.Stream.null.synchronize()
     solve_s = (time.perf_counter() - t0) / solves
     x = cp.asnumpy(x_gpu)
-    return _result(setup_s, solve_s, M, b, x, x_true, note=f"info={int(info)}")
+    return _result(setup_s, solve_s, M, b, x, x_true, iters=iters, note=f"info={int(info)}")
 
 
-def _result(setup_s, solve_s, M, b, x, x_true, note=""):
+def _result(setup_s, solve_s, M, b, x, x_true, iters=None, note=""):
     x = np.asarray(x, dtype=float).reshape(-1)
     rel_err = float(np.linalg.norm(x - x_true) / max(np.linalg.norm(x_true), 1e-30))
     resid = np.asarray(M @ x, dtype=float).reshape(-1) - b
@@ -185,12 +253,15 @@ def _result(setup_s, solve_s, M, b, x, x_true, note=""):
         "solve_s": solve_s,
         "rel_err": rel_err,
         "rel_resid": rel_resid,
+        "iters": iters,
         "note": note,
     }
 
 
 METHODS = {
+    "cg_none": bench_cg_none,
     "cg_jacobi": bench_cg_jacobi,
+    "cg_bjac": bench_cg_bjac,
     "superlu": bench_superlu,
     "cholmod": bench_cholmod,
     "amg_cg": bench_amg_cg,
@@ -214,6 +285,13 @@ def main() -> None:
     )
     parser.add_argument("--solves", type=int, default=15, help="Solves timed per method (setup reused).")
     parser.add_argument("--rtol", type=float, default=1e-6, help="Iterative tolerance (matches params default).")
+    parser.add_argument(
+        "--block-sizes",
+        type=int,
+        nargs="+",
+        default=[64],
+        help="Block sizes for the block-Jacobi method (one cg_bjac<N> row per size).",
+    )
     args = parser.parse_args()
 
     print(f"Loading operator from {args.graph_folder} ...")
@@ -235,16 +313,25 @@ def main() -> None:
             f"substeps={substeps}  ->  h={h:.4g}s   M = diag(C) + {0.5*GAMMA*h:.4g}*L   "
             f"(alpha*max(Lii)/max? ~{stiffness:.2g})"
         )
-        print(f"{'method':<12}{'setup(s)':>10}{'solve(ms)':>11}{'rel_err':>12}{'rel_resid':>12}   note")
-        print("-" * 92)
-        rows = {}
+        print(f"{'method':<12}{'setup(s)':>10}{'solve(ms)':>11}{'iters':>8}{'rel_err':>12}{'rel_resid':>12}   note")
+        print("-" * 100)
+        # Expand cg_bjac into one runner per requested block size.
+        methods = {}
         for name, fn in METHODS.items():
+            if name == "cg_bjac":
+                for bs in args.block_sizes:
+                    methods[f"cg_bjac{bs}"] = (lambda M, b, x, s, r, _bs=bs: bench_cg_bjac(M, b, x, s, r, _bs))
+            else:
+                methods[name] = fn
+        rows = {}
+        for name, fn in methods.items():
             try:
                 gc.collect()
                 r = fn(M, b, x_true, args.solves, args.rtol)
                 rows[name] = r
+                iters_str = "-" if r.get("iters") is None else str(int(r["iters"]))
                 print(
-                    f"{name:<12}{r['setup_s']:>10.3f}{r['solve_s']*1e3:>11.2f}"
+                    f"{name:<12}{r['setup_s']:>10.3f}{r['solve_s']*1e3:>11.2f}{iters_str:>8}"
                     f"{r['rel_err']:>12.2e}{r['rel_resid']:>12.2e}   {r['note']}"
                 )
             except ImportError as exc:
