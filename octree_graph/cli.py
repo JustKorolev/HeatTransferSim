@@ -1025,11 +1025,23 @@ def _build_graph_with_optional_fallback(
 
         serial_contact = make_component_contact_fn(step_scene, float(contact_tol_mm))
         component_contact_fn = serial_contact
-        # Each contact worker re-loads the FULL B-rep (much heavier than a voxel
-        # worker's tessellated meshes), so start conservatively -- fewer workers,
-        # less simultaneous B-rep memory -- and let parallel_component_contact's
-        # self-healing retry step down further if even that OOMs.
-        workers = max(1, min(int(getattr(args, "voxel_workers", 1) or 1), 4))
+        # Size the contact stage from ITS OWN budget, not the fill stage's memory-
+        # reduced count: each contact worker re-loads the full B-rep (a heavier, and
+        # different, per-worker profile than a fill worker's tessellated meshes), and
+        # this stage is CPU/GIL-bound so it can use more workers than fill when RAM
+        # allows. Start from the user's ORIGINAL request (requested_voxel_workers,
+        # captured before the fill guard reduced it); parallel_component_contact's
+        # self-healing retry steps down further if even this OOMs.
+        requested_workers = int(
+            getattr(args, "requested_voxel_workers", getattr(args, "voxel_workers", 1)) or 1
+        )
+        workers = _resolve_contact_workers(requested_workers, step_path, args)
+        fill_workers = int(getattr(args, "voxel_workers", 1) or 1)
+        if workers != fill_workers:
+            warnings.append(
+                f"B-rep contact stage sized to {workers} worker(s) independently "
+                f"(fill stage used {fill_workers}); requested {requested_workers}."
+            )
         if workers > 1 and step_path is not None:
             adjacent_pairs = enumerate_inter_component_adjacent_pairs(leaves)
             if adjacent_pairs:
@@ -1310,6 +1322,11 @@ _WORKER_SPAWN_PEAK_FACTOR = 2.0
 
 def _log_scene_memory_risk(scene: GltfScene, args: argparse.Namespace, run_log: "RunLogger", warnings: list[str]) -> None:
     worker_count = _resolved_cli_voxel_workers(args.voxel_workers)
+    # Preserve the pre-reduction request so stages with a DIFFERENT memory profile
+    # (the B-rep contact precompute) can size their own worker count instead of
+    # inheriting the fill stage's reduction. This guard only clamps the fill stage,
+    # whose per-worker payload (triangles + embree BVH) is what it models below.
+    args.requested_voxel_workers = worker_count
     triangle_count = 0
     triangle_bytes = 0
     for obj in getattr(scene, "objects", []):
@@ -1383,6 +1400,40 @@ def _resolved_cli_voxel_workers(requested: int) -> int:
         cpu_count = os.cpu_count() or 2
         return max(1, min(2, cpu_count - 1))
     return max(1, value)
+
+
+# Rough in-memory footprint of ONE B-rep contact worker as a multiple of the STEP
+# file's on-disk size. Each worker re-loads the full OCC B-rep (all solids +
+# topology), which is several times the file size -- a very different (and heavier
+# per-worker) profile than a fill worker's tessellated-triangle payload, so contact
+# is sized separately. Deliberately conservative; parallel_component_contact's
+# halve-on-OOM retry is the backstop if this under-estimates.
+_BREP_WORKER_BYTES_PER_FILE_BYTE = 5.0
+_BREP_WORKER_MIN_BYTES = 512 * 1024 * 1024  # floor so a tiny STEP file can't over-provision
+
+
+def _resolve_contact_workers(requested: int, step_path: "Path | None", args: argparse.Namespace) -> int:
+    """Worker count for the B-rep contact precompute, sized from ITS OWN budget
+    (free RAM vs. the full-B-rep-per-worker footprint, capped by CPU cores and the
+    request) -- NOT the fill stage's memory-reduced count. BRepExtrema is CPU/GIL-
+    bound, so cores is the natural ceiling."""
+    requested = max(1, int(requested))
+    cores = os.cpu_count() or 2
+    ceiling = max(1, min(requested, cores))
+    if ceiling <= 1 or step_path is None:
+        return ceiling
+    available_bytes = _available_memory_bytes()
+    if available_bytes is None:
+        return ceiling
+    try:
+        file_bytes = int(Path(step_path).stat().st_size)
+    except OSError:
+        return ceiling
+    per_worker = max(int(file_bytes * _BREP_WORKER_BYTES_PER_FILE_BYTE), _BREP_WORKER_MIN_BYTES)
+    fraction = float(getattr(args, "voxel_worker_memory_fraction", 0.7) or 0.7)
+    fraction = min(max(fraction, 0.1), 0.95)
+    max_fit = int((available_bytes * fraction) // per_worker)
+    return max(1, min(ceiling, max_fit))
 
 
 def _available_memory_bytes() -> int | None:

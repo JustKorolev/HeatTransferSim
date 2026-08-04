@@ -25,6 +25,7 @@ from octree_graph.cli import (
     _build_graph_with_optional_fallback,
     _filter_ignored_components,
     _log_scene_memory_risk,
+    _resolve_contact_workers,
     _oversized_node_summary,
     _raise_if_empty_graph,
     _resolve_material_lookup_path,
@@ -451,6 +452,40 @@ class OctreeMaterialDefaultTests(unittest.TestCase):
 
         self.assertEqual(args.voxel_workers, 2)
         self.assertTrue(any("Reduced voxel workers from 4 to 2" in message for message in warnings))
+        # The pre-reduction request is preserved so the contact stage can size itself
+        # independently rather than inherit the fill stage's reduction.
+        self.assertEqual(args.requested_voxel_workers, 4)
+
+    def test_contact_workers_sized_independently_of_fill_reduction(self) -> None:
+        # The B-rep contact stage sizes from its own budget: capped by cores and the
+        # ORIGINAL request, and NOT by the fill stage's memory-reduced count.
+        import os
+        import tempfile
+
+        cores = os.cpu_count() or 2
+        with tempfile.NamedTemporaryFile(suffix=".step", delete=False) as fh:
+            fh.write(b"0" * (10 * 1024 * 1024))  # 10 MB "STEP" -> per-worker hits the floor
+            step_path = Path(fh.name)
+        try:
+            args = SimpleNamespace(voxel_worker_memory_fraction=0.7)
+            # Plenty of RAM: request survives, capped only by cores. Fill was reduced
+            # to 2, but contact should honor the original request of 8 (up to cores).
+            with patch("octree_graph.cli._available_memory_bytes", return_value=64 * 1024**3):
+                workers = _resolve_contact_workers(8, step_path, args)
+            self.assertEqual(workers, min(8, cores))
+            # Tight RAM: budget only fits a couple of full-B-rep workers regardless of
+            # the request -> its own memory sizing, not the fill count.
+            with patch("octree_graph.cli._available_memory_bytes", return_value=1 * 1024**3):
+                tight = _resolve_contact_workers(8, step_path, args)
+            # 1 GiB * 0.7 budget vs a 512 MB/worker floor -> exactly 1 fits,
+            # regardless of core count (its own memory sizing, not the fill count).
+            self.assertEqual(tight, 1)
+            # No memory signal / no step file -> fall back to the request capped by cores.
+            with patch("octree_graph.cli._available_memory_bytes", return_value=None):
+                self.assertEqual(_resolve_contact_workers(8, step_path, args), min(8, cores))
+            self.assertEqual(_resolve_contact_workers(8, None, args), min(8, cores))
+        finally:
+            step_path.unlink(missing_ok=True)
 
     def test_build_quality_counts_warning_tags(self) -> None:
         args = SimpleNamespace(max_cell_size_mm=4.0)
