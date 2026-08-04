@@ -724,6 +724,7 @@ def build_octree(
         warnings,
         diagnostics,
         next_counter=counter,
+        progress_callback=progress_callback,
     )
     _mark_final_oversized_leaves(leaves, params, warnings)
     if progress_callback is not None and diagnostics is not None:
@@ -751,24 +752,40 @@ def _balance_adjacent_leaf_sizes(
     diagnostics: OctreeDiagnostics | None,
     *,
     next_counter: int,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> list[OctreeCell]:
     if not bool(getattr(params, "balance_adjacent_leaf_sizes", True)):
         return leaves
     max_passes = max(0, int(getattr(params, "balance_refine_passes", 0)))
     if max_passes <= 0:
         return leaves
+
+    def _emit(processed: int, total: int, pass_index: int, refined: int) -> None:
+        # Balancing runs serially after voxelization with no queue -- without this
+        # the progress bar sits at queue=0 and the whole thing looks frozen.
+        if progress_callback is not None:
+            progress_callback({
+                "phase": "balancing", "pass": pass_index + 1, "passes": max_passes,
+                "processed": processed, "total": total, "refined": refined,
+            })
+
     counter = int(next_counter)
     current = list(leaves)
     for _pass_index in range(max_passes):
         if params.max_leaf_cells is not None and len(current) + 7 > int(params.max_leaf_cells):
             break
+        _emit(0, len(current), _pass_index, 0)
         targets = _adjacent_balance_refinement_targets(current, params)
         if not targets:
             break
         refined_any = False
+        refined_count = 0
         projected_leaf_count = len(current)
         updated: list[OctreeCell] = []
-        for leaf in current:
+        total_leaves = len(current)
+        for _leaf_idx, leaf in enumerate(current):
+            if _leaf_idx % 25000 == 0:
+                _emit(_leaf_idx, total_leaves, _pass_index, refined_count)
             if leaf.cell_id not in targets:
                 updated.append(leaf)
                 continue
@@ -824,7 +841,9 @@ def _balance_adjacent_leaf_sizes(
             updated.extend(child_leaves)
             projected_leaf_count += 7
             refined_any = True
+            refined_count += 1
         current = updated
+        _emit(total_leaves, total_leaves, _pass_index, refined_count)
         if not refined_any:
             break
     return current

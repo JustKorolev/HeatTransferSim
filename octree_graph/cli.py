@@ -1696,6 +1696,29 @@ class ConsoleProgress:
         if not self.enabled:
             return
         now = time.monotonic()
+        if event.get("phase") == "balancing":
+            # Post-voxelization adjacent-size balancing runs serially with no queue;
+            # show its own bar so it isn't mistaken for a freeze at queue=0.
+            if now - self._last_update < 0.2:
+                return
+            self._last_update = now
+            processed = int(event.get("processed", 0))
+            total = max(1, int(event.get("total", 1)))
+            ratio = min(1.0, processed / float(total))
+            bar = "#" * int(round(ratio * 28)) + "-" * (28 - int(round(ratio * 28)))
+            line = (
+                f"Balancing adjacent leaf sizes (pass {event.get('pass', 1)}/{event.get('passes', 1)}) "
+                f"[{bar}] {processed}/{total} refined={event.get('refined', 0)}"
+            )
+            if self._logger is not None and now - self._last_log >= 10.0:
+                self._logger(line)
+                self._last_log = now
+            if self.is_tty:
+                print(f"\r{line.ljust(self._last_line_len)}", end="", file=sys.stderr, flush=True)
+                self._last_line_len = len(line)
+            else:
+                print(line, file=sys.stderr, flush=True)
+            return
         if not event.get("done") and now - self._last_update < 0.2:
             return
         self._last_update = now
