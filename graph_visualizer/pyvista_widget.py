@@ -1347,6 +1347,12 @@ class GraphPyVistaWidget:
         per surface face so picking and scalar/colour updates are unaffected.
         """
         n = int(node_ids_arr.shape[0])
+        # In cross-section mode the surface-culled shell would show a HOLLOW cut --
+        # interior faces were dropped, so slicing a filled block reveals nothing.
+        # Use the full 6-faces-per-cell mesh so the clip plane exposes the actual
+        # cells at the cut (the whole point of a cross-section is to see inside).
+        if self.cross_section_enabled:
+            return self._full_face_cell_mesh(node_ids_arr, points, scalar_per_node, rgb_per_node)
         try:
             mesh = self._extract_hex_surface(node_ids_arr, points, scalar_per_node, rgb_per_node)
             if mesh is not None and int(getattr(mesh, "n_cells", 0)) > 0 and "node_id" in mesh.cell_data:

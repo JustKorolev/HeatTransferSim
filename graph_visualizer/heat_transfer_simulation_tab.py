@@ -3468,6 +3468,16 @@ class HeatTransferSimulationTab:
         self._draw_current(reset_camera=False)
 
     def _handle_visual_control_changed(self, *_: Any) -> None:
+        # Cross-section on/off swaps the batched cell mesh between the fast
+        # surface-culled shell and the full-face mesh, so a cut reveals the actual
+        # interior cells instead of a hollow shell. That needs a rebuild -- but only
+        # on the on/off transition, not on every slider drag.
+        cross_enabled = self.cross_section_toggle.isChecked()
+        if cross_enabled != getattr(self, "_cross_section_enabled_state", False):
+            self._cross_section_enabled_state = cross_enabled
+            if getattr(self, "model", None) is not None:
+                self.viewer.cross_section_enabled = cross_enabled  # rebuild picks the right mesh
+                self._draw_current(reset_camera=False)
         self._sync_view_controls_to_viewer()
         self.viewer.safe_render()
 
