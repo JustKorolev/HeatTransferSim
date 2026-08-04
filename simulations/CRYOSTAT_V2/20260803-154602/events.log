@@ -1,0 +1,6 @@
+[2026-08-03T15:46:02] run_start: graph=CRYOSTAT_V2 out=simulations\CRYOSTAT_V2\20260803-154602
+[2026-08-03T15:46:54] prepared: nodes=471412 sensors=72 heaters=33 cryo=536 controller=yes
+[2026-08-03T15:46:56] high_temp_rate: t=0.1s max|dT/dt|=594K/s (soft)
+[2026-08-03T15:46:57] high_temp_rate: t=0.2s max|dT/dt|=559K/s (soft)
+[2026-08-03T15:46:58] high_temp_rate: t=0.3s max|dT/dt|=511K/s (soft)
+[2026-08-03T15:47:07] run_end: status=completed

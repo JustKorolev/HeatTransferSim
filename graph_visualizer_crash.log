@@ -9455,3 +9455,246 @@ FileNotFoundError: Graph folder is incomplete/corrupted. Missing: graph3d.json
 [2026-07-30T14:55:38] editor refresh_all after viewer.draw
 [2026-07-30T14:55:38] editor refresh_all complete
 [2026-07-30T14:55:38] editor load_graph refresh_all complete
+[2026-08-03T15:22:52] crash diagnostics enabled path='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graph_visualizer_crash.log'
+[2026-08-03T15:22:57] editor refresh_all start nodes='0' edges='0' reset_camera='True'
+[2026-08-03T15:22:57] editor refresh_all visible nodes visible='0'
+[2026-08-03T15:22:57] editor refresh_all before viewer.draw
+[2026-08-03T15:22:57] pyvista draw start nodes='0' edges='0' reset_camera='True'
+[2026-08-03T15:22:57] pyvista draw visible prepared visible='0'
+[2026-08-03T15:22:58] pyvista draw complete
+[2026-08-03T15:22:58] editor refresh_all after viewer.draw
+[2026-08-03T15:22:58] editor refresh_all complete
+[2026-08-03T15:22:58] GraphVisualizerApp initialized crash_log='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graph_visualizer_crash.log'
+[2026-08-03T15:22:58] editor refresh_all start nodes='0' edges='0' reset_camera='True'
+[2026-08-03T15:22:58] editor refresh_all visible nodes visible='0'
+[2026-08-03T15:22:58] editor refresh_all before viewer.draw
+[2026-08-03T15:22:58] pyvista draw start nodes='0' edges='0' reset_camera='True'
+[2026-08-03T15:22:58] pyvista draw visible prepared visible='0'
+[2026-08-03T15:22:58] pyvista draw complete
+[2026-08-03T15:22:58] editor refresh_all after viewer.draw
+[2026-08-03T15:22:58] editor refresh_all complete
+[2026-08-03T15:23:17] simulation load_selected_graph start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\CRYOSTAT_V2'
+[2026-08-03T15:23:17] load_graph_folder start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\CRYOSTAT_V2'
+[2026-08-03T15:23:17] load_graph_folder read octree graph.json
+[2026-08-03T15:24:22] load_graph_folder parsed octree graph nodes='471412' edges='1078997'
+[2026-08-03T15:24:23] load_graph_folder model validated nodes='471412' edges='1078997'
+[2026-08-03T15:24:23] load_graph_folder load octree matrix payload
+[2026-08-03T15:24:24] load_octree_matrix_payload sparse path nodes='471412'
+[2026-08-03T15:24:28] load_graph_folder refresh octree auto geometry
+[2026-08-03T15:24:28] load_graph_folder preserve saved octree radiation
+[2026-08-03T15:24:28] load_graph_folder matrices validated keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']" has_dense_G='False' L_type='csr_matrix'
+[2026-08-03T15:24:28] load_graph_folder complete folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\CRYOSTAT_V2'
+[2026-08-03T15:24:28] simulation load_selected_graph loaded folder nodes='471412' edges='1078997' matrix_keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']"
+[2026-08-03T15:24:29] simulation load_selected_graph before draw
+[2026-08-03T15:24:29] simulation draw_current start nodes='471412' edges='1078997' reset_camera='True'
+[2026-08-03T15:24:29] pyvista draw start nodes='471412' edges='1078997' reset_camera='True'
+[2026-08-03T15:24:38] pyvista draw visible prepared visible='441491'
+[2026-08-03T15:24:38] pyvista draw using batched renderer visible='441491'
+[2026-08-03T15:24:38] pyvista draw_batched build mesh start visible='441491'
+[2026-08-03T15:24:42] pyvista draw_batched hex surface cells='441491' surface_faces='649826'
+[2026-08-03T15:24:42] pyvista draw_batched add_mesh scalar
+[2026-08-03T15:24:42] pyvista draw_batched complete
+[2026-08-03T15:24:42] pyvista draw batched mesh complete
+[2026-08-03T15:24:42] pyvista draw overlays complete
+[2026-08-03T15:24:42] pyvista draw finish_scene complete
+[2026-08-03T15:24:42] simulation draw_current viewer.draw complete
+[2026-08-03T15:24:42] simulation draw_current complete
+[2026-08-03T15:24:42] simulation load_selected_graph after draw
+[2026-08-03T15:26:04] load_graph_folder start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\CRYOSTAT_V2'
+[2026-08-03T15:26:04] load_graph_folder read octree graph.json
+[2026-08-03T15:27:02] load_graph_folder parsed octree graph nodes='471412' edges='1078997'
+[2026-08-03T15:27:04] load_graph_folder model validated nodes='471412' edges='1078997'
+[2026-08-03T15:27:04] load_graph_folder load octree matrix payload
+[2026-08-03T15:27:05] load_octree_matrix_payload sparse path nodes='471412'
+[2026-08-03T15:27:07] load_graph_folder refresh octree auto geometry
+[2026-08-03T15:27:07] load_graph_folder preserve saved octree radiation
+[2026-08-03T15:27:07] load_graph_folder matrices validated keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']" has_dense_G='False' L_type='csr_matrix'
+[2026-08-03T15:27:07] load_graph_folder complete folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\CRYOSTAT_V2'
+[2026-08-03T15:27:15] headless simulation complete out='simulations\\CRYOSTAT_V2\\20260803-152604'
+[2026-08-03T15:41:56] load_graph_folder start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\CRYOSTAT_V2'
+[2026-08-03T15:41:56] load_graph_folder read octree graph.json
+[2026-08-03T15:42:53] load_graph_folder parsed octree graph nodes='471412' edges='1078997'
+[2026-08-03T15:42:55] load_graph_folder model validated nodes='471412' edges='1078997'
+[2026-08-03T15:42:55] load_graph_folder load octree matrix payload
+[2026-08-03T15:42:56] load_octree_matrix_payload sparse path nodes='471412'
+[2026-08-03T15:42:57] load_graph_folder refresh octree auto geometry
+[2026-08-03T15:42:57] load_graph_folder preserve saved octree radiation
+[2026-08-03T15:42:58] load_graph_folder matrices validated keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']" has_dense_G='False' L_type='csr_matrix'
+[2026-08-03T15:42:58] load_graph_folder complete folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\CRYOSTAT_V2'
+[2026-08-03T15:43:08] headless simulation complete out='simulations\\CRYOSTAT_V2\\20260803-154156'
+[2026-08-03T16:02:27] crash diagnostics enabled path='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graph_visualizer_crash.log'
+[2026-08-03T16:02:28] uncaught exception error='KeyboardInterrupt()'
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\main.py", line 13, in <module>
+    main()
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\main.py", line 9, in main
+    GraphVisualizerApp().show()
+    ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\app.py", line 137, in __init__
+    self._build_layout()
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\app.py", line 271, in _build_layout
+    self.viewer = GraphPyVistaWidget(
+                  ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\pyvista_widget.py", line 64, in __init__
+    self.plotter = self.QtInteractor(parent)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\andre\AppData\Local\Programs\Python\Python311\Lib\site-packages\pyvistaqt\plotting.py", line 225, in __init__
+    QVTKRenderWindowInteractor.__init__(self, **qvtk_kwargs)
+  File "C:\Users\andre\AppData\Local\Programs\Python\Python311\Lib\site-packages\pyvistaqt\rwi.py", line 383, in __init__
+    self._RenderWindow = vtkRenderWindow()
+                         ^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+[2026-08-03T16:02:29] crash diagnostics enabled path='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graph_visualizer_crash.log'
+[2026-08-03T16:02:32] editor refresh_all start nodes='0' edges='0' reset_camera='True'
+[2026-08-03T16:02:32] editor refresh_all visible nodes visible='0'
+[2026-08-03T16:02:32] editor refresh_all before viewer.draw
+[2026-08-03T16:02:32] pyvista draw start nodes='0' edges='0' reset_camera='True'
+[2026-08-03T16:02:32] pyvista draw visible prepared visible='0'
+[2026-08-03T16:02:32] pyvista draw complete
+[2026-08-03T16:02:32] editor refresh_all after viewer.draw
+[2026-08-03T16:02:32] editor refresh_all complete
+[2026-08-03T16:02:32] GraphVisualizerApp initialized crash_log='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graph_visualizer_crash.log'
+[2026-08-03T16:02:32] editor refresh_all start nodes='0' edges='0' reset_camera='True'
+[2026-08-03T16:02:32] editor refresh_all visible nodes visible='0'
+[2026-08-03T16:02:32] editor refresh_all before viewer.draw
+[2026-08-03T16:02:32] pyvista draw start nodes='0' edges='0' reset_camera='True'
+[2026-08-03T16:02:32] pyvista draw visible prepared visible='0'
+[2026-08-03T16:02:32] pyvista draw complete
+[2026-08-03T16:02:32] editor refresh_all after viewer.draw
+[2026-08-03T16:02:32] editor refresh_all complete
+[2026-08-03T16:02:40] simulation load_selected_graph start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-03T16:02:40] load_graph_folder start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-03T16:02:40] load_graph_folder read octree graph.json
+[2026-08-03T16:03:53] load_graph_folder parsed octree graph nodes='1015717' edges='2529818'
+[2026-08-03T16:03:55] load_graph_folder model validated nodes='1015717' edges='2529818'
+[2026-08-03T16:03:55] load_graph_folder load octree matrix payload
+[2026-08-03T16:03:57] load_octree_matrix_payload sparse path nodes='1015717'
+[2026-08-03T16:04:00] load_graph_folder refresh octree auto geometry
+[2026-08-03T16:04:04] load_graph_folder preserve saved octree radiation
+[2026-08-03T16:04:05] load_graph_folder matrices validated keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']" has_dense_G='False' L_type='csr_matrix'
+[2026-08-03T16:04:05] load_graph_folder complete folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-03T16:04:05] simulation load_selected_graph loaded folder nodes='1015717' edges='2529818' matrix_keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']"
+[2026-08-03T16:04:07] simulation load_selected_graph before draw
+[2026-08-03T16:04:07] simulation draw_current start nodes='1015717' edges='2529818' reset_camera='True'
+[2026-08-03T16:04:08] pyvista draw start nodes='1015717' edges='2529818' reset_camera='True'
+[2026-08-03T16:04:21] pyvista draw visible prepared visible='662386'
+[2026-08-03T16:04:21] pyvista draw using batched renderer visible='662386'
+[2026-08-03T16:04:21] pyvista draw_batched build mesh start visible='662386'
+[2026-08-03T16:04:27] pyvista draw_batched hex surface cells='662386' surface_faces='966556'
+[2026-08-03T16:04:27] pyvista draw_batched add_mesh scalar
+[2026-08-03T16:04:27] pyvista draw_batched complete
+[2026-08-03T16:04:27] pyvista draw batched mesh complete
+[2026-08-03T16:04:28] pyvista draw overlays complete
+[2026-08-03T16:04:28] pyvista draw finish_scene complete
+[2026-08-03T16:04:28] simulation draw_current viewer.draw complete
+[2026-08-03T16:04:28] simulation draw_current complete
+[2026-08-03T16:04:28] simulation load_selected_graph after draw
+[2026-08-03T16:11:35] simulation draw_current start nodes='1015717' edges='2529818' reset_camera='False'
+[2026-08-03T16:11:37] pyvista draw start nodes='1015717' edges='2529818' reset_camera='False'
+[2026-08-03T16:11:56] pyvista draw visible prepared visible='1015717'
+[2026-08-03T16:11:56] pyvista draw using batched renderer visible='1015717'
+[2026-08-03T16:11:56] pyvista draw_batched build mesh start visible='1015717'
+[2026-08-03T16:12:07] pyvista draw_batched hex surface cells='1015717' surface_faces='1095660'
+[2026-08-03T16:12:07] pyvista draw_batched add_mesh scalar
+[2026-08-03T16:12:07] pyvista draw_batched complete
+[2026-08-03T16:12:07] pyvista draw batched mesh complete
+[2026-08-03T16:12:08] pyvista draw overlays complete
+[2026-08-03T16:12:08] pyvista draw finish_scene complete
+[2026-08-03T16:12:08] simulation draw_current viewer.draw complete
+[2026-08-03T16:12:09] simulation draw_current complete
+[2026-08-03T16:12:09] editor refresh_all start nodes='0' edges='0' reset_camera='False'
+[2026-08-03T16:12:09] editor refresh_all visible nodes visible='0'
+[2026-08-03T16:12:09] editor refresh_all before viewer.draw
+[2026-08-03T16:12:09] pyvista draw start nodes='0' edges='0' reset_camera='False'
+[2026-08-03T16:12:09] pyvista draw visible prepared visible='0'
+[2026-08-03T16:12:09] pyvista draw complete
+[2026-08-03T16:12:09] editor refresh_all after viewer.draw
+[2026-08-03T16:12:09] editor refresh_all complete
+[2026-08-03T16:45:33] load_graph_folder start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-03T16:45:33] load_graph_folder read octree graph.json
+[2026-08-03T16:47:00] load_graph_folder parsed octree graph nodes='1015717' edges='2529818'
+[2026-08-03T16:47:03] load_graph_folder model validated nodes='1015717' edges='2529818'
+[2026-08-03T16:47:03] load_graph_folder load octree matrix payload
+[2026-08-03T16:47:05] load_octree_matrix_payload sparse path nodes='1015717'
+[2026-08-03T16:47:09] load_graph_folder refresh octree auto geometry
+[2026-08-03T16:47:14] load_graph_folder preserve saved octree radiation
+[2026-08-03T16:47:15] load_graph_folder matrices validated keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']" has_dense_G='False' L_type='csr_matrix'
+[2026-08-03T16:47:15] load_graph_folder complete folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-03T17:07:10] headless simulation complete out='simulations\\STEP_FULL_MEDIUM\\20260803-164533'
+[2026-08-04T11:24:58] crash diagnostics enabled path='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graph_visualizer_crash.log'
+[2026-08-04T11:25:01] editor refresh_all start nodes='0' edges='0' reset_camera='True'
+[2026-08-04T11:25:01] editor refresh_all visible nodes visible='0'
+[2026-08-04T11:25:01] editor refresh_all before viewer.draw
+[2026-08-04T11:25:01] pyvista draw start nodes='0' edges='0' reset_camera='True'
+[2026-08-04T11:25:01] pyvista draw visible prepared visible='0'
+[2026-08-04T11:25:01] pyvista draw complete
+[2026-08-04T11:25:01] editor refresh_all after viewer.draw
+[2026-08-04T11:25:01] editor refresh_all complete
+[2026-08-04T11:25:01] GraphVisualizerApp initialized crash_log='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graph_visualizer_crash.log'
+[2026-08-04T11:25:01] editor refresh_all start nodes='0' edges='0' reset_camera='True'
+[2026-08-04T11:25:01] editor refresh_all visible nodes visible='0'
+[2026-08-04T11:25:01] editor refresh_all before viewer.draw
+[2026-08-04T11:25:01] pyvista draw start nodes='0' edges='0' reset_camera='True'
+[2026-08-04T11:25:01] pyvista draw visible prepared visible='0'
+[2026-08-04T11:25:01] pyvista draw complete
+[2026-08-04T11:25:01] editor refresh_all after viewer.draw
+[2026-08-04T11:25:01] editor refresh_all complete
+[2026-08-04T11:26:45] simulation load_selected_graph start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-04T11:26:45] load_graph_folder start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-04T11:26:45] load_graph_folder read octree graph.json
+[2026-08-04T11:28:01] load_graph_folder parsed octree graph nodes='1015717' edges='2529818'
+[2026-08-04T11:28:03] load_graph_folder model validated nodes='1015717' edges='2529818'
+[2026-08-04T11:28:03] load_graph_folder load octree matrix payload
+[2026-08-04T11:28:05] load_octree_matrix_payload sparse path nodes='1015717'
+[2026-08-04T11:28:08] load_graph_folder refresh octree auto geometry
+[2026-08-04T11:28:13] load_graph_folder preserve saved octree radiation
+[2026-08-04T11:28:14] load_graph_folder matrices validated keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']" has_dense_G='False' L_type='csr_matrix'
+[2026-08-04T11:28:14] load_graph_folder complete folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-04T11:28:14] simulation load_selected_graph loaded folder nodes='1015717' edges='2529818' matrix_keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']"
+[2026-08-04T11:28:17] simulation load_selected_graph before draw
+[2026-08-04T11:28:17] simulation draw_current start nodes='1015717' edges='2529818' reset_camera='True'
+[2026-08-04T11:28:17] pyvista draw start nodes='1015717' edges='2529818' reset_camera='True'
+[2026-08-04T11:28:31] pyvista draw visible prepared visible='662386'
+[2026-08-04T11:28:31] pyvista draw using batched renderer visible='662386'
+[2026-08-04T11:28:31] pyvista draw_batched build mesh start visible='662386'
+[2026-08-04T11:28:37] pyvista draw_batched hex surface cells='662386' surface_faces='966556'
+[2026-08-04T11:28:37] pyvista draw_batched add_mesh scalar
+[2026-08-04T11:28:38] pyvista draw_batched complete
+[2026-08-04T11:28:38] pyvista draw batched mesh complete
+[2026-08-04T11:28:38] pyvista draw overlays complete
+[2026-08-04T11:28:38] pyvista draw finish_scene complete
+[2026-08-04T11:28:38] simulation draw_current viewer.draw complete
+[2026-08-04T11:28:38] simulation draw_current complete
+[2026-08-04T11:28:38] simulation load_selected_graph after draw
+[2026-08-04T11:28:49] editor load_graph start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-04T11:28:49] load_graph_folder start folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-04T11:28:49] load_graph_folder read octree graph.json
+[2026-08-04T11:30:08] load_graph_folder parsed octree graph nodes='1015717' edges='2529818'
+[2026-08-04T11:30:10] load_graph_folder model validated nodes='1015717' edges='2529818'
+[2026-08-04T11:30:10] load_graph_folder load octree matrix payload
+[2026-08-04T11:30:12] load_octree_matrix_payload sparse path nodes='1015717'
+[2026-08-04T11:30:15] load_graph_folder refresh octree auto geometry
+[2026-08-04T11:30:20] load_graph_folder preserve saved octree radiation
+[2026-08-04T11:30:21] load_graph_folder matrices validated keys="['C', 'G_rad', 'Grad', 'L', 'coords', 'initial_temperature_K', 'node_ids']" has_dense_G='False' L_type='csr_matrix'
+[2026-08-04T11:30:21] load_graph_folder complete folder='C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM'
+[2026-08-04T11:30:21] editor load_graph loaded folder nodes='1015717' edges='2529818'
+[2026-08-04T11:30:21] editor load_graph refreshed sensor connections
+[2026-08-04T11:30:24] editor load_graph before refresh_all
+[2026-08-04T11:30:24] editor refresh_all start nodes='1015717' edges='2529818' reset_camera='True'
+[2026-08-04T11:30:26] editor refresh_all visible nodes visible='662386'
+[2026-08-04T11:30:26] editor refresh_all before viewer.draw
+[2026-08-04T11:30:26] pyvista draw start nodes='1015717' edges='2529818' reset_camera='True'
+[2026-08-04T11:30:39] pyvista draw visible prepared visible='662386'
+[2026-08-04T11:30:39] pyvista draw using batched renderer visible='662386'
+[2026-08-04T11:30:39] pyvista draw_batched build mesh start visible='662386'
+[2026-08-04T11:30:45] pyvista draw_batched hex surface cells='662386' surface_faces='966556'
+[2026-08-04T11:30:45] pyvista draw_batched add_mesh rgb
+[2026-08-04T11:30:45] pyvista draw_batched complete
+[2026-08-04T11:30:45] pyvista draw batched mesh complete
+[2026-08-04T11:30:45] pyvista draw overlays complete
+[2026-08-04T11:30:46] pyvista draw finish_scene complete
+[2026-08-04T11:30:46] editor refresh_all after viewer.draw
+[2026-08-04T11:30:46] editor refresh_all complete
+[2026-08-04T11:30:46] editor load_graph refresh_all complete

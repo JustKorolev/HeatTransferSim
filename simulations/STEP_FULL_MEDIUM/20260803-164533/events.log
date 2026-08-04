@@ -1,0 +1,3 @@
+[2026-08-03T16:45:33] run_start: graph=STEP_FULL_MEDIUM out=simulations\STEP_FULL_MEDIUM\20260803-164533
+[2026-08-03T16:47:24] prepared: nodes=1015717 sensors=91 heaters=27 cryo=0 controller=yes
+[2026-08-03T17:07:05] run_end: status=cancelled

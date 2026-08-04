@@ -1,0 +1,26 @@
+{
+  "graph_folder": "graphs\\CRYOSTAT_V2",
+  "output_root": "simulations",
+  "controller_path": null,
+  "allow_no_controller": false,
+  "setpoints_K": {},
+  "global_setpoint_K": null,
+  "dt_s": 1.0,
+  "t_final_s": 20.0,
+  "gpu_solver_enabled": false,
+  "log_interval_steps": 1,
+  "snapshot_interval_s": 5.0,
+  "checkpoint_interval_s": 1000.0,
+  "status_interval_steps": 20,
+  "seed": 0,
+  "notes": "",
+  "thresholds": {
+    "max_temperature_K": 10000.0,
+    "min_temperature_K": 0.0,
+    "max_temperature_rate_K_per_s": 500.0,
+    "energy_drift_rel_tol": 0.05,
+    "forbid_negative_heater_power": true,
+    "max_dt_retries": 6,
+    "step_wall_timeout_s": 0.0
+  }
+}

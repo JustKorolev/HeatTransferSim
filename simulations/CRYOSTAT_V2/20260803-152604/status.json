@@ -1,0 +1,10 @@
+{
+  "status": "error: UnboundLocalError: cannot access local variable 'accepted' where it is not associated with a value",
+  "step": 0,
+  "sim_time_s": 0.0,
+  "t_final_s": 10000.0,
+  "progress": 0.0,
+  "wall_elapsed_s": 69.87441682815552,
+  "eta_s": NaN,
+  "updated": "2026-08-03T15:27:14"
+}

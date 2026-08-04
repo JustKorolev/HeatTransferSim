@@ -1,0 +1,9 @@
+{
+  "graph_name": "STEP_FULL_MEDIUM",
+  "graph_folder": "C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\STEP_FULL_MEDIUM",
+  "graph_hash": "C.npy:8125864:1785798086|L_sparse.json:227996875:1785798100|node_ids.npy:8125864:1785798100|graph.json:2023083505:1785798099|nodes.csv:443683051:1785798103",
+  "git_commit": "5403b7db9de7d41f365f010a928b0a128da3ba91",
+  "python": "3.11.6",
+  "started": "2026-08-03T16:45:33",
+  "seed": 0
+}

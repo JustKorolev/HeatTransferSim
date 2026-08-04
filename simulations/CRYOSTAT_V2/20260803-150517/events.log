@@ -1,0 +1,5 @@
+[2026-08-03T15:05:17] run_start: graph=CRYOSTAT_V2 out=simulations\CRYOSTAT_V2\20260803-150517
+[2026-08-03T15:06:43] prepared: nodes=471412 sensors=72 heaters=33 cryo=536 controller=yes
+[2026-08-03T15:06:53] energy_drift: t=3.0s drift=0.068 (net=-217W dU/dt=-232W)
+[2026-08-03T15:06:55] energy_drift: t=4.0s drift=0.063 (net=-203W dU/dt=-217W)
+[2026-08-03T15:07:17] run_end: status=completed

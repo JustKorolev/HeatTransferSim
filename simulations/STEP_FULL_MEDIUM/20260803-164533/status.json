@@ -1,0 +1,13 @@
+{
+  "status": "cancelled",
+  "step": 317,
+  "sim_time_s": 317.0,
+  "t_final_s": 3600.0,
+  "progress": 0.08805555555555555,
+  "wall_elapsed_s": 1292.0006687641144,
+  "eta_s": 13380.562131080718,
+  "updated": "2026-08-03T17:07:05",
+  "last_rms_tracking_error_K": 238.1497456597418,
+  "last_max_temp_K": 293.15000000004414,
+  "last_power_in_W": 0.0
+}

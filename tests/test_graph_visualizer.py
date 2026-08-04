@@ -5581,5 +5581,71 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
 
 
+class AdaptiveFeedforwardRLSTest(unittest.TestCase):
+    """Unit tests for the modal controller's adaptive-feedforward RLS step
+    (`_rls_ff_update`): the online learner that corrects the exact-DC-gain
+    feedforward map from the integral's steady-state holding power."""
+
+    def test_recovers_known_correction_matrix(self) -> None:
+        # Ground truth: the model's inverse-DC-gain is wrong by dM_true. At any
+        # steady setpoint r the integral holds exactly (dM_true - dM) @ r -- the
+        # part the current feedforward correction dM does not yet supply. Feed that
+        # deficit to the learner across a spanning set of setpoints and it must
+        # recover dM_true (and thereby drive the residual deficit to zero).
+        from graph_visualizer.simulation_model import _rls_ff_update
+
+        dM_true = np.array([[0.7, -0.2], [0.1, 0.5]], dtype=float)
+        n = dM_true.shape[1]
+        forgetting = 0.9
+        P = 1.0 * np.eye(n)
+        dM = np.zeros_like(dM_true)
+        setpoints = [
+            np.array([1.0, 0.0]),
+            np.array([0.0, 1.0]),
+            np.array([1.0, 1.0]),
+            np.array([2.0, -1.0]),
+        ]
+        for k in range(600):
+            r = setpoints[k % len(setpoints)]
+            deficit = (dM_true - dM) @ r  # what the plant integral would hold
+            P, dM, _integral_after, _alpha = _rls_ff_update(P, dM, r, deficit, forgetting)
+
+        np.testing.assert_allclose(dM, dM_true, atol=1.0e-3)
+        # Residual deficit at each trained setpoint is essentially zero.
+        for r in setpoints:
+            self.assertLess(float(np.max(np.abs((dM_true - dM) @ r))), 1.0e-3)
+
+    def test_transfer_is_bumpless(self) -> None:
+        # The core invariant: the feedforward gained at THIS setpoint equals the
+        # amount removed from the integral, so the delivered command is unchanged.
+        from graph_visualizer.simulation_model import _rls_ff_update
+
+        P = np.array([[2.0, 0.3], [0.3, 1.5]])
+        dM = np.array([[0.1, 0.0], [0.0, -0.2]])
+        r = np.array([1.5, -0.5])
+        integral = np.array([3.0, -1.0])
+        P_new, dM_new, integral_new, alpha = _rls_ff_update(P, dM, r, integral, 0.98)
+
+        self.assertGreaterEqual(alpha, 0.0)
+        self.assertLess(alpha, 1.0)
+        ff_gain = (dM_new - dM) @ r          # feedforward increase at this setpoint
+        removed = integral - integral_new    # authority taken out of the integral
+        np.testing.assert_allclose(ff_gain, removed, atol=1.0e-12)
+        np.testing.assert_allclose(integral_new, (1.0 - alpha) * integral, atol=1.0e-12)
+
+    def test_zero_setpoint_is_noop(self) -> None:
+        from graph_visualizer.simulation_model import _rls_ff_update
+
+        P = np.eye(2)
+        dM = np.array([[0.4, 0.1], [0.2, 0.3]])
+        integral = np.array([1.0, 2.0])
+        P_new, dM_new, integral_new, alpha = _rls_ff_update(
+            P, dM, np.zeros(2), integral, 0.99
+        )
+        self.assertEqual(alpha, 0.0)
+        np.testing.assert_array_equal(dM_new, dM)
+        np.testing.assert_array_equal(integral_new, integral)
+
+
 if __name__ == "__main__":
     unittest.main()

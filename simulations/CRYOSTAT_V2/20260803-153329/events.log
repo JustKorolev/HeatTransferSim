@@ -1,0 +1,3 @@
+[2026-08-03T15:33:29] run_start: graph=CRYOSTAT_V2 out=simulations\CRYOSTAT_V2\20260803-153329
+[2026-08-03T15:35:14] prepared: nodes=471412 sensors=72 heaters=33 cryo=536 controller=yes
+[2026-08-03T15:35:33] run_end: status=completed

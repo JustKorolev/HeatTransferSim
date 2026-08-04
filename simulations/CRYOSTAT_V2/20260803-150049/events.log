@@ -1,0 +1,23 @@
+[2026-08-03T15:00:49] run_start: graph=CRYOSTAT_V2 out=simulations\CRYOSTAT_V2\20260803-150049
+[2026-08-03T15:01:56] prepared: nodes=471412 sensors=72 heaters=33 cryo=536 controller=yes
+[2026-08-03T15:01:59] energy_drift: t=1.0s drift=1.000 (Pin-Pout=0W dU/dt=-332W)
+[2026-08-03T15:02:02] energy_drift: t=2.0s drift=1.000 (Pin-Pout=0W dU/dt=-241W)
+[2026-08-03T15:02:05] energy_drift: t=3.0s drift=1.000 (Pin-Pout=0W dU/dt=-232W)
+[2026-08-03T15:02:08] energy_drift: t=4.0s drift=1.000 (Pin-Pout=0W dU/dt=-217W)
+[2026-08-03T15:02:11] energy_drift: t=5.0s drift=1.000 (Pin-Pout=0W dU/dt=-204W)
+[2026-08-03T15:02:14] energy_drift: t=6.0s drift=1.000 (Pin-Pout=0W dU/dt=-198W)
+[2026-08-03T15:02:16] energy_drift: t=7.0s drift=1.000 (Pin-Pout=0W dU/dt=-195W)
+[2026-08-03T15:02:19] energy_drift: t=8.0s drift=1.000 (Pin-Pout=0W dU/dt=-192W)
+[2026-08-03T15:02:22] energy_drift: t=9.0s drift=1.000 (Pin-Pout=0W dU/dt=-189W)
+[2026-08-03T15:02:24] energy_drift: t=10.0s drift=1.000 (Pin-Pout=0W dU/dt=-187W)
+[2026-08-03T15:02:27] energy_drift: t=11.0s drift=1.000 (Pin-Pout=0W dU/dt=-184W)
+[2026-08-03T15:02:30] energy_drift: t=12.0s drift=1.000 (Pin-Pout=0W dU/dt=-182W)
+[2026-08-03T15:02:32] energy_drift: t=13.0s drift=1.000 (Pin-Pout=0W dU/dt=-180W)
+[2026-08-03T15:02:35] energy_drift: t=14.0s drift=1.000 (Pin-Pout=0W dU/dt=-178W)
+[2026-08-03T15:02:37] energy_drift: t=15.0s drift=1.000 (Pin-Pout=0W dU/dt=-176W)
+[2026-08-03T15:02:40] energy_drift: t=16.0s drift=1.000 (Pin-Pout=0W dU/dt=-174W)
+[2026-08-03T15:02:43] energy_drift: t=17.0s drift=1.000 (Pin-Pout=0W dU/dt=-173W)
+[2026-08-03T15:02:45] energy_drift: t=18.0s drift=1.000 (Pin-Pout=0W dU/dt=-171W)
+[2026-08-03T15:02:48] energy_drift: t=19.0s drift=1.000 (Pin-Pout=0W dU/dt=-169W)
+[2026-08-03T15:02:51] energy_drift: t=20.0s drift=1.000 (Pin-Pout=0W dU/dt=-168W)
+[2026-08-03T15:02:54] run_end: status=completed

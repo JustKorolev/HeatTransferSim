@@ -1,0 +1,11 @@
+[2026-08-03T15:41:56] run_start: graph=CRYOSTAT_V2 out=simulations\CRYOSTAT_V2\20260803-154156
+[2026-08-03T15:43:02] prepared: nodes=471412 sensors=72 heaters=33 cryo=536 controller=yes
+[2026-08-03T15:43:04] step_rejected: step=0 dt=0.2: |dT/dt| 576K/s > 500
+[2026-08-03T15:43:05] step_rejected: step=0 dt=0.1: |dT/dt| 1.15e+03K/s > 500
+[2026-08-03T15:43:05] step_rejected: step=0 dt=0.05: |dT/dt| 2.3e+03K/s > 500
+[2026-08-03T15:43:05] step_rejected: step=0 dt=0.025: |dT/dt| 4.61e+03K/s > 500
+[2026-08-03T15:43:05] step_rejected: step=0 dt=0.0125: |dT/dt| 9.22e+03K/s > 500
+[2026-08-03T15:43:05] step_rejected: step=0 dt=0.00625: |dT/dt| 1.84e+04K/s > 500
+[2026-08-03T15:43:06] step_rejected: step=0 dt=0.003125: |dT/dt| 3.69e+04K/s > 500
+[2026-08-03T15:43:06] hard_failure: step 0: solver/step failed after 6 dt halvings (down to 0.0015625s). Last state checkpointed.
+[2026-08-03T15:43:06] run_end: status=failed: step 0: solver/step failed after 6 dt halvings (down to 0.0015625s). Last state checkpointed.

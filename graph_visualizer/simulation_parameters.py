@@ -70,6 +70,38 @@ class SimulationParameters:
     # Integral gain for the modal controller (offset-free + supplies the operating
     # holding power). Tunable; 0 disables integral action.
     modal_integral_gain: float = 0.02
+    # Adaptive (learning) feedforward for the modal controller. Off by default.
+    # When on, the controller uses recursive least squares to learn the model
+    # error in the exact-DC-gain feedforward map: at steady state the integral's
+    # accumulated output IS a measurement of (G_dc^-1_true - G_dc^-1_model) @ r,
+    # so we regress it against the setpoint to estimate a correction matrix dM
+    # and fold dM into the feedforward. Future (and revisited) setpoints then get
+    # the corrected holding power immediately instead of waiting minutes for the
+    # integral to re-accumulate. The transfer is bumpless (authority moves from
+    # the reactive integral to the predictive feedforward without disturbing the
+    # command). In-memory only: reset on controller reset / re-prepare, NOT
+    # persisted to the graph artifact.
+    modal_adaptive_ff_enabled: bool = False
+    # RLS forgetting factor in (0, 1]. 1.0 = growing-window least squares (no
+    # forgetting, exact but ever-more-confident); <1 lets a stale estimate fade
+    # for a slowly time-varying plant. Keep close to 1 for this slow system.
+    modal_adaptive_ff_forgetting: float = 0.999
+    # Initial RLS covariance scale (P0 = this * I over the controlled-sensor
+    # space). Larger => faster initial adaptation away from the zero-correction
+    # prior, at the cost of more sensitivity to a noisy first sample.
+    modal_adaptive_ff_p0: float = 1.0
+    # Steady-state gate. A learning sample is only taken when every controlled
+    # sensor's |dT/dt| is below rate_tol AND the max tracking error is below
+    # error_tol -- so transient or saturated data never contaminates the
+    # static-map regression.
+    modal_adaptive_ff_rate_tol_K_per_s: float = 1.0e-3
+    modal_adaptive_ff_error_tol_K: float = 0.05
+    # Projection guardrail: the learned feedforward correction |dM @ r_sp| is
+    # clamped, per heater, to this fraction of that heater's max power, so a bad
+    # sample cannot drive the feedforward to an unphysical value. The effective
+    # feedforward is clamped to [0, u_max] regardless. 0 disables the learned
+    # correction's authority entirely.
+    modal_adaptive_ff_max_correction_frac: float = 1.0
     enabled_heater_node_ids: tuple[int, ...] | None = None
     enabled_sensor_node_ids: tuple[int, ...] | None = None
     autoscale_temperature: bool = True

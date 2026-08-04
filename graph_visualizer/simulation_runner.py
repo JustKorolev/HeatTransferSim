@@ -27,7 +27,7 @@ import subprocess
 import sys
 import time
 import traceback
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -64,6 +64,18 @@ class RunConfig:
     dt_s: float = 1.0
     t_final_s: float = 3600.0
     gpu_solver_enabled: bool = True
+    # Full physics/parameter override. When set (e.g. from the GUI parameter panel),
+    # the run uses THESE parameters instead of minimal defaults -- so temperature-
+    # dependent properties, radiation, cryocooler config, adaptive substeps, contact
+    # conductance etc. match what the user configured. The controller wiring
+    # (scheme / path / input_mode) is still enforced by the runner. None => the
+    # legacy minimal-default construction (backward compatible for the CLI).
+    params: SimulationParameters | None = None
+    # Uniform start temperature applied to every node, overriding the graph's saved
+    # initial temps (the CLI shortcut for "set the whole system to X K"). For an
+    # arbitrary per-node starting state the runner takes an explicit initial_state
+    # argument (see SimulationRunner.__init__); that takes precedence over this.
+    initial_temperature_uniform_K: float | None = None
     log_interval_steps: int = 1
     snapshot_interval_s: float = 300.0
     checkpoint_interval_s: float = 600.0  # wall-clock seconds between checkpoints
@@ -116,10 +128,17 @@ class SimulationRunner:
         config: RunConfig,
         cancel_event: Any | None = None,
         progress_cb: Callable[[dict], None] | None = None,
+        initial_state: tuple[Any, Any] | None = None,
     ) -> None:
         self.cfg = config
         self.cancel_event = cancel_event  # anything with .is_set(); optional
         self.progress_cb = progress_cb
+        # Optional explicit starting state: (node_ids, temperatures_K) captured from
+        # the caller's in-memory model, so the run starts from what the user is
+        # looking at rather than the graph's saved-on-disk temperatures. Passed out
+        # of band (not through RunConfig) so a million-node vector never bloats
+        # config.json. Takes precedence over cfg.initial_temperature_uniform_K.
+        self._initial_state = initial_state
         self.graph_folder = Path(config.graph_folder)
         self.graph_name = self.graph_folder.name
         self.out_dir = Path(config.output_root) / self.graph_name / _timestamp()
@@ -184,16 +203,23 @@ class SimulationRunner:
         sensors = [int(nid) for nid, n in model.nodes.items() if getattr(n, "is_sensor", False)]
         self._apply_setpoints(model, sensors)
 
-        params = SimulationParameters(
-            dt_s=float(self.cfg.dt_s),
-            t_final_s=float(self.cfg.t_final_s),
-            gpu_solver_enabled=bool(self.cfg.gpu_solver_enabled),
-            input_mode="heater_inputs" if has_controller else "zero",
-            mimo_controller_enabled=has_controller,
-            mimo_controller_scheme="modal_lqr" if has_controller else "pid_qp",
-            modal_controller_path=controller_path or "",
-        )
+        params = self._resolve_params(has_controller, controller_path)
         prepared = simulation_model.prepare_simulation(model, matrices, params)
+
+        # Override the starting temperatures with the caller's in-memory state (or a
+        # uniform value) so the run begins from what the user set, not the graph's
+        # saved-on-disk temps. Done BEFORE _resume_if_checkpoint so a genuine resume
+        # still wins. Both the working state (set_temperatures) and the baseline
+        # (initial_temperatures_K, used for prev-step metrics) are updated.
+        init_override = self._resolve_initial_temperatures(prepared)
+        if init_override is not None:
+            prepared.initial_temperatures_K = init_override
+            prepared.set_temperatures(init_override)
+            self._log_event(
+                "initial_state",
+                f"start temperatures overridden: min={float(init_override.min()):.2f} "
+                f"mean={float(init_override.mean()):.2f} max={float(init_override.max()):.2f} K",
+            )
         C_diag = np.asarray(matrices["C"], dtype=float).reshape(-1)
         heaters = [int(x) for x in getattr(prepared, "heater_node_ids", ())]
         cryo_idx = [
@@ -216,6 +242,52 @@ class SimulationRunner:
         for sid, target in (self.cfg.setpoints_K or {}).items():
             if int(sid) in model.nodes:
                 model.nodes[int(sid)].controller_setpoint_K = float(target)
+
+    def _resolve_params(self, has_controller: bool, controller_path: str | None) -> SimulationParameters:
+        """The parameters the run uses. When the caller supplied a full
+        SimulationParameters we keep its physics (tdep properties, radiation,
+        cryocooler, substeps, ...) and only enforce the controller wiring; otherwise
+        we build the legacy minimal defaults."""
+        controller_fields = dict(
+            dt_s=float(self.cfg.dt_s),
+            t_final_s=float(self.cfg.t_final_s),
+            gpu_solver_enabled=bool(self.cfg.gpu_solver_enabled),
+            input_mode=(
+                "heater_inputs" if has_controller
+                else ("zero" if self.cfg.params is None else self.cfg.params.input_mode)
+            ),
+            mimo_controller_enabled=has_controller,
+            mimo_controller_scheme="modal_lqr" if has_controller else "pid_qp",
+            modal_controller_path=controller_path or "",
+        )
+        if self.cfg.params is not None:
+            return replace(self.cfg.params, **controller_fields)
+        return SimulationParameters(**controller_fields)
+
+    def _resolve_initial_temperatures(self, prepared) -> np.ndarray | None:
+        """Starting temperature vector (ordered like ``prepared.node_ids``), or None
+        to keep the graph's loaded temps. Explicit per-node ``initial_state`` wins
+        over the uniform-scalar config field."""
+        node_ids = np.asarray(prepared.node_ids, dtype=int).reshape(-1)
+        if self._initial_state is not None:
+            ids = np.asarray(self._initial_state[0], dtype=int).reshape(-1)
+            temps = np.asarray(self._initial_state[1], dtype=float).reshape(-1)
+            if ids.shape != temps.shape:
+                self._log_event("initial_state", "ignored: node_ids/temperatures length mismatch")
+            elif np.array_equal(ids, node_ids):
+                return temps.copy()  # same order as the reloaded graph (the common case)
+            else:
+                # Different ordering: map by node id, keeping the graph's own temp
+                # for any node not supplied.
+                mapping = dict(zip(ids.tolist(), temps.tolist()))
+                base = np.asarray(prepared.initial_temperatures_K, dtype=float).reshape(-1)
+                return np.array(
+                    [mapping.get(int(nid), float(base[i])) for i, nid in enumerate(node_ids)],
+                    dtype=float,
+                )
+        if self.cfg.initial_temperature_uniform_K is not None:
+            return np.full(node_ids.size, float(self.cfg.initial_temperature_uniform_K), dtype=float)
+        return None
 
     # -- main loop ---------------------------------------------------------- #
     def _simulate(self, prepared, params, C_diag, sensors, heaters, cryo_idx) -> None:
@@ -458,18 +530,34 @@ class SimulationRunner:
     # -- finalize ----------------------------------------------------------- #
     def _write_config_and_provenance(self) -> None:
         _atomic_write_json(self.out_dir / "config.json", asdict(self.cfg))
-        _atomic_write_json(
-            self.out_dir / "provenance.json",
-            {
-                "graph_name": self.graph_name,
-                "graph_folder": str(self.graph_folder),
-                "graph_hash": _graph_hash(self.graph_folder),
-                "git_commit": _git_commit(),
-                "python": sys.version.split()[0],
-                "started": datetime.now().isoformat(timespec="seconds"),
-                "seed": self.cfg.seed,
-            },
-        )
+        provenance = {
+            "graph_name": self.graph_name,
+            "graph_folder": str(self.graph_folder),
+            "graph_hash": _graph_hash(self.graph_folder),
+            "git_commit": _git_commit(),
+            "python": sys.version.split()[0],
+            "started": datetime.now().isoformat(timespec="seconds"),
+            "seed": self.cfg.seed,
+            "params_override": self.cfg.params is not None,
+        }
+        if self._initial_state is not None:
+            try:
+                temps = np.asarray(self._initial_state[1], dtype=float)
+                provenance["initial_state"] = {
+                    "source": "in-memory model (out-of-band)",
+                    "n": int(temps.size),
+                    "min_K": float(temps.min()),
+                    "mean_K": float(temps.mean()),
+                    "max_K": float(temps.max()),
+                }
+            except Exception:  # noqa: BLE001
+                pass
+        elif self.cfg.initial_temperature_uniform_K is not None:
+            provenance["initial_state"] = {
+                "source": "uniform",
+                "temperature_K": float(self.cfg.initial_temperature_uniform_K),
+            }
+        _atomic_write_json(self.out_dir / "provenance.json", provenance)
         np.random.seed(self.cfg.seed)
 
     def _finalize(self) -> None:
@@ -505,6 +593,36 @@ class SimulationRunner:
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
 
+            def _legend(ax) -> None:
+                """Adaptive legend that fits: shrink + add columns as the series
+                count grows, and for many series (e.g. 90+ sensors) cap the entries,
+                prioritise the aggregate curves (rms/avg/max over the per-sensor
+                lines), and move it outside the axes so it never covers or overflows
+                the plot (bbox_inches='tight' grows the canvas to include it)."""
+                handles, labels = ax.get_legend_handles_labels()
+                n = len(labels)
+                if n == 0:
+                    return
+                if n <= 8:
+                    ax.legend(fontsize=7, ncol=1, loc="best")
+                    return
+                if n <= 24:
+                    ax.legend(fontsize=6, ncol=2, loc="best")
+                    return
+                # Many series: aggregates first (rms/avg/max/min/power/...), then the
+                # bulk per-sensor lines; cap and place outside on the right.
+                order = sorted(range(n), key=lambda i: (labels[i].startswith("sensor_"), i))
+                handles = [handles[i] for i in order]
+                labels = [labels[i] for i in order]
+                cap = 16
+                ax.legend(
+                    handles[:cap], labels[:cap],
+                    title=f"{n} series (first {min(cap, n)})",
+                    fontsize=5, title_fontsize=6, ncol=1,
+                    loc="center left", bbox_to_anchor=(1.01, 0.5),
+                    frameon=False, borderaxespad=0.0,
+                )
+
             def _plot(keys, title, ylabel, fname):
                 present = [k for k in keys if series.get(k)]
                 if not present or not series.get("time_s"):
@@ -514,8 +632,11 @@ class SimulationRunner:
                 for k in present:
                     ax.plot(t[: len(series[k])], series[k], label=k)
                 ax.set_xlabel("time [s]"); ax.set_ylabel(ylabel); ax.set_title(title)
-                ax.legend(fontsize=7, ncol=2); ax.grid(True, alpha=0.3)
-                fig.tight_layout(); fig.savefig(self.plots_dir / fname, dpi=110); plt.close(fig)
+                ax.grid(True, alpha=0.3)
+                _legend(ax)
+                fig.tight_layout()
+                fig.savefig(self.plots_dir / fname, dpi=110, bbox_inches="tight")
+                plt.close(fig)
                 plotted.append(fname)
 
             sensor_keys = sorted(k for k in series if k.startswith("sensor_") and k.endswith("_K"))
@@ -572,6 +693,9 @@ class _HardFailure(Exception):
 
 
 def run_simulation(config: RunConfig, cancel_event: Any | None = None,
-                   progress_cb: Callable[[dict], None] | None = None) -> Path:
+                   progress_cb: Callable[[dict], None] | None = None,
+                   initial_state: tuple[Any, Any] | None = None) -> Path:
     """Convenience entry point: run one closed-loop simulation, return its output dir."""
-    return SimulationRunner(config, cancel_event=cancel_event, progress_cb=progress_cb).run()
+    return SimulationRunner(
+        config, cancel_event=cancel_event, progress_cb=progress_cb, initial_state=initial_state
+    ).run()

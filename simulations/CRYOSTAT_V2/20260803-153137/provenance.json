@@ -1,0 +1,9 @@
+{
+  "graph_name": "CRYOSTAT_V2",
+  "graph_folder": "graphs\\CRYOSTAT_V2",
+  "graph_hash": "C.npy:3771424:1785305743|L_sparse.json:97919024:1785305746|node_ids.npy:3771424:1785184586|graph.json:1607701273:1785285074|nodes.csv:187965094:1785184581",
+  "git_commit": "eaa45aedf2724698e7ab52b6e992d1b71767884a",
+  "python": "3.11.15",
+  "started": "2026-08-03T15:31:37",
+  "seed": 0
+}

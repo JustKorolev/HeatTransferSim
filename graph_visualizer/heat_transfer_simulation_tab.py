@@ -78,6 +78,14 @@ _CONTROLLER_PARAMETER_FIELDS = {
     "derivative_dt_floor_s",
     "mimo_integral_abs_max",
     "mimo_freeze_integral_when_saturated",
+    # Adaptive feedforward: pure controller behavior (no plant-matrix change), so
+    # these hot-swap during a running sim like the other controller knobs.
+    "modal_adaptive_ff_enabled",
+    "modal_adaptive_ff_forgetting",
+    "modal_adaptive_ff_p0",
+    "modal_adaptive_ff_rate_tol_K_per_s",
+    "modal_adaptive_ff_error_tol_K",
+    "modal_adaptive_ff_max_correction_frac",
 }
 _CONTROLLER_RUNTIME_HOTSWAP_FIELDS = set(_CONTROLLER_PARAMETER_FIELDS)
 _LIGHTWEIGHT_RUNTIME_PARAMETER_FIELDS = {
@@ -1224,6 +1232,15 @@ class HeatTransferSimulationTab:
             for nid, node in self.model.nodes.items()
             if getattr(node, "is_sensor", False)
         }
+        # Capture the CURRENT in-memory starting temperatures so the headless run
+        # begins from what the user is looking at (e.g. "Set all -> 50 K"). The
+        # runner reloads the graph folder from disk, which would otherwise revert to
+        # the saved-on-disk temps; passing the state explicitly keeps them in sync.
+        node_ids = np.asarray(self.model.ordered_node_ids(), dtype=int)
+        init_temps = np.array(
+            [float(getattr(self.model.nodes[int(nid)], "initial_temperature_K", 293.15)) for nid in node_ids],
+            dtype=float,
+        )
         ctrl = self._modal_controller_path()
         cfg = RunConfig(
             graph_folder=str(self.folder),
@@ -1233,9 +1250,15 @@ class HeatTransferSimulationTab:
             dt_s=float(self.params.dt_s),
             t_final_s=float(self.params.t_final_s),
             gpu_solver_enabled=bool(self.params.gpu_solver_enabled),
+            # Forward the FULL parameter set so the headless run uses the same physics
+            # (tdep properties, radiation, cryocooler, substeps, ...) as the GUI --
+            # not the runner's minimal defaults.
+            params=self.params,
         )
         self._headless_cancel = threading.Event()
-        self._headless_runner = SimulationRunner(cfg, cancel_event=self._headless_cancel)
+        self._headless_runner = SimulationRunner(
+            cfg, cancel_event=self._headless_cancel, initial_state=(node_ids, init_temps)
+        )
         out_dir = self._headless_runner.out_dir
 
         def _target() -> None:
@@ -1520,6 +1543,47 @@ class HeatTransferSimulationTab:
             "power the linearized model omits."
         )
         design_form.addRow("integral gain", self.modal_integral_spin)
+        # Adaptive (learning) feedforward: online RLS correction of the exact-DC-gain
+        # feedforward from the integral's steady-state holding power. Off by default;
+        # all of these hot-swap during a running sim (they only change controller
+        # behavior, not the plant matrices).
+        self.inputs["modal_adaptive_ff_enabled"] = self._checkbox(
+            "Adaptive feedforward (RLS)",
+            bool(getattr(self.params, "modal_adaptive_ff_enabled", False)),
+            lambda *_: self._handle_parameter_change("modal_adaptive_ff_enabled"),
+        )
+        self.inputs["modal_adaptive_ff_enabled"].setToolTip(
+            "Learn the DC-gain error the model got wrong: regress the integral's steady-state "
+            "holding power against the setpoint (recursive least squares) and fold the correction "
+            "into the feedforward, so revisited setpoints get the right holding power immediately "
+            "instead of waiting for the integral. Bumpless; in-memory only (reset on re-prepare)."
+        )
+        design_form.addRow(self.inputs["modal_adaptive_ff_enabled"])
+        self._add_double_parameter(
+            design_form, "modal_adaptive_ff_forgetting", "adaptive forgetting", 0.5, 1.0, 0.001
+        )
+        self.inputs["modal_adaptive_ff_forgetting"].setToolTip(
+            "RLS forgetting factor in (0, 1]. 1 = growing-window (exact, ever-more-confident); "
+            "<1 lets a stale estimate fade for a slowly time-varying plant. Keep near 1."
+        )
+        self._add_double_parameter(
+            design_form, "modal_adaptive_ff_error_tol_K", "adaptive error tol K", 0.0, 1.0e6, 0.01
+        )
+        self._add_double_parameter(
+            design_form, "modal_adaptive_ff_rate_tol_K_per_s", "adaptive rate tol K/s", 0.0, 1.0e6, 1.0e-4
+        )
+        self.inputs["modal_adaptive_ff_error_tol_K"].setToolTip(
+            "Steady-state gate: a learning sample is only taken when every controlled sensor's "
+            "tracking error is below this AND its |dT/dt| is below the rate tolerance -- so "
+            "transient or saturated data never corrupts the static-map regression."
+        )
+        self._add_double_parameter(
+            design_form, "modal_adaptive_ff_max_correction_frac", "adaptive max corr frac", 0.0, 1.0e6, 0.1
+        )
+        self.inputs["modal_adaptive_ff_max_correction_frac"].setToolTip(
+            "Projection guard: the learned feedforward correction is clamped, per heater, to this "
+            "fraction of its max power (the effective command is clamped to [0, max] regardless)."
+        )
         self.modal_design_button = self.QtWidgets.QPushButton("Build && Use Modal Controller")
         self.modal_design_button.setToolTip(
             "Reduce the CURRENT graph to a reduced-order LQR controller and load it into the "

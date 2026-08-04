@@ -570,6 +570,9 @@ class PreparedSimulation:
         self.controller_last_power_by_heater = {}
         self.controller_allocator_diagnostics = {}
         self.controller_modal_integral = None
+        self.controller_modal_ff_correction = None
+        self._modal_ff_rls_P = None
+        self._modal_ff_prev_y_dev = None
         self.controller_dynamic_gain_cache = {}
 
     def mark_controller_stale(self) -> None:
@@ -577,6 +580,9 @@ class PreparedSimulation:
         self.controller_last_power_by_heater = {}
         self.controller_allocator_diagnostics = {}
         self.controller_modal_integral = None
+        self.controller_modal_ff_correction = None
+        self._modal_ff_rls_P = None
+        self._modal_ff_prev_y_dev = None
         self.controller_dynamic_gain_cache = {}
 
     def refresh_cryocoolers(self) -> None:
@@ -1348,11 +1354,27 @@ class PreparedSimulation:
         # DC gain (dc_pinv) when available -- the reduced-model map (Nu) is
         # ill-conditioned at DC and drives huge, non-transferable commands.
         ff_map = mc["dc_pinv"] if mc.get("dc_pinv") is not None else mc["Nu"]
-        u_ff = ff_map @ r_sp
         u_max = np.array(
             [max(0.0, _controller_heater_max_power(model.nodes[int(h)], self.params)) for h in heater_ids],
             dtype=float,
         )
+        # Adaptive feedforward: fold the learned correction dM (accumulated from
+        # prior steady-state samples) into the feedforward. dM starts at zero over
+        # the model prior, so with learning off -- or before the first sample --
+        # this is identical to the fixed exact-DC-gain feedforward. The correction
+        # is projected to +/- frac * u_max per heater so a bad sample can never
+        # drive the feedforward unphysical; the effective command is clamped to
+        # [0, u_max] downstream regardless.
+        adaptive_ff = bool(getattr(self.params, "modal_adaptive_ff_enabled", False))
+        dM = getattr(self, "controller_modal_ff_correction", None)
+        if dM is None or np.asarray(dM).shape != ff_map.shape:
+            dM = np.zeros_like(ff_map)
+        if adaptive_ff:
+            frac = max(0.0, float(getattr(self.params, "modal_adaptive_ff_max_correction_frac", 1.0)))
+            ff_correction = np.clip(dM @ r_sp, -frac * u_max, frac * u_max)
+        else:
+            ff_correction = np.zeros(len(heater_ids), dtype=float)
+        u_ff = ff_map @ r_sp + ff_correction
         dt = float(self.params.dt_s)
         ki = max(0.0, float(getattr(self.params, "modal_integral_gain", 0.0)))
         u_int = getattr(self, "controller_modal_integral", None)
@@ -1387,6 +1409,9 @@ class PreparedSimulation:
             "rate_command_norm": 0.0,
             "slew_rate_limit_W_per_s": float(slew),
             "heater_max_power_W": [float(v) for v in u_max],
+            "adaptive_ff_enabled": bool(adaptive_ff),
+            "adaptive_ff_correction_norm": float(np.linalg.norm(dM)),
+            "adaptive_ff_command_W": [float(v) for v in ff_correction],
         }
         if update_state:
             # Anti-windup keys off the absolute saturation clamp (pre-slew), so a
@@ -1394,8 +1419,21 @@ class PreparedSimulation:
             at_upper = u_cmd >= u_max - 1.0e-9
             at_lower = u_cmd <= 1.0e-9
             freeze = (at_upper & (increment > 0.0)) | (at_lower & (increment < 0.0))
-            committed = np.where(freeze, u_int, candidate_int)
-            self.controller_modal_integral = np.clip(committed, -u_max, u_max)
+            committed = np.clip(np.where(freeze, u_int, candidate_int), -u_max, u_max)
+            # Adaptive feedforward learning: if this operating point is steady, take
+            # one RLS sample -- transfer the integral's holding authority into dM
+            # (bumpless), so the correction is available as feedforward next time.
+            if adaptive_ff:
+                committed, dM, learned, alpha = self._adaptive_ff_learn(
+                    committed=committed, dM=dM, r_sp=r_sp, y_dev=y_dev, ctrl=ctrl,
+                    error=error, u_max=u_max, u_cmd=u_cmd, dt=dt,
+                )
+                self.controller_modal_ff_correction = dM
+                self.controller_allocator_diagnostics["adaptive_ff_updated"] = bool(learned)
+                self.controller_allocator_diagnostics["adaptive_ff_transfer_alpha"] = float(alpha)
+                self.controller_allocator_diagnostics["adaptive_ff_correction_norm"] = float(np.linalg.norm(dM))
+            self._modal_ff_prev_y_dev = y_dev.copy()
+            self.controller_modal_integral = committed
             self.controller_weighted_rms_error = float(np.sqrt(np.mean(error**2))) if error.size else 0.0
             self.controller_warnings = []
             self.controller_last_power_by_heater = {
@@ -1404,6 +1442,48 @@ class PreparedSimulation:
         for heater_id, command in zip(heater_ids, u):
             _deposit_heater_command_power(powers, model, node_index, int(heater_id), float(command))
         return powers
+
+    def _adaptive_ff_learn(
+        self, *, committed, dM, r_sp, y_dev, ctrl, error, u_max, u_cmd, dt,
+    ):
+        """Take one adaptive-feedforward RLS sample IF this operating point is a
+        valid steady-state hold, otherwise a no-op.
+
+        Gates (all must pass): a nonzero setpoint deviation (a ~zero setpoint
+        carries no information); every controlled sensor settled in both tracking
+        error and rate (so we never regress transient data into a static map -- a
+        settled hold also implies no meaningful saturation, since a saturated
+        heater could not be holding the setpoint); and the integral within a sane
+        multiple of actuator range (outlier guard).
+
+        Returns ``(committed, dM, learned, alpha)``. On an accepted sample the
+        returned ``committed`` has the transferred authority removed (bumpless) and
+        ``dM`` is the updated correction matrix."""
+        prev = getattr(self, "_modal_ff_prev_y_dev", None)
+        if prev is None or np.asarray(prev).shape != y_dev.shape:
+            return committed, dM, False, 0.0
+        if error.size == 0 or float(np.linalg.norm(r_sp)) <= 1.0e-9 or dt <= 0.0:
+            return committed, dM, False, 0.0
+        rate_tol = max(0.0, float(getattr(self.params, "modal_adaptive_ff_rate_tol_K_per_s", 1.0e-3)))
+        error_tol = max(0.0, float(getattr(self.params, "modal_adaptive_ff_error_tol_K", 0.05)))
+        rate = (y_dev[ctrl] - np.asarray(prev)[ctrl]) / dt
+        settled = (
+            float(np.max(np.abs(error))) <= error_tol
+            and float(np.max(np.abs(rate))) <= rate_tol
+        )
+        if not settled:
+            return committed, dM, False, 0.0
+        if np.any(np.abs(committed) > 5.0 * np.maximum(u_max, 1.0e-12)):
+            return committed, dM, False, 0.0
+        forgetting = min(1.0, max(1.0e-3, float(getattr(self.params, "modal_adaptive_ff_forgetting", 0.999))))
+        n = int(np.asarray(r_sp).shape[0])
+        P = getattr(self, "_modal_ff_rls_P", None)
+        if P is None or np.asarray(P).shape != (n, n):
+            p0 = max(1.0e-9, float(getattr(self.params, "modal_adaptive_ff_p0", 1.0)))
+            P = p0 * np.eye(n)
+        P, dM, committed, alpha = _rls_ff_update(P, dM, np.asarray(r_sp, dtype=float), committed, forgetting)
+        self._modal_ff_rls_P = P
+        return committed, dM, True, float(alpha)
 
     def _mimo_controller_power_vector(self, update_state: bool) -> np.ndarray:
         if self.model is None:
@@ -2973,6 +3053,51 @@ def _heater_controller_average(
     if field == "controller_weight" and average <= 0.0:
         return 0.5
     return average
+
+
+def _rls_ff_update(
+    P: np.ndarray,
+    dM: np.ndarray,
+    r_sp: np.ndarray,
+    integral: np.ndarray,
+    forgetting: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """One recursive-least-squares step for the adaptive feedforward.
+
+    At a steady operating point the integral holds exactly the part of the true
+    holding power that the model feedforward fails to supply -- i.e. the integral
+    is a direct measurement of ``(dM_true - dM) @ r_sp`` for the correction matrix
+    ``dM`` we are learning (``dM_true = G_dc^-1_true - G_dc^-1_model``). So the RLS
+    innovation for regressing the correction against the setpoint IS the current
+    integral; we never have to form the target explicitly.
+
+    The transfer is bumpless: bumping ``dM`` by ``outer(integral, K)`` raises the
+    feedforward at THIS setpoint by exactly ``alpha * integral`` (``alpha = phi^T K``
+    in ``[0, 1)``), so we hand back the integral with that same amount removed. The
+    delivered command is therefore unchanged this step; over repeated steady
+    samples the deficit decays geometrically and authority migrates from the
+    reactive integral into the predictive feedforward.
+
+    Returns ``(P_new, dM_new, integral_new, alpha)``. On a degenerate regressor
+    (``phi ~ 0`` or a non-finite denominator) it is a no-op that returns the
+    inputs unchanged with ``alpha = 0``.
+    """
+    phi = np.asarray(r_sp, dtype=float)
+    g = P @ phi
+    info = float(phi @ g)  # phi^T P phi -- the sample's information content
+    denom = float(forgetting) + info
+    # No-op on a degenerate sample: a ~zero regressor (info ~ 0) carries no
+    # information, so skip it entirely rather than inflating P by 1/forgetting.
+    if not np.isfinite(denom) or denom <= 0.0 or info <= 1.0e-12:
+        return P, dM, integral, 0.0
+    K = g / denom
+    alpha = float(phi @ K)  # in [0, 1)
+    dM_new = dM + np.outer(integral, K)
+    P_new = (P - np.outer(K, g)) / float(forgetting)
+    # Keep the covariance symmetric against round-off accumulation.
+    P_new = 0.5 * (P_new + P_new.T)
+    integral_new = integral - alpha * integral  # = (1 - alpha) * integral
+    return P_new, dM_new, integral_new, alpha
 
 
 def _controller_heater_max_power(node: Any, params: SimulationParameters) -> float:

@@ -1,0 +1,4 @@
+[2026-08-03T15:31:37] run_start: graph=CRYOSTAT_V2 out=simulations\CRYOSTAT_V2\20260803-153137
+[2026-08-03T15:33:23] prepared: nodes=471412 sensors=72 heaters=33 cryo=536 controller=yes
+[2026-08-03T15:33:23] no_steps: loop ran 0 steps (stopped/cancelled during setup, or t_final<=0). t_final=0s
+[2026-08-03T15:33:26] run_end: status=completed

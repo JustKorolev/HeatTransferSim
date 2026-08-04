@@ -1,0 +1,9 @@
+{
+  "graph_name": "CRYOSTAT_V2",
+  "graph_folder": "C:\\Users\\andre\\Documents\\2025-2026 Academic Year\\SURF\\HeatTransferSim\\graphs\\CRYOSTAT_V2",
+  "graph_hash": "C.npy:3771424:1785305743|L_sparse.json:97919024:1785305746|node_ids.npy:3771424:1785184586|graph.json:1607701273:1785285074|nodes.csv:187965094:1785184581",
+  "git_commit": "bff14a13cdab257546ab1b16d3265c51d23cdd82",
+  "python": "3.11.6",
+  "started": "2026-08-03T15:41:56",
+  "seed": 0
+}

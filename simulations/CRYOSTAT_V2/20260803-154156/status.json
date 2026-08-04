@@ -1,0 +1,10 @@
+{
+  "status": "failed: step 0: solver/step failed after 6 dt halvings (down to 0.0015625s). Last state checkpointed.",
+  "step": 0,
+  "sim_time_s": 0.0,
+  "t_final_s": 10.0,
+  "progress": 0.0,
+  "wall_elapsed_s": 69.33506393432617,
+  "eta_s": NaN,
+  "updated": "2026-08-03T15:43:06"
+}

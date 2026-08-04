@@ -1,0 +1,11 @@
+[2026-08-03T15:26:04] run_start: graph=CRYOSTAT_V2 out=simulations\CRYOSTAT_V2\20260803-152604
+[2026-08-03T15:27:14] prepared: nodes=471412 sensors=72 heaters=33 cryo=536 controller=yes
+[2026-08-03T15:27:14] error: Traceback (most recent call last):
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\simulation_runner.py", line 145, in run
+    self._simulate(prepared, params, C_diag, sensors, heaters, cryo_idx)
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\simulation_runner.py", line 278, in _simulate
+    self._checkpoint(prepared, state if accepted else None, step)
+                                        ^^^^^^^^
+UnboundLocalError: cannot access local variable 'accepted' where it is not associated with a value
+
+[2026-08-03T15:27:14] run_end: status=error: UnboundLocalError: cannot access local variable 'accepted' where it is not associated with a value
