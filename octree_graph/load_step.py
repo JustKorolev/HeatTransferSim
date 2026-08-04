@@ -179,6 +179,26 @@ def _tessellate_shape(shape: Any, deflection_mm: float, angular_deg: float):
     return np.asarray(verts, dtype=float), np.asarray(faces, dtype=int)
 
 
+def _brep_volume_mm3(shape: Any) -> float:
+    """Exact volume of a B-rep solid via OCC (GProp). Used to validate a
+    tessellation that came out not-strictly-watertight."""
+    try:
+        from OCC.Core.GProp import GProp_GProps
+        try:
+            from OCC.Core.BRepGProp import brepgprop
+
+            props = GProp_GProps()
+            brepgprop.VolumeProperties(shape, props)
+        except Exception:  # older pythonocc free-function API
+            from OCC.Core.BRepGProp import brepgprop_VolumeProperties
+
+            props = GProp_GProps()
+            brepgprop_VolumeProperties(shape, props)
+        return abs(float(props.Mass()))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 def load_step_as_scene(
     path: str | Path,
     *,
@@ -223,7 +243,17 @@ def load_step_as_scene(
         global_hi = np.maximum(global_hi, hi)
         watertight = bool(getattr(mesh, "is_watertight", False))
         if not watertight:
-            non_watertight += 1
+            # BRepMesh sometimes leaves a few open edges (missing triangles) on an
+            # otherwise-faithful tessellation of a valid solid, which would exclude
+            # the whole part from the octree fill and leave it HOLLOW (e.g. the long
+            # copper bus P0437). Trust the B-rep: if the mesh volume matches the exact
+            # solid volume, containment is reliable -> treat it as fillable anyway.
+            exact_vol = _brep_volume_mm3(solid.shape)
+            mesh_vol = abs(float(getattr(mesh, "volume", 0.0)))
+            if exact_vol > 0.0 and mesh_vol > 0.0 and abs(mesh_vol - exact_vol) <= 0.02 * exact_vol:
+                watertight = True  # geometrically valid despite a few open edges
+            else:
+                non_watertight += 1
         objects.append(
             MeshObject(
                 name=name,
