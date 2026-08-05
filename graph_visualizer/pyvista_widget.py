@@ -1347,12 +1347,6 @@ class GraphPyVistaWidget:
         per surface face so picking and scalar/colour updates are unaffected.
         """
         n = int(node_ids_arr.shape[0])
-        # In cross-section mode the surface-culled shell would show a HOLLOW cut --
-        # interior faces were dropped, so slicing a filled block reveals nothing.
-        # Use the full 6-faces-per-cell mesh so the clip plane exposes the actual
-        # cells at the cut (the whole point of a cross-section is to see inside).
-        if self.cross_section_enabled:
-            return self._full_face_cell_mesh(node_ids_arr, points, scalar_per_node, rgb_per_node)
         try:
             mesh = self._extract_hex_surface(node_ids_arr, points, scalar_per_node, rgb_per_node)
             if mesh is not None and int(getattr(mesh, "n_cells", 0)) > 0 and "node_id" in mesh.cell_data:
@@ -1385,6 +1379,15 @@ class GraphPyVistaWidget:
         centers_list: list[Any] = []
         lengths_list: list[Any] = []
         materials_list: list[Any] = []
+        # Cross-section: drop whole cells on the far side of the plane instead of
+        # letting VTK clip THROUGH them. A voxel is a hollow cube shell, so a clip
+        # plane cuts into that shell and renders its dark, unlit interior (the
+        # "weird/buggy" look) and leaves clipped-away cells still pickable. Filtering
+        # by cell centre keeps every drawn cell whole, and because the filtering
+        # happens BEFORE surface extraction, cells newly exposed at the cut generate
+        # real boundary faces -- a solid-looking cut surface, correct picking, and
+        # the fast culled-shell path is still used.
+        cross_filter = self.cross_section_enabled and self.cross_section_coordinate() is not None
         for node_id in model.ordered_node_ids():
             if node_id not in visible:
                 continue
@@ -1393,6 +1396,8 @@ class GraphPyVistaWidget:
             if geometry is None:
                 continue
             center, lengths = geometry
+            if cross_filter and not self._cross_section_keeps_point(np.asarray(center, dtype=float)):
+                continue
             node_ids_list.append(node_id)
             centers_list.append(center)
             lengths_list.append(lengths)
@@ -1689,8 +1694,31 @@ class GraphPyVistaWidget:
             unique.append(actor)
         return unique
 
+    def _is_batched_cross_section_actor(self, actor: Any) -> bool:
+        """True for the batched cell actors, which are cross-sectioned by cell
+        filtering rather than by a clipping plane. Tolerates a partially-built
+        widget (attributes may be absent in unit tests)."""
+        if actor is None:
+            return False
+        for attr in ("_batched_actor", "_batched_selected_actor"):
+            other = getattr(self, attr, None)
+            if other is None:
+                continue
+            try:
+                if actor is other or self._actor_key(actor) == self._actor_key(other):
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
     def _apply_cross_section_to_actor(self, actor: Any) -> None:
         if not self.cross_section_enabled:
+            return
+        # The batched cell mesh is cross-sectioned by FILTERING whole cells at build
+        # time (see _draw_batched), so it must not also be clipped here -- a clip
+        # plane would slice through the kept boundary cells and expose their hollow
+        # shell interiors.
+        if self._is_batched_cross_section_actor(actor):
             return
         mapper = self._actor_mapper(actor)
         add_plane = getattr(mapper, "AddClippingPlane", None)

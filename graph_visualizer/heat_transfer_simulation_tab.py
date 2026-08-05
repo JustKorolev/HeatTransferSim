@@ -3468,18 +3468,39 @@ class HeatTransferSimulationTab:
         self._draw_current(reset_camera=False)
 
     def _handle_visual_control_changed(self, *_: Any) -> None:
-        # Cross-section on/off swaps the batched cell mesh between the fast
-        # surface-culled shell and the full-face mesh, so a cut reveals the actual
-        # interior cells instead of a hollow shell. That needs a rebuild -- but only
-        # on the on/off transition, not on every slider drag.
-        cross_enabled = self.cross_section_toggle.isChecked()
-        if cross_enabled != getattr(self, "_cross_section_enabled_state", False):
-            self._cross_section_enabled_state = cross_enabled
-            if getattr(self, "model", None) is not None:
-                self.viewer.cross_section_enabled = cross_enabled  # rebuild picks the right mesh
-                self._draw_current(reset_camera=False)
+        # The cross-section keeps/drops WHOLE cells at mesh-build time (rather than
+        # letting VTK clip through them), so any change to enabled/position/axis
+        # needs the batched mesh rebuilt. Debounced so dragging the slider doesn't
+        # rebuild once per tick on a large graph.
+        state = (
+            self.cross_section_toggle.isChecked(),
+            int(self.cross_section_slider.value()),
+            self.cross_section_axis_combo.currentText().lower(),
+        )
+        previous = getattr(self, "_cross_section_state", None)
+        if state != previous:
+            was_enabled = bool(previous[0]) if previous is not None else False
+            self._cross_section_state = state
+            if getattr(self, "model", None) is not None and (state[0] or was_enabled):
+                self._schedule_cross_section_redraw()
         self._sync_view_controls_to_viewer()
         self.viewer.safe_render()
+
+    def _schedule_cross_section_redraw(self) -> None:
+        if getattr(self, "_cross_section_redraw_timer", None) is None:
+            timer = self.QtCore.QTimer(self.widget)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._redraw_for_cross_section)
+            self._cross_section_redraw_timer = timer
+        self._cross_section_redraw_timer.start(150)
+
+    def _redraw_for_cross_section(self) -> None:
+        if getattr(self, "model", None) is None:
+            return
+        # Keep the viewer's plane state in sync first: _draw_batched reads it while
+        # filtering cells for the rebuilt mesh.
+        self._sync_view_controls_to_viewer()
+        self._draw_current(reset_camera=False)
 
     def _sync_view_controls_to_viewer(self) -> None:
         if not hasattr(self, "viewer") or not hasattr(self, "opacity_slider"):
