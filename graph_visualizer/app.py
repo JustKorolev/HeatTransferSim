@@ -2027,9 +2027,42 @@ class GraphVisualizerApp:
                 self._set_status("Run Analyze Connectivity to compute component groups.", error=True)
 
     def _handle_view_control_changed(self, *_: Any) -> None:
+        # The cross-section keeps/drops WHOLE cells when the batched cell mesh is
+        # built (rather than clipping through them, which exposed their hollow
+        # shells), so any change to enabled/position/axis needs a rebuild -- a
+        # clip-plane-only sync no longer moves the solid cells. Debounced so
+        # dragging the slider doesn't rebuild once per tick on a large graph.
+        if hasattr(self, "cross_section_toggle") and hasattr(self, "cross_section_slider"):
+            state = (
+                self.cross_section_toggle.isChecked(),
+                int(self.cross_section_slider.value()),
+                self.cross_section_axis_combo.currentText().lower(),
+            )
+            previous = getattr(self, "_cross_section_state", None)
+            if state != previous:
+                was_enabled = bool(previous[0]) if previous is not None else False
+                self._cross_section_state = state
+                if getattr(self, "model", None) is not None and (state[0] or was_enabled):
+                    self._schedule_cross_section_redraw()
         self._sync_view_controls_to_viewer()
         if hasattr(self, "viewer"):
             self.viewer.safe_render()
+
+    def _schedule_cross_section_redraw(self) -> None:
+        if getattr(self, "_cross_section_redraw_timer", None) is None:
+            timer = self.QtCore.QTimer(getattr(self, "window", None))
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._redraw_for_cross_section)
+            self._cross_section_redraw_timer = timer
+        self._cross_section_redraw_timer.start(150)
+
+    def _redraw_for_cross_section(self) -> None:
+        if getattr(self, "model", None) is None:
+            return
+        # Sync the plane state first: the batched mesh build reads it while
+        # filtering cells for the rebuilt mesh.
+        self._sync_view_controls_to_viewer()
+        self._refresh_all(reset_camera=False)
 
     def _sync_view_controls_to_viewer(self) -> None:
         if not hasattr(self, "viewer") or not hasattr(self, "opacity_slider"):
