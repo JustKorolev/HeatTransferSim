@@ -99,7 +99,11 @@ class GraphPyVistaWidget:
         self._preview_actors: list[Any] = []
         self._batched_actor: Any | None = None
         self._batched_mesh: Any | None = None
-        self._batched_node_geometry: dict[int, tuple[np.ndarray, tuple[float, float, float]]] = {}
+        # Drawn batched-cell geometry, kept as parallel arrays indexed by row and
+        # looked up through _batched_geometry_for (node ids are sorted).
+        self._batched_node_ids: np.ndarray | None = None
+        self._batched_centers: np.ndarray | None = None
+        self._batched_lengths: np.ndarray | None = None
         self._batched_selected_actor: Any | None = None
         self._last_preview_coords: list[tuple[int, int, int]] = []
         self._last_preview_side = 1.0
@@ -314,7 +318,9 @@ class GraphPyVistaWidget:
         self._role_overlay_actors = []
         self._batched_actor = None
         self._batched_mesh = None
-        self._batched_node_geometry = {}
+        self._batched_node_ids = None
+        self._batched_centers = None
+        self._batched_lengths = None
         self._batched_selected_actor = None
         self._cross_section_mapper_keys = set()
         self._label_actor_positions = []
@@ -433,7 +439,7 @@ class GraphPyVistaWidget:
         for node_id in previous | self.selected_node_ids:
             if node_id in self._node_actors:
                 self._style_node_actor(self._node_actors[node_id], selected=node_id in self.selected_node_ids)
-        if self._batched_node_geometry:
+        if self._batched_node_ids is not None:
             self._show_batched_selection(self.selected_node_ids)
         self.safe_render()
 
@@ -689,6 +695,50 @@ class GraphPyVistaWidget:
                 "cooler",
                 self.show_coolers,
             )
+
+    def _gather_node_geometry_per_node(
+        self,
+        model: ThermalGraphModel,
+        node_ids: list[int],
+        materials: list[Any],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[Any], list[tuple[Any, int]]] | None:
+        """Per-node validating gather, for models the vectorized path chokes on."""
+        kept_ids: list[int] = []
+        centers: list[Any] = []
+        lengths: list[Any] = []
+        kept_materials: list[Any] = []
+        marker_rows: list[tuple[Any, int]] = []
+        for node_id, material in zip(node_ids, materials):
+            node = model.nodes[node_id]
+            geometry = _safe_node_cube_geometry(node)
+            if geometry is None:
+                continue
+            center, size = geometry
+            if node.is_heater or node.is_sensor or node.has_cryocooler:
+                marker_rows.append((node, len(kept_ids)))
+            kept_ids.append(node_id)
+            centers.append(center)
+            lengths.append(size)
+            kept_materials.append(material)
+        if not kept_ids:
+            return None
+        return (
+            np.asarray(kept_ids, dtype=int),
+            np.asarray(centers, dtype=float),
+            np.asarray(lengths, dtype=float),
+            kept_materials,
+            marker_rows,
+        )
+
+    def _batched_geometry_for(self, node_id: int) -> tuple[np.ndarray, np.ndarray] | None:
+        """Centre and edge lengths of a drawn batched cell, by node id."""
+        if self._batched_node_ids is None or self._batched_centers is None:
+            return None
+        ids = self._batched_node_ids
+        row = int(np.searchsorted(ids, int(node_id)))
+        if row >= ids.shape[0] or int(ids[row]) != int(node_id):
+            return None
+        return self._batched_centers[row], self._batched_lengths[row]
 
     def _draw_batched_io_markers(self, marker_nodes: list[tuple[Any, Any, float]]) -> None:
         """Add H/S/C markers for the role cells gathered by the batched pass."""
@@ -1422,13 +1472,55 @@ class GraphPyVistaWidget:
         committed_bounds: tuple[float, float, float, float, float, float] | None = None,
     ) -> None:
         log_event("pyvista draw_batched build mesh start", visible=len(visible))
-        # Gather visible-node geometry (dict lookups only); all point/face/color
-        # array construction below is vectorized with NumPy -- the per-node
-        # Python loops here previously dominated large-graph draw time.
+        # Gather raw per-node tuples ONLY -- no NumPy, no validation, no
+        # cross-section test inside this loop. At a million cells the loop body
+        # runs a million times, so a pair of np.asarray calls per node (what
+        # _safe_node_cube_geometry does) cost seconds on their own and dominated
+        # every filter change. Conversion, finite-checks, the size floor and the
+        # cross-section cut are all done once, vectorized, below.
         node_ids_list: list[int] = []
         centers_list: list[Any] = []
         lengths_list: list[Any] = []
         materials_list: list[Any] = []
+        # Heater/sensor/cryocooler markers are collected in this same pass: the
+        # role cells are otherwise indistinguishable inside the batched hex mesh,
+        # and a separate scan over a million nodes per draw is not affordable.
+        # Rows, not geometry -- the centres do not exist yet.
+        marker_rows: list[tuple[Any, int]] = []
+        for node_id in model.ordered_node_ids():
+            if node_id not in visible:
+                continue
+            node = model.nodes[node_id]
+            center = node.center_mm
+            if center is None:
+                center = node.center
+            lengths = node.size_mm
+            if lengths is None:
+                side = float(node.side_length_m)
+                lengths = (side, side, side)
+            if node.is_heater or node.is_sensor or node.has_cryocooler:
+                marker_rows.append((node, len(node_ids_list)))
+            node_ids_list.append(node_id)
+            centers_list.append(center)
+            lengths_list.append(lengths)
+            materials_list.append(node.material)
+        if not node_ids_list:
+            log_event("pyvista draw_batched no valid points")
+            return
+        node_ids_arr = np.asarray(node_ids_list, dtype=int)
+        try:
+            centers = np.asarray(centers_list, dtype=float).reshape(len(node_ids_list), 3)
+            lengths_arr = np.asarray(lengths_list, dtype=float).reshape(len(node_ids_list), 3)
+        except (TypeError, ValueError):
+            # Ragged or non-numeric geometry somewhere in the model: fall back to
+            # the per-node validating path rather than dropping the whole draw.
+            log_event("pyvista draw_batched ragged geometry; per-node fallback", cells=len(node_ids_list))
+            gathered = self._gather_node_geometry_per_node(model, node_ids_list, materials_list)
+            if gathered is None:
+                log_event("pyvista draw_batched no valid points")
+                return
+            node_ids_arr, centers, lengths_arr, materials_list, marker_rows = gathered
+        finite = np.isfinite(centers).all(axis=1) & np.isfinite(lengths_arr).all(axis=1)
         # Cross-section: drop whole cells on the far side of the plane instead of
         # letting VTK clip THROUGH them. A voxel is a hollow cube shell, so a clip
         # plane cuts into that shell and renders its dark, unlit interior (the
@@ -1437,34 +1529,32 @@ class GraphPyVistaWidget:
         # happens BEFORE surface extraction, cells newly exposed at the cut generate
         # real boundary faces -- a solid-looking cut surface, correct picking, and
         # the fast culled-shell path is still used.
-        cross_filter = self.cross_section_enabled and self.cross_section_coordinate() is not None
-        # Heater/sensor/cryocooler markers are collected in this same pass: the
-        # role cells are otherwise indistinguishable inside the batched hex mesh,
-        # and a separate scan over a million nodes per draw is not affordable.
-        marker_nodes: list[tuple[Any, Any, float]] = []
-        for node_id in model.ordered_node_ids():
-            if node_id not in visible:
-                continue
-            node = model.nodes[node_id]
-            geometry = _safe_node_cube_geometry(node)
-            if geometry is None:
-                continue
-            center, lengths = geometry
-            if cross_filter and not self._cross_section_keeps_point(np.asarray(center, dtype=float)):
-                continue
-            if node.is_heater or node.is_sensor or node.has_cryocooler:
-                marker_nodes.append((node, center, float(max(lengths))))
-            node_ids_list.append(node_id)
-            centers_list.append(center)
-            lengths_list.append(lengths)
-            materials_list.append(node.material)
-            self._batched_node_geometry[node_id] = (center, lengths)
-        if not node_ids_list:
-            log_event("pyvista draw_batched no valid points")
-            return
-        node_ids_arr = np.asarray(node_ids_list, dtype=int)
-        centers = np.asarray(centers_list, dtype=float)
-        half = np.asarray(lengths_list, dtype=float) * 0.5
+        keep = finite & self._cross_section_keeps_points(centers)
+        if not keep.all():
+            if not keep.any():
+                log_event("pyvista draw_batched no valid points")
+                return
+            rows = np.flatnonzero(keep)
+            row_remap = np.full(len(keep), -1, dtype=int)
+            row_remap[rows] = np.arange(len(rows))
+            marker_rows = [
+                (node, int(row_remap[row])) for node, row in marker_rows if row_remap[row] >= 0
+            ]
+            node_ids_arr = node_ids_arr[rows]
+            centers = centers[rows]
+            lengths_arr = lengths_arr[rows]
+            materials_list = [materials_list[int(row)] for row in rows]
+        lengths_arr = np.maximum(lengths_arr, 1.0e-6)
+        # Looked up by row on demand (selection outlines, role overlays) rather
+        # than materialized into a per-node dict: a million-entry dict of small
+        # arrays costs more memory than the mesh it describes.
+        self._batched_node_ids = node_ids_arr
+        self._batched_centers = centers
+        self._batched_lengths = lengths_arr
+        marker_nodes = [
+            (node, centers[row], float(lengths_arr[row].max())) for node, row in marker_rows
+        ]
+        half = lengths_arr * 0.5
         n = int(node_ids_arr.shape[0])
         # Eight cube corners per node (broadcast), then flatten to points.
         signs = np.array(_CUBE_CORNER_SIGNS, dtype=float)
@@ -1561,9 +1651,10 @@ class GraphPyVistaWidget:
         selected_ids = {int(node_ids)} if isinstance(node_ids, int) else {int(node_id) for node_id in node_ids}
         meshes = []
         for node_id in selected_ids:
-            if node_id not in self._batched_node_geometry:
+            geometry = self._batched_geometry_for(node_id)
+            if geometry is None:
                 continue
-            center, lengths = self._batched_node_geometry[node_id]
+            center, lengths = geometry
             meshes.append(
                 self.pv.Cube(
                     center=center,
@@ -1689,6 +1780,17 @@ class GraphPyVistaWidget:
             dtype=float,
         )
         return unique_scalars[inverse]
+
+    def _cross_section_keeps_points(self, points: np.ndarray) -> np.ndarray:
+        """Vectorized ``_cross_section_keeps_point`` over an (n, 3) array."""
+        count = int(np.asarray(points).shape[0])
+        if not self.cross_section_enabled:
+            return np.ones(count, dtype=bool)
+        coordinate = self.cross_section_coordinate()
+        if coordinate is None:
+            return np.ones(count, dtype=bool)
+        axis_index = {"x": 0, "y": 1, "z": 2}.get(str(self.cross_section_axis).lower(), 2)
+        return np.asarray(points, dtype=float)[:, axis_index] >= float(coordinate) - 1.0e-9
 
     def _cross_section_keeps_point(self, point: np.ndarray) -> bool:
         if not self.cross_section_enabled:
@@ -1859,7 +1961,7 @@ class GraphPyVistaWidget:
         color = self._last_node_colors.get(int(node_id))
         if color is None:
             color = self._color_for_material(getattr(node, "material", None))
-        geometry = self._batched_node_geometry.get(int(node_id)) or _safe_node_cube_geometry(node)
+        geometry = self._batched_geometry_for(int(node_id)) or _safe_node_cube_geometry(node)
         depth_focused = True
         if geometry is not None:
             depth_focused = self._node_in_depth_focus(geometry[0], self._last_committed_bounds)
@@ -1881,7 +1983,7 @@ class GraphPyVistaWidget:
         for node_id, actor in self._node_actors.items():
             selected = node_id in self.selected_node_ids
             depth_focused = True
-            geometry = self._batched_node_geometry.get(node_id) or _safe_node_cube_geometry(
+            geometry = self._batched_geometry_for(node_id) or _safe_node_cube_geometry(
                 self._last_model_nodes.get(node_id)
             )
             if geometry is not None:

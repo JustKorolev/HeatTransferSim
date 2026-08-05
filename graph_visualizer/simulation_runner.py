@@ -227,13 +227,50 @@ class SimulationRunner:
             for x in getattr(prepared, "cryocooler_node_ids", ())
             if int(x) in prepared.node_index_by_id
         ]
+        history_limit = prepared._effective_history_limit()
         self._log_event(
             "prepared",
             f"nodes={len(C_diag)} sensors={len(sensors)} heaters={len(heaters)} "
-            f"cryo={len(cryo_idx)} controller={'yes' if has_controller else 'OPEN-LOOP'}",
+            f"cryo={len(cryo_idx)} controller={'yes' if has_controller else 'OPEN-LOOP'} "
+            f"history_limit={history_limit} "
+            f"(~{history_limit * len(C_diag) * 8 / 1024.0 / 1024.0:.0f} MB)",
         )
+        for warning in prepared.warnings:
+            self._log_event("prepare_warning", str(warning))
+        self._warn_if_unforced(prepared, params, has_controller, cryo_idx)
         self._resume_if_checkpoint(prepared)
         return prepared, params, C_diag, sensors, heaters, cryo_idx
+
+    def _warn_if_unforced(self, prepared, params, has_controller: bool, cryo_idx: list) -> None:
+        """Flag a run with no heat source, no heat sink and no radiative gradient.
+
+        Such a run integrates dT/dt = 0 to machine precision for however many
+        hours it is given -- the sensor "tracking error" it reports is just the
+        gap between the initial condition and the setpoint, never closing. Cheap
+        to detect at prepare time; expensive to discover from the plots."""
+        reasons = []
+        if not has_controller and str(getattr(params, "input_mode", "")) != "heater_inputs":
+            reasons.append("no heater input (input_mode='zero' and no controller)")
+        if not cryo_idx:
+            reasons.append("no cryocooler nodes in the graph")
+        env = getattr(prepared, "environment_temperature_K", None)
+        initial = np.asarray(prepared.initial_temperatures_K, dtype=float)
+        env_vector = (
+            np.asarray(env, dtype=float)
+            if env is not None
+            else np.full(initial.shape, float(getattr(params, "T_env_K", 0.0)))
+        )
+        if np.allclose(env_vector, initial, atol=1.0e-9):
+            reasons.append(
+                f"radiative background equals the initial temperature "
+                f"(T_env={float(env_vector.flat[0]):.2f} K), so net radiation is zero"
+            )
+        if len(reasons) >= 3:
+            self._log_event(
+                "unforced_run",
+                "WARNING: nothing drives this simulation -- " + "; ".join(reasons)
+                + ". Temperatures will not change.",
+            )
 
     def _apply_setpoints(self, model, sensors: list[int]) -> None:
         if self.cfg.global_setpoint_K is not None:

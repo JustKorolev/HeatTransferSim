@@ -30,7 +30,7 @@ from .graph_io import (
     save_graph_folder,
 )
 from .heat_transfer_simulation_tab import HeatTransferSimulationTab
-from .material_library import default_material_library
+from .material_library import default_material_library, is_unassigned_material
 from .matrix_builder import (
     refresh_auto_edges,
     refresh_geometry_edges,
@@ -45,15 +45,13 @@ from .models import (
     NodeProperties,
     PIDControlSettings,
     PIDState,
+    ROLE_NODE_TYPES,
     SensorProperties,
     ThermalGraphModel,
 )
 from .pyvista_widget import GraphPyVistaWidget
 from .role_assignment import (
     assign_matching_nodes_to_role,
-    node_matches_heater_sensor_filters,
-    node_matches_level_filter,
-    node_matches_material_visibility,
     node_matches_role_substring,
     normalize_role_match_text,
 )
@@ -69,6 +67,20 @@ from .thermal_validation_tab import ThermalValidationTab
 from .tooltip_formatters import format_node_tooltip
 from .two_d_graph_widget import TwoDGraphWidget
 from .validation import raise_if_errors, validate_model
+
+
+# Edge types that are interior to a single part, so they carry no part-to-part
+# contact. Excluded when the "boundary/contact cells only" filter builds its set.
+_INTERNAL_EDGE_TYPES = frozenset(
+    {"internal_conduction", "near_internal_conduction", "same_material_spatial"}
+)
+# Range of the min/max octree-level spin boxes; a filter spanning the full range
+# is a no-op and gets skipped.
+_MIN_OCTREE_LEVEL = 0
+_MAX_OCTREE_LEVEL = 99
+
+def _combo_items(combo: Any) -> list[str]:
+    return [combo.itemText(index) for index in range(combo.count())]
 
 
 _EDITOR_CONTROLLER_RUNTIME_FIELDS = {
@@ -1843,10 +1855,24 @@ class GraphVisualizerApp:
     def _sync_filter_options(self) -> None:
         if not hasattr(self, "filter_material"):
             return
+        # One walk of the node table for both name sets. This ran three separate
+        # full passes, and it runs on every refresh -- including every filter
+        # change, where the names cannot have changed at all.
+        material_names: set[str] = set()
+        component_names: set[str] = set()
+        for node in self.model.nodes.values():
+            material_names.add(node.material)
+            component_names.add(node.component_name)
+        component_names.discard("")
+        component_names.discard(None)
+        materials = sorted(material_names)
+        components = sorted(component_names)
         for combo, values in (
-            (self.filter_material, sorted({node.material for node in self.model.nodes.values()})),
-            (self.filter_component, sorted({node.component_name for node in self.model.nodes.values() if node.component_name})),
+            (self.filter_material, materials),
+            (self.filter_component, components),
         ):
+            if _combo_items(combo) == ["All", *values]:
+                continue
             current = combo.currentText() if combo.count() else "All"
             combo.blockSignals(True)
             combo.clear()
@@ -1855,14 +1881,14 @@ class GraphVisualizerApp:
             combo.setCurrentText(current if current in ["All", *values] else "All")
             combo.blockSignals(False)
         if hasattr(self, "component_temp_combo"):
-            current = self.component_temp_combo.currentText() if self.component_temp_combo.count() else ""
-            values = sorted({node.component_name for node in self.model.nodes.values() if node.component_name})
-            self.component_temp_combo.blockSignals(True)
-            self.component_temp_combo.clear()
-            self.component_temp_combo.addItems(values)
-            if current in values:
-                self.component_temp_combo.setCurrentText(current)
-            self.component_temp_combo.blockSignals(False)
+            if _combo_items(self.component_temp_combo) != components:
+                current = self.component_temp_combo.currentText() if self.component_temp_combo.count() else ""
+                self.component_temp_combo.blockSignals(True)
+                self.component_temp_combo.clear()
+                self.component_temp_combo.addItems(components)
+                if current in components:
+                    self.component_temp_combo.setCurrentText(current)
+                self.component_temp_combo.blockSignals(False)
             self._sync_component_temperature_input()
         if hasattr(self, "component_material_combo"):
             current = self.component_material_combo.currentText() if self.component_material_combo.count() else ""
@@ -1883,29 +1909,63 @@ class GraphVisualizerApp:
         max_level = int(self.filter_level_max.value())
         heater_only = bool(hasattr(self, "filter_heater") and self.filter_heater.isChecked())
         sensor_only = bool(hasattr(self, "filter_sensor") and self.filter_sensor.isChecked())
-        contact_nodes = {
-            endpoint
-            for edge in self.model.edges.values()
-            if edge.edge_type not in {"internal_conduction", "near_internal_conduction", "same_material_spatial"}
-            for endpoint in (edge.source, edge.target)
-        }
+        role_filter = heater_only or sensor_only
+        boundary_filter = bool(self.filter_boundary.isChecked())
+        hidden_components = self._hidden_components
+        nodes = self.model.nodes
+        # Resolve "is this material hidden?" once per DISTINCT material name, not
+        # once per cell: is_unassigned_material normalizes the string (strip,
+        # lower, split, join) and a multi-million-cell graph has a handful of
+        # names. Same idea for the level bounds -- compare ints inline instead of
+        # calling a predicate a million times.
+        hidden_materials: frozenset[str] = frozenset()
+        if self._hide_unassigned_material:
+            hidden_materials = frozenset(
+                name for name in {node.material for node in nodes.values()} if is_unassigned_material(name)
+            )
+        level_filter = min_level > _MIN_OCTREE_LEVEL or max_level < _MAX_OCTREE_LEVEL
+        if not (
+            material != "All"
+            or component != "All"
+            or hidden_components
+            or hidden_materials
+            or level_filter
+            or role_filter
+            or boundary_filter
+        ):
+            return set(nodes)
+        # Only walk the edge table when the boundary filter actually needs it.
+        contact_nodes: set[int] | None = None
+        if boundary_filter:
+            contact_nodes = {
+                endpoint
+                for edge in self.model.edges.values()
+                if edge.edge_type not in _INTERNAL_EDGE_TYPES
+                for endpoint in (edge.source, edge.target)
+            }
         visible: set[int] = set()
-        for node_id, node in self.model.nodes.items():
+        add = visible.add
+        for node_id, node in nodes.items():
+            # CAD heater/sensor markers are exempt from the material and level
+            # filters (see node_matches_material_visibility / node_matches_level_filter).
+            if not (node.node_type in ROLE_NODE_TYPES and node.source_components):
+                if hidden_materials and node.material in hidden_materials:
+                    continue
+                if level_filter and not (min_level <= node.level <= max_level):
+                    continue
             if material != "All" and node.material != material:
                 continue
             if component != "All" and node.component_name != component:
                 continue
-            if node.component_name in self._hidden_components:
+            if hidden_components and node.component_name in hidden_components:
                 continue
-            if not node_matches_material_visibility(node, self._hide_unassigned_material):
+            if role_filter and not (
+                (heater_only and node.is_heater) or (sensor_only and node.is_sensor)
+            ):
                 continue
-            if not node_matches_level_filter(node, min_level, max_level):
+            if contact_nodes is not None and node.confidence == "high" and node_id not in contact_nodes:
                 continue
-            if not node_matches_heater_sensor_filters(node, heater_only, sensor_only):
-                continue
-            if self.filter_boundary.isChecked() and node.confidence == "high" and node_id not in contact_nodes:
-                continue
-            visible.add(node_id)
+            add(node_id)
         return visible
 
     def _role_filters_active(self) -> bool:

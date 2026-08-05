@@ -27,6 +27,12 @@ class EdgeMode(str, Enum):
         return cls.AUTO.value
 
 
+# ``node_type`` values that mark a marker-only CAD heater/sensor node (as opposed
+# to a body cell that a user assigned a role to). Shared with the view filters so
+# the "is this a role marker?" test has one definition.
+ROLE_NODE_TYPES = frozenset({"heater", "sensor"})
+
+
 @dataclass
 class HeaterProperties:
     heater_id: int = 0
@@ -626,7 +632,7 @@ class NodeProperties:
 
     @property
     def is_cad_role_node(self) -> bool:
-        return bool(str(self.node_type) in {"heater", "sensor"} and self.source_components)
+        return bool(str(self.node_type) in ROLE_NODE_TYPES and self.source_components)
 
     def apply_material_defaults(self, library: dict[str, dict[str, float]] | None = None) -> None:
         defaults = material_defaults(self.material, library)

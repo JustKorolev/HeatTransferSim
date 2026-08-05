@@ -500,6 +500,7 @@ class PreparedSimulation:
     history: list[SimulationState] = field(default_factory=list)
     history_index: int = 0
     last_step_profile_ms: dict[str, float] = field(default_factory=dict, init=False)
+    _history_limit_warned: bool = field(default=False, init=False, repr=False)
 
     @property
     def time_s(self) -> float:
@@ -610,22 +611,18 @@ class PreparedSimulation:
             self.dynamic_heater_inputs = True
 
     def snapshot_state(self) -> PreparedSimulationSnapshot:
+        # The history list is copied by REFERENCE, not deep-copied. A
+        # SimulationState is write-once: step_forward builds a fresh one per step
+        # and seek/restore always copy out of it, so no stored entry is ever
+        # mutated in place. Only the list itself changes (append, and the
+        # front-trim in _append_history_state), and a shallow list copy undoes
+        # both. Deep-copying here made every snapshot O(len(history) * n_nodes):
+        # the runner takes one snapshot per step for the adaptive-dt rollback, so
+        # a 3M-node run was copying gigabytes per step and eventually died with a
+        # MemoryError, having spent most of its wall time in memcpy.
         return PreparedSimulationSnapshot(
             z=np.asarray(self.z, dtype=float).copy(),
-            history=[
-                SimulationState(
-                    float(state.time_s),
-                    np.asarray(state.temperatures_K, dtype=float).copy(),
-                    dict(state.pid_states),
-                    dict(state.controller_integrators),
-                    dict(state.controller_y_prev),
-                    dict(state.controller_dTdt_hat_by_sensor),
-                    dict(state.controller_error_prev),
-                    dict(state.controller_last_power_by_heater),
-                    str(state.controller_mode),
-                )
-                for state in self.history
-            ],
+            history=list(self.history),
             history_index=int(self.history_index),
             pid_states=self._pid_state_snapshot(),
             controller_integrators=dict(self.controller_integrators),
@@ -641,20 +638,10 @@ class PreparedSimulation:
 
     def restore_state(self, snapshot: PreparedSimulationSnapshot) -> None:
         self.z = np.asarray(snapshot.z, dtype=float).copy()
-        self.history = [
-            SimulationState(
-                float(state.time_s),
-                np.asarray(state.temperatures_K, dtype=float).copy(),
-                dict(state.pid_states),
-                dict(state.controller_integrators),
-                dict(state.controller_y_prev),
-                dict(state.controller_dTdt_hat_by_sensor),
-                dict(state.controller_error_prev),
-                dict(state.controller_last_power_by_heater),
-                str(state.controller_mode),
-            )
-            for state in snapshot.history
-        ]
+        # Shallow, for the same write-once reason as snapshot_state. Entries the
+        # step trimmed off the front are still referenced by the snapshot list,
+        # so a rollback restores them intact.
+        self.history = list(snapshot.history)
         self.history_index = int(snapshot.history_index)
         self._restore_pid_state_snapshot(snapshot.pid_states)
         self.controller_integrators = dict(snapshot.controller_integrators)
@@ -709,11 +696,41 @@ class PreparedSimulation:
 
     def _append_history_state(self, state: SimulationState) -> None:
         self.history.append(state)
-        limit = max(0, int(getattr(self.params, "simulation_history_limit", 0)))
+        limit = self._effective_history_limit()
         if limit > 0 and len(self.history) > limit:
             overflow = len(self.history) - limit
             del self.history[:overflow]
         self.history_index = len(self.history) - 1
+
+    def _effective_history_limit(self) -> int:
+        """``simulation_history_limit`` clamped to a memory budget.
+
+        The configured limit counts STEPS, but an entry costs 8 bytes per node,
+        so the same setting is a few MB on a lab-scale graph and gigabytes on a
+        multi-million-cell one (360 steps x 3M nodes = 8.2 GB). Scrub-back depth
+        is a convenience; running out of memory mid-run is not, so the node count
+        gets a vote."""
+        limit = max(0, int(getattr(self.params, "simulation_history_limit", 0)))
+        budget_MB = float(getattr(self.params, "simulation_history_memory_budget_MB", 0.0) or 0.0)
+        if budget_MB <= 0.0:
+            return limit
+        bytes_per_state = max(1, len(self.node_ids)) * 8
+        budget_states = max(2, int((budget_MB * 1024.0 * 1024.0) // bytes_per_state))
+        if limit <= 0:
+            capped = budget_states
+        elif limit <= budget_states:
+            return limit
+        else:
+            capped = budget_states
+        if not self._history_limit_warned:
+            self._history_limit_warned = True
+            self.warnings.append(
+                f"Replay history capped at {capped} steps (~{budget_MB:g} MB) instead of "
+                f"{limit if limit > 0 else 'unlimited'}: {len(self.node_ids)} nodes cost "
+                f"{bytes_per_state / 1024.0 / 1024.0:.1f} MB per stored step. Raise "
+                f"simulation_history_memory_budget_MB to scrub back further."
+            )
+        return capped
 
     def step_with_forced_heater_powers(
         self,

@@ -3276,6 +3276,165 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(sync_calls, [True])
         self.assertEqual(app.viewer.render_count, 1)
 
+    def test_batched_geometry_lookup_and_vectorized_cross_section(self) -> None:
+        import sys
+        import types
+
+        matplotlib_stubbed = "matplotlib" not in sys.modules
+        if matplotlib_stubbed:
+            sys.modules["matplotlib"] = types.SimpleNamespace(colormaps={})
+        try:
+            from graph_visualizer.pyvista_widget import GraphPyVistaWidget
+        finally:
+            if matplotlib_stubbed:
+                sys.modules.pop("matplotlib", None)
+
+        widget = object.__new__(GraphPyVistaWidget)
+        widget._batched_node_ids = None
+        widget._batched_centers = None
+        widget._batched_lengths = None
+        self.assertIsNone(widget._batched_geometry_for(3))
+
+        widget._batched_node_ids = np.array([2, 5, 9], dtype=int)
+        widget._batched_centers = np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0], [4.0, 4.0, 4.0]])
+        widget._batched_lengths = np.array([[1.0, 1.0, 1.0], [2.0, 3.0, 4.0], [5.0, 5.0, 5.0]])
+
+        center, lengths = widget._batched_geometry_for(5)
+        np.testing.assert_allclose(center, [1.0, 2.0, 3.0])
+        np.testing.assert_allclose(lengths, [2.0, 3.0, 4.0])
+        self.assertIsNone(widget._batched_geometry_for(7))   # absent, between entries
+        self.assertIsNone(widget._batched_geometry_for(99))  # absent, past the end
+
+        # Vectorized cut must agree with the scalar predicate row by row.
+        widget.cross_section_enabled = True
+        widget.cross_section_axis = "z"
+        widget.cross_section_fraction = 0.5
+        widget._last_cross_section_bounds = (0.0, 10.0, 0.0, 10.0, 0.0, 10.0)
+        points = np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 5.0], [0.0, 0.0, 9.0]])
+        np.testing.assert_array_equal(
+            widget._cross_section_keeps_points(points),
+            np.array([widget._cross_section_keeps_point(p) for p in points]),
+        )
+        widget.cross_section_enabled = False
+        self.assertTrue(widget._cross_section_keeps_points(points).all())
+
+    def test_fast_node_filter_matches_the_predicate_definitions(self) -> None:
+        """The hoisted/memoized filter must agree with the role_assignment helpers.
+
+        _filtered_node_ids inlines what node_matches_material_visibility,
+        node_matches_level_filter and node_matches_heater_sensor_filters do, to
+        avoid millions of calls per refresh. This pins the two together."""
+        try:
+            from graph_visualizer.app import GraphVisualizerApp, _INTERNAL_EDGE_TYPES
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+
+        class Combo:
+            def __init__(self, text: str) -> None:
+                self._text = text
+
+            def currentText(self) -> str:
+                return self._text
+
+            def count(self) -> int:
+                return 1
+
+        class Check:
+            def __init__(self, checked: bool) -> None:
+                self._checked = checked
+
+            def isChecked(self) -> bool:
+                return self._checked
+
+        class Spin:
+            def __init__(self, value: int) -> None:
+                self._value = value
+
+            def value(self) -> int:
+                return self._value
+
+        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="filter_equiv"))
+        materials = ["copper", "Unassigned (ignored)", "ZERO MATTER", "G-10"]
+        for node_id in range(24):
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material=materials[node_id % 4])
+            node.component_name = f"part_{node_id % 3}"
+            node.level = node_id % 5
+            node.confidence = "high" if node_id % 2 else "medium"
+            model.add_node(node)
+        for node_id, kind in ((100, "heater"), (101, "sensor")):
+            node = NodeProperties.with_material(node_id, (node_id, 1, 0), material="Unassigned (ignored)")
+            node.node_type = kind
+            node.level = -1
+            node.component_name = "part_0"
+            node.source_components = ["V_GUUTZ_ROLE"]
+            setattr(node, f"is_{kind}", True)
+            model.add_node(node)
+        # a body cell the user assigned a heater role to (not a CAD marker)
+        model.nodes[2].is_heater = True
+        model.set_edge(0, 1, 0.5)
+        model.set_edge(4, 5, 0.5)
+
+        def reference(app: Any) -> set[int]:
+            material = app.filter_material.currentText()
+            component = app.filter_component.currentText()
+            min_level = int(app.filter_level_min.value())
+            max_level = int(app.filter_level_max.value())
+            heater_only = app.filter_heater.isChecked()
+            sensor_only = app.filter_sensor.isChecked()
+            contact_nodes = {
+                endpoint
+                for edge in app.model.edges.values()
+                if edge.edge_type not in _INTERNAL_EDGE_TYPES
+                for endpoint in (edge.source, edge.target)
+            }
+            visible = set()
+            for node_id, node in app.model.nodes.items():
+                if material != "All" and node.material != material:
+                    continue
+                if component != "All" and node.component_name != component:
+                    continue
+                if node.component_name in app._hidden_components:
+                    continue
+                if not node_matches_material_visibility(node, app._hide_unassigned_material):
+                    continue
+                if not node_matches_level_filter(node, min_level, max_level):
+                    continue
+                if not node_matches_heater_sensor_filters(node, heater_only, sensor_only):
+                    continue
+                if app.filter_boundary.isChecked() and node.confidence == "high" and node_id not in contact_nodes:
+                    continue
+                visible.add(node_id)
+            return visible
+
+        app = object.__new__(GraphVisualizerApp)
+        app.model = model
+        cases = []
+        for material in ("All", "copper", "Unassigned (ignored)"):
+            for component in ("All", "part_0"):
+                for levels in ((0, 99), (1, 3)):
+                    for roles in ((False, False), (True, False), (False, True), (True, True)):
+                        for hide_unassigned in (True, False):
+                            for boundary in (False, True):
+                                for hidden in (set(), {"part_1"}):
+                                    cases.append(
+                                        (material, component, levels, roles, hide_unassigned, boundary, hidden)
+                                    )
+        for material, component, levels, roles, hide_unassigned, boundary, hidden in cases:
+            app.filter_material = Combo(material)
+            app.filter_component = Combo(component)
+            app.filter_level_min = Spin(levels[0])
+            app.filter_level_max = Spin(levels[1])
+            app.filter_heater = Check(roles[0])
+            app.filter_sensor = Check(roles[1])
+            app.filter_boundary = Check(boundary)
+            app._hide_unassigned_material = hide_unassigned
+            app._hidden_components = hidden
+            with self.subTest(
+                material=material, component=component, levels=levels, roles=roles,
+                hide_unassigned=hide_unassigned, boundary=boundary, hidden=sorted(hidden),
+            ):
+                self.assertEqual(app._filtered_node_ids(), reference(app))
+
     def test_simulation_view_controls_do_not_redraw_voxel_geometry(self) -> None:
         try:
             from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab

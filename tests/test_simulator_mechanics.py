@@ -302,6 +302,93 @@ class SimulatorMechanicsTests(unittest.TestCase):
         disabled.step_forward()
         self.assertAlmostEqual(disabled.temperatures_K[0], 320.0)
 
+    def test_snapshot_shares_history_entries_and_still_rolls_back(self) -> None:
+        # snapshot_state runs once per step for the adaptive-dt retry. Deep-copying
+        # the history made it O(steps * nodes) per call -- gigabytes per step on a
+        # multi-million-cell graph. Entries are write-once, so the list is shared.
+        model = _line_model(
+            capacitances=(10.0, 10.0, 10.0),
+            conductances=(1.0, 1.0),
+            temperatures=(300.0, 290.0, 280.0),
+        )
+        matrices = build_matrices(model)
+        prepared = prepare_simulation(model, matrices, _params(dt_s=0.5, simulation_history_limit=0))
+        for _ in range(4):
+            prepared.step_forward()
+
+        snapshot = prepared.snapshot_state()
+        self.assertIs(snapshot.history[0], prepared.history[0])  # shared, not copied
+        depth = len(prepared.history)
+        temps_before = prepared.temperatures_K.copy()
+
+        prepared.step_forward()
+        self.assertEqual(len(prepared.history), depth + 1)
+        prepared.restore_state(snapshot)
+
+        self.assertEqual(len(prepared.history), depth)
+        self.assertEqual(prepared.history_index, snapshot.history_index)
+        np.testing.assert_allclose(prepared.temperatures_K, temps_before)
+
+    def test_rollback_restores_a_history_entry_trimmed_by_the_limit(self) -> None:
+        model = _line_model(
+            capacitances=(10.0, 10.0),
+            conductances=(1.0,),
+            temperatures=(300.0, 280.0),
+        )
+        matrices = build_matrices(model)
+        prepared = prepare_simulation(model, matrices, _params(dt_s=0.5, simulation_history_limit=3))
+        for _ in range(3):
+            prepared.step_forward()
+        self.assertEqual(len(prepared.history), 3)
+        oldest = prepared.history[0]
+
+        snapshot = prepared.snapshot_state()
+        prepared.step_forward()  # pushes the oldest entry off the front
+        self.assertIsNot(prepared.history[0], oldest)
+
+        prepared.restore_state(snapshot)
+        self.assertIs(prepared.history[0], oldest)
+        self.assertEqual(len(prepared.history), 3)
+
+    def test_history_limit_is_clamped_by_the_memory_budget(self) -> None:
+        model = _line_model(
+            capacitances=(10.0, 10.0),
+            conductances=(1.0,),
+            temperatures=(300.0, 280.0),
+        )
+        matrices = build_matrices(model)
+        # 2 nodes = 16 bytes per stored step; a 1 MB budget cannot bind.
+        roomy = prepare_simulation(
+            model,
+            matrices,
+            _params(dt_s=0.5, simulation_history_limit=64, simulation_history_memory_budget_MB=1.0),
+        )
+        self.assertEqual(roomy._effective_history_limit(), 64)
+        self.assertFalse([w for w in roomy.warnings if "Replay history capped" in w])
+
+        # A budget below one step's cost floors at 2 entries and warns once.
+        tight = prepare_simulation(
+            model,
+            matrices,
+            _params(dt_s=0.5, simulation_history_limit=64, simulation_history_memory_budget_MB=1.0e-6),
+        )
+        self.assertEqual(tight._effective_history_limit(), 2)
+        self.assertEqual(tight._effective_history_limit(), 2)  # idempotent
+        capped = [w for w in tight.warnings if "Replay history capped" in w]
+        self.assertEqual(len(capped), 1)  # warned once, not once per step
+        self.assertIn("Replay history capped at 2 steps", capped[0])
+        for _ in range(5):
+            tight.step_forward()
+        self.assertEqual(len(tight.history), 2)
+
+        # Budget disabled -> the configured step count is honored verbatim.
+        unbounded = prepare_simulation(
+            model,
+            matrices,
+            _params(dt_s=0.5, simulation_history_limit=64, simulation_history_memory_budget_MB=0.0),
+        )
+        self.assertEqual(unbounded._effective_history_limit(), 64)
+
 
 def _params(
     *,

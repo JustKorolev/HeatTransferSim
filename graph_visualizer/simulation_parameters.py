@@ -134,6 +134,11 @@ class SimulationParameters:
     contact_conductance_temp_exponent: float = 1.0
     contact_conductance_reference_temperature_K: float = 293.15
     simulation_history_limit: int = 256
+    # Ceiling on the replay history's memory, applied on top of
+    # simulation_history_limit. An entry is 8 bytes/node, so a step-count limit
+    # alone scales into gigabytes on multi-million-cell graphs. 0 disables the
+    # clamp (step-count limit only).
+    simulation_history_memory_budget_MB: float = 512.0
     live_step_profiling_enabled: bool = True
     live_step_profile_threshold_ms: float = 1000.0
     browser_simulation_size_warning: int = 1000
