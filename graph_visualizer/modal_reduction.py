@@ -290,6 +290,7 @@ class ModalDesignResult:
     hsv_above_1pct: int
     cond_dc_gain: float
     inert_cells_dropped: int = 0
+    T_op_K: float = 0.0
 
     def summary(self) -> str:
         inert = (
@@ -448,8 +449,86 @@ def design_modal_controller(
         hsv_above_1pct=int(np.sum(hsv_norm > 1e-2)),
         cond_dc_gain=float(np.linalg.cond(G)),
         inert_cells_dropped=int(inert_info["dropped"]),
+        T_op_K=float(T_op_K),
     )
 
 
 def result_as_dict(result: ModalDesignResult) -> dict[str, Any]:
     return asdict(result)
+
+
+# ------------------------------------------------------------------ artifact discovery
+
+MODAL_ARTIFACT_PREFIX = "modal_controller"
+MODAL_ARTIFACT_GLOB = f"{MODAL_ARTIFACT_PREFIX}*.npz"
+
+
+@dataclass(frozen=True)
+class ModalArtifactInfo:
+    """A built modal-LQR controller found on disk, with the descriptors that tell
+    it apart from other builds of the same graph."""
+
+    path: Path
+    reduced_order: int
+    n_modes: int
+    T_op_K: float
+    graph_name: str
+
+    @property
+    def label(self) -> str:
+        return f"Modal LQR r={self.reduced_order} / {self.n_modes} modes / T_op={_format_T_op(self.T_op_K)}"
+
+
+def _format_T_op(value: float) -> str:
+    return f"{float(value):g} K"
+
+
+def modal_artifact_filename(reduced_order: int, n_modes: int, T_op_K: float) -> str:
+    """Descriptor-derived artifact name, so builds that differ in order, mode count
+    or operating point sit side by side instead of overwriting each other.
+    Rebuilding with identical descriptors intentionally overwrites."""
+    temperature = f"{float(T_op_K):g}".replace(".", "p").replace("-", "m")
+    return f"{MODAL_ARTIFACT_PREFIX}_r{int(reduced_order)}_m{int(n_modes)}_T{temperature}K.npz"
+
+
+def describe_modal_artifact(path: Path | str) -> ModalArtifactInfo | None:
+    """Read a built artifact's descriptors, or None if it is unreadable/not one.
+
+    Descriptors come from inside the .npz, not the filename, so artifacts built
+    by tools/analyze_plant_modes.py or renamed by hand still describe correctly.
+    """
+    path = Path(path)
+    try:
+        with np.load(path, allow_pickle=True) as data:
+            if "K" not in data or "dc_gain_pinv" not in data:
+                return None
+            return ModalArtifactInfo(
+                path=path,
+                reduced_order=int(data["r"]) if "r" in data else int(np.asarray(data["K"]).shape[1]),
+                n_modes=int(data["n_modes"]) if "n_modes" in data else 0,
+                T_op_K=float(data["T_op_K"]) if "T_op_K" in data else 0.0,
+                graph_name=str(data["graph"]) if "graph" in data else "",
+            )
+    except Exception:  # noqa: BLE001 - a corrupt/foreign .npz is simply not offered
+        return None
+
+
+def list_modal_artifacts(folder: Path | None) -> list[ModalArtifactInfo]:
+    """Every readable modal-LQR artifact in a graph folder, newest build first."""
+    if folder is None:
+        return []
+    folder = Path(folder)
+    if not folder.is_dir():
+        return []
+    infos: list[tuple[float, ModalArtifactInfo]] = []
+    for candidate in sorted(folder.glob(MODAL_ARTIFACT_GLOB)):
+        info = describe_modal_artifact(candidate)
+        if info is None:
+            continue
+        try:
+            mtime = candidate.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        infos.append((mtime, info))
+    infos.sort(key=lambda item: (-item[0], str(item[1].path)))
+    return [info for _mtime, info in infos]

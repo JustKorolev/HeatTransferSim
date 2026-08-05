@@ -2547,8 +2547,106 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(info2["dropped"], 0)
         self.assertTrue(np.array_equal(nid2, node_ids[:4]))
 
+    def test_controller_dropdown_lists_only_generated_modal_controllers(self) -> None:
+        import tempfile
+
+        try:
+            from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"Graph visualizer dependency unavailable: {exc}")
+        from graph_visualizer.modal_reduction import modal_artifact_filename
+
+        class Combo:
+            def __init__(self) -> None:
+                self.items: list[tuple[str, Any]] = []
+                self.index = -1
+
+            def clear(self) -> None:
+                self.items = []
+                self.index = -1
+
+            def addItem(self, text: str, data: Any = None) -> None:
+                self.items.append((text, data))
+
+            def count(self) -> int:
+                return len(self.items)
+
+            def setCurrentIndex(self, index: int) -> None:
+                self.index = index
+
+            def currentText(self) -> str:
+                return self.items[self.index][0] if 0 <= self.index < len(self.items) else ""
+
+            def currentData(self) -> Any:
+                return self.items[self.index][1] if 0 <= self.index < len(self.items) else None
+
+        def write_artifact(folder: Path, r: int, n_modes: int, T_op: float) -> Path:
+            path = folder / modal_artifact_filename(r, n_modes, T_op)
+            np.savez(
+                path,
+                K=np.zeros((1, r)),
+                dc_gain_pinv=np.zeros((1, 1)),
+                r=r,
+                n_modes=n_modes,
+                T_op_K=T_op,
+                graph="bench",
+            )
+            return path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            tab = object.__new__(HeatTransferSimulationTab)
+            tab.folder = folder
+            tab.params = SimulationParameters()
+            tab.controller_scheme_combo = Combo()
+            tab._refreshing_controller_combo = False
+            tab._modal_artifacts = []
+
+            # Nothing generated yet: Modal LQR is not offered at all.
+            tab._refresh_controller_choices()
+            self.assertEqual([t for t, _d in tab.controller_scheme_combo.items], ["PID + QP allocator"])
+            self.assertEqual(tab._controller_selected_scheme(), "pid_qp")
+            self.assertEqual(tab._modal_controller_path_value(), "")
+
+            # Two builds that differ only in operating point are listed separately.
+            first = write_artifact(folder, r=33, n_modes=120, T_op=55.0)
+            second = write_artifact(folder, r=8, n_modes=60, T_op=293.15)
+            tab._refresh_controller_choices(second)
+            labels = [t for t, _d in tab.controller_scheme_combo.items]
+            self.assertEqual(labels[0], "PID + QP allocator")
+            self.assertEqual(
+                sorted(labels[1:]),
+                sorted(
+                    [
+                        "Modal LQR r=33 / 120 modes / T_op=55 K",
+                        "Modal LQR r=8 / 60 modes / T_op=293.15 K",
+                    ]
+                ),
+            )
+            self.assertEqual(tab._controller_selected_scheme(), "modal_lqr")
+            self.assertEqual(Path(tab._modal_controller_path_value()), second)
+            self.assertEqual(tab._modal_controller_path(), second)
+
+            # Selection survives a refresh, and a deleted artifact drops out.
+            tab._refresh_controller_choices()
+            self.assertEqual(Path(tab._modal_controller_path_value()), second)
+            second.unlink()
+            tab._refresh_controller_choices()
+            self.assertEqual(
+                [t for t, _d in tab.controller_scheme_combo.items],
+                ["PID + QP allocator", "Modal LQR r=33 / 120 modes / T_op=55 K"],
+            )
+            self.assertEqual(tab._controller_selected_scheme(), "pid_qp")
+
+            # A non-artifact .npz in the folder is ignored rather than offered.
+            np.savez(folder / "modal_controller_bogus.npz", something_else=np.zeros(3))
+            tab._refresh_controller_choices(first)
+            self.assertEqual(len(tab.controller_scheme_combo.items), 2)
+            self.assertEqual(Path(tab._modal_controller_path_value()), first)
+
     def test_build_modal_controller_panel_wires_result_into_scheme(self) -> None:
         import os
+        import re
 
         try:
             from graph_visualizer.heat_transfer_simulation_tab import HeatTransferSimulationTab
@@ -2613,6 +2711,35 @@ class GraphVisualizerModelTests(unittest.TestCase):
             def currentText(self) -> str:
                 return ""
 
+        class Combo(Widget):
+            """Minimal QComboBox stand-in with the item/userData API."""
+
+            def __init__(self) -> None:
+                self.items: list[tuple[str, Any]] = []
+                self.index = -1
+
+            def clear(self) -> None:
+                self.items = []
+                self.index = -1
+
+            def addItem(self, text: str, data: Any = None) -> None:
+                self.items.append((text, data))
+
+            def count(self) -> int:
+                return len(self.items)
+
+            def itemText(self, index: int) -> str:
+                return self.items[index][0]
+
+            def setCurrentIndex(self, index: int) -> None:
+                self.index = index
+
+            def currentText(self) -> str:
+                return self.items[self.index][0] if 0 <= self.index < len(self.items) else ""
+
+            def currentData(self) -> Any:
+                return self.items[self.index][1] if 0 <= self.index < len(self.items) else None
+
         tab = object.__new__(HeatTransferSimulationTab)
         tab.model = model
         tab.matrices = build_matrices(model)
@@ -2624,8 +2751,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
         tab.simulation_executor = None  # run the build inline (synchronous) for the test
         tab._modal_design_progress = {"message": ""}
         tab.params = SimulationParameters(input_mode="heater_inputs", mimo_controller_scheme="pid_qp")
-        tab._controller_scheme_labels = {"pid_qp": "PID + QP allocator", "modal_lqr": "Modal LQR (reduced-model)"}
-        tab.controller_scheme_combo = Widget()
+        tab.controller_scheme_combo = Combo()
+        tab._refreshing_controller_combo = False
+        tab._modal_artifacts = []
         tab.modal_temp_spin = Spin(150.0)
         tab.modal_modes_spin = Spin(5)
         tab.modal_order_spin = Spin(3)
@@ -2641,9 +2769,20 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
         # The freshly-built artifact is auto-wired into the modal-LQR scheme.
         self.assertEqual(tab.params.mimo_controller_scheme, "modal_lqr")
-        self.assertTrue(tab.params.modal_controller_path.endswith("modal_controller.npz"))
+        # Named for the descriptors it was actually built with, not a fixed filename,
+        # so builds at other orders/modes/operating points sit alongside it.
+        self.assertTrue(
+            re.fullmatch(r"modal_controller_r\d+_m\d+_T\d+K\.npz", os.path.basename(tab.params.modal_controller_path)),
+            tab.params.modal_controller_path,
+        )
         self.assertTrue(os.path.exists(tab.params.modal_controller_path))
         self.assertAlmostEqual(tab.params.modal_integral_gain, 0.05)
+        # It is now a selectable row in the dropdown, labelled with those descriptors.
+        labels = [text for text, _data in tab.controller_scheme_combo.items]
+        self.assertEqual(labels[0], "PID + QP allocator")
+        self.assertEqual(len(labels), 2)
+        self.assertRegex(labels[1], r"^Modal LQR r=\d+ / \d+ modes / T_op=150 K$")
+        self.assertEqual(tab.controller_scheme_combo.currentData(), tab.params.modal_controller_path)
         # The controller actually loads it onto this graph (no fallback).
         matrices = build_matrices(model)
         prepared = prepare_simulation(model, matrices, tab.params)

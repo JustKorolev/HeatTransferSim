@@ -21,7 +21,13 @@ except Exception:  # pragma: no cover
 from .diagnostics import log_event, log_exception
 from .graph_io import has_generated_role_contact_edges, load_graph_folder, save_graph_folder
 from .matrix_builder import build_matrices, refresh_geometry_edges, refresh_radiation_from_exposed_faces
-from .modal_reduction import design_modal_controller
+from .modal_reduction import (
+    ModalArtifactInfo,
+    describe_modal_artifact,
+    design_modal_controller,
+    list_modal_artifacts,
+    modal_artifact_filename,
+)
 from .models import EdgeMode, ThermalGraphModel
 from .pyvista_widget import GraphPyVistaWidget
 from .role_assignment import node_matches_material_visibility
@@ -149,6 +155,8 @@ class HeatTransferSimulationTab:
         self.temperature_by_node: dict[int, float] = {}
         self.inputs: dict[str, Any] = {}
         self._refreshing_sys_id_matrix_combo = False
+        self._refreshing_controller_combo = False
+        self._modal_artifacts: list[ModalArtifactInfo] = []
         self.enabled_heater_node_ids: set[int] = set()
         self.enabled_sensor_node_ids: set[int] = set()
         self._known_heater_node_ids: set[int] = set()
@@ -363,27 +371,19 @@ class HeatTransferSimulationTab:
         self.input_mode.setCurrentText(self.params.input_mode)
         self.input_mode.currentTextChanged.connect(lambda *_: self._handle_parameter_change("input_mode"))
         run_form.addRow("input mode", self.input_mode)
-        self._controller_scheme_labels = {
-            "pid_qp": "PID + QP allocator",
-            "modal_lqr": "Modal LQR (reduced-model)",
-        }
         self.controller_scheme_combo = self.QtWidgets.QComboBox()
-        self.controller_scheme_combo.addItems(list(self._controller_scheme_labels.values()))
-        current_scheme = str(getattr(self.params, "mimo_controller_scheme", "pid_qp"))
-        self.controller_scheme_combo.setCurrentText(
-            self._controller_scheme_labels.get(current_scheme, "PID + QP allocator")
-        )
         self.controller_scheme_combo.setToolTip(
             "Heater controller for 'heater_inputs' mode.\n"
-            "- PID + QP allocator: the standard controller.\n"
-            "- Modal LQR (reduced-model): reduced-order LQR + regularized static state estimate; "
-            "needs 'modal_controller.npz' for this graph (build it with the 'Modal LQR Design' panel "
-            "below, or tools/analyze_plant_modes.py). "
-            "Falls back to PID+QP if the artifact is missing or built for a different graph."
+            "- PID + QP allocator: the standard controller, always available.\n"
+            "- Modal LQR entries: one per controller actually built for this graph, labelled with "
+            "the reduced order, mode count and design operating point that distinguish them. "
+            "Build one with the 'Modal LQR Design' panel below (or tools/analyze_plant_modes.py); "
+            "until then there is nothing to select."
         )
         self.controller_scheme_combo.currentTextChanged.connect(
-            lambda *_: self._handle_parameter_change("mimo_controller_scheme")
+            self._handle_controller_scheme_selection
         )
+        self._refresh_controller_choices()
         run_form.addRow("controller", self.controller_scheme_combo)
         form.addRow(run_box)
 
@@ -1005,6 +1005,7 @@ class HeatTransferSimulationTab:
         self._load_params_from_folder()
         self._reset_enabled_io_from_params()
         self._refresh_sys_id_matrix_list()
+        self._refresh_controller_choices()
         self._sync_component_options()
         self._reset_to_model_initial_temperatures()
         self._simulation_reinitialize_pending = False
@@ -1034,6 +1035,7 @@ class HeatTransferSimulationTab:
             self._load_params_from_folder()
             self._reset_enabled_io_from_params()
             self._refresh_sys_id_matrix_list()
+            self._refresh_controller_choices()
             self._sync_component_options()
             self._reset_to_model_initial_temperatures()
             self._simulation_reinitialize_pending = False
@@ -1185,16 +1187,72 @@ class HeatTransferSimulationTab:
         self._large_graph_viz_ack = True  # don't nag again this session
         return True
 
+    _PID_QP_LABEL = "PID + QP allocator"
+
+    def _refresh_controller_choices(self, select_path: Path | str | None = None) -> None:
+        """Rebuild the controller dropdown from what has actually been built.
+
+        PID+QP is always offered; every other row is a modal-LQR artifact that
+        exists on disk for this graph. Modal LQR is deliberately NOT listed as a
+        standing option -- selecting a controller that has no artifact behind it
+        just silently fell back to PID+QP at run time."""
+        combo = getattr(self, "controller_scheme_combo", None)
+        if combo is None:
+            return
+        if isinstance(select_path, bool):
+            select_path = None
+        target = Path(select_path) if select_path is not None else self._selected_modal_artifact_path()
+        if target is None:
+            configured = str(getattr(self.params, "modal_controller_path", "") or "")
+            if configured and str(getattr(self.params, "mimo_controller_scheme", "")) == "modal_lqr":
+                target = Path(configured)
+        artifacts = list_modal_artifacts(self.folder)
+        # An artifact can live outside the scanned graph folder -- an explicitly
+        # configured modal_controller_path, or a build made with no graph folder
+        # loaded (which lands in the temp dir). Offer it too, or the controller the
+        # user just built would be unselectable.
+        if target is not None and not any(info.path == target for info in artifacts):
+            external = describe_modal_artifact(target)
+            if external is not None:
+                artifacts.insert(0, external)
+        self._modal_artifacts = artifacts
+        self._refreshing_controller_combo = True
+        try:
+            combo.clear()
+            combo.addItem(self._PID_QP_LABEL, None)
+            target_index = 0
+            for info in self._modal_artifacts:
+                combo.addItem(info.label, str(info.path))
+                if target is not None and info.path == target:
+                    target_index = combo.count() - 1
+            combo.setCurrentIndex(target_index)
+        finally:
+            self._refreshing_controller_combo = False
+
+    def _handle_controller_scheme_selection(self, *_: Any) -> None:
+        if getattr(self, "_refreshing_controller_combo", False):
+            return
+        self._handle_parameter_change("mimo_controller_scheme")
+
+    def _selected_modal_artifact_path(self) -> Path | None:
+        combo = getattr(self, "controller_scheme_combo", None)
+        if combo is None:
+            return None
+        try:
+            data = combo.currentData()
+        except AttributeError:
+            return None
+        if not data:
+            return None
+        return Path(str(data))
+
     def _controller_selected_scheme(self) -> str:
-        labels_to_key = {v: k for k, v in getattr(self, "_controller_scheme_labels", {}).items()}
-        return labels_to_key.get(self.controller_scheme_combo.currentText(), "pid_qp")
+        return "modal_lqr" if self._selected_modal_artifact_path() is not None else "pid_qp"
 
     def _modal_controller_path(self) -> Path | None:
-        explicit = str(getattr(self.params, "modal_controller_path", "") or "")
-        if explicit and Path(explicit).exists():
-            return Path(explicit)
-        if self.folder is not None and (self.folder / "modal_controller.npz").exists():
-            return self.folder / "modal_controller.npz"
+        selected = self._selected_modal_artifact_path()
+        if selected is not None and selected.exists():
+            return selected
         return None
 
     def _confirm_controller_ok(self) -> bool:
@@ -1204,10 +1262,12 @@ class HeatTransferSimulationTab:
             return True  # PID+QP needs no artifact
         if self._modal_controller_path() is not None:
             return True
+        # Only reachable if the artifact was deleted/moved after it was listed.
         reply = self.QtWidgets.QMessageBox.question(
             self.widget,
-            "No controller selected",
-            "Modal LQR is selected but no 'modal_controller.npz' was found for this graph.\n\n"
+            "Controller artifact missing",
+            f"The selected modal controller file is gone:\n\n"
+            f"{self._selected_modal_artifact_path()}\n\n"
             "The run will fall back to the PID+QP controller. Run anyway?",
             self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
             self.QtWidgets.QMessageBox.No,
@@ -1671,11 +1731,17 @@ class HeatTransferSimulationTab:
             log_exception("modal controller build failed", exc)
 
     def _modal_controller_output_path(self) -> Path:
-        # Save next to the graph so _modal_controller_path_value auto-discovers it;
-        # otherwise fall back to the scratch/session temp dir.
-        if self.folder is not None:
-            return self.folder / "modal_controller.npz"
-        return Path(tempfile.gettempdir()) / "modal_controller.npz"
+        # Descriptor-named so builds that differ in order/modes/operating point sit
+        # side by side in the dropdown instead of overwriting each other. Saved next
+        # to the graph so list_modal_artifacts finds it again on reload; otherwise
+        # fall back to the scratch/session temp dir.
+        name = modal_artifact_filename(
+            int(self.modal_order_spin.value()),
+            int(self.modal_modes_spin.value()),
+            float(self.modal_temp_spin.value()),
+        )
+        root = self.folder if self.folder is not None else Path(tempfile.gettempdir())
+        return root / name
 
     def _poll_modal_design_worker(self) -> None:
         future = getattr(self, "modal_design_future", None)
@@ -1700,9 +1766,32 @@ class HeatTransferSimulationTab:
             return
         self._apply_modal_design_result(result)
 
+    def _canonicalize_modal_artifact_path(self, result: Any) -> str:
+        """Rename the artifact to match the descriptors it actually ended up with.
+
+        The output path is chosen from the spin boxes before the build, but
+        design_modal_controller clamps both the mode count (to the connected
+        component size) and the reduced order (to the mode count). Without this,
+        two builds that clamp to the same design would land in different files and
+        show up as duplicate rows with identical labels."""
+        current = Path(result.path)
+        wanted = current.with_name(
+            modal_artifact_filename(
+                int(result.reduced_order), int(result.n_modes), float(result.T_op_K)
+            )
+        )
+        if wanted == current:
+            return str(current)
+        try:
+            current.replace(wanted)
+        except OSError:
+            return str(current)  # keep the build rather than lose it over a rename
+        return str(wanted)
+
     def _apply_modal_design_result(self, result: Any) -> None:
         self.modal_design_button.setEnabled(True)
         self.modal_design_status_label.setText(result.summary())
+        result = replace(result, path=self._canonicalize_modal_artifact_path(result))
         # Wire the freshly-built artifact into the modal-LQR scheme and switch to it.
         self.params = replace(
             self.params,
@@ -1710,10 +1799,12 @@ class HeatTransferSimulationTab:
             modal_controller_path=result.path,
             modal_integral_gain=float(self.modal_integral_spin.value()),
         )
+        # The new artifact joins the dropdown (or replaces the row it rebuilt) and
+        # becomes the selection.
         combo = getattr(self, "controller_scheme_combo", None)
         if combo is not None:
             combo.blockSignals(True)
-            combo.setCurrentText(self._controller_scheme_labels.get("modal_lqr", combo.currentText()))
+            self._refresh_controller_choices(result.path)
             combo.blockSignals(False)
         # Rebuild the prepared simulation so the controller picks up the artifact.
         if self.model is not None:
@@ -1988,6 +2079,7 @@ class HeatTransferSimulationTab:
             self.matrices = build_matrices(model)
             self._sync_enabled_io_table()
             self._refresh_sys_id_matrix_list()
+            self._refresh_controller_choices()
             if reinitialize and self.prepared is not None:
                 was_playing = self.timer.isActive()
                 self.timer.stop()
@@ -2705,18 +2797,15 @@ class HeatTransferSimulationTab:
         combo = getattr(self, "controller_scheme_combo", None)
         if combo is None:
             return str(getattr(self.params, "mimo_controller_scheme", "pid_qp"))
-        label = combo.currentText()
-        for key, text in self._controller_scheme_labels.items():
-            if text == label:
-                return key
-        return "pid_qp"
+        return self._controller_selected_scheme()
 
     def _modal_controller_path_value(self) -> str:
-        # The modal controller artifact travels with the graph folder.
-        if self.folder is not None:
-            candidate = self.folder / "modal_controller.npz"
-            if candidate.exists():
-                return str(candidate)
+        # Whichever built artifact the dropdown points at; empty for PID+QP.
+        selected = self._selected_modal_artifact_path()
+        if selected is not None:
+            return str(selected)
+        if getattr(self, "controller_scheme_combo", None) is not None:
+            return ""
         return str(getattr(self.params, "modal_controller_path", "") or "")
 
     def _mimo_controller_should_run(self) -> bool:
@@ -2794,8 +2883,11 @@ class HeatTransferSimulationTab:
         combo = getattr(self, "controller_scheme_combo", None)
         if combo is not None:
             scheme = str(getattr(self.params, "mimo_controller_scheme", "pid_qp"))
+            configured = str(getattr(self.params, "modal_controller_path", "") or "")
             combo.blockSignals(True)
-            combo.setCurrentText(self._controller_scheme_labels.get(scheme, "PID + QP allocator"))
+            self._refresh_controller_choices(
+                configured if scheme == "modal_lqr" and configured else None
+            )
             combo.blockSignals(False)
 
     def _visible_node_ids(self) -> set[int] | None:
