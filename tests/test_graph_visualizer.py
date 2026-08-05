@@ -52,6 +52,7 @@ from graph_visualizer.role_assignment import (
     assign_matching_nodes_to_role,
     node_has_heater_sensor_role,
     node_matches_heater_sensor_filters,
+    node_matches_material_visibility,
     node_matches_level_filter,
     node_matches_role_substring,
     normalize_role_match_text,
@@ -1381,6 +1382,25 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertTrue(node_matches_heater_sensor_filters(heater, True, True))
         self.assertTrue(node_matches_heater_sensor_filters(sensor, True, True))
         self.assertFalse(node_matches_heater_sensor_filters(cooler, True, True))
+
+    def test_cad_role_markers_survive_the_hide_unassigned_material_filter(self) -> None:
+        # STEP builds resolve role components against the material table and get
+        # "Unassigned (ignored)"; hiding those removed every heater/sensor marker,
+        # so the heater/sensor view filters selected an empty scene.
+        heater = NodeProperties.with_material(1, (0, 0, 0), material="Unassigned (ignored)")
+        heater.node_type = "heater"
+        heater.level = -1
+        heater.is_heater = True
+        heater.source_components = ["V_GUUTZ_HIGH-POWER-SAFE-HEATER_HISPEC"]
+        body = NodeProperties.with_material(2, (1, 0, 0), material="Unassigned (ignored)")
+        void = NodeProperties.with_material(3, (2, 0, 0), material="ZERO MATTER")
+        solid = NodeProperties.with_material(4, (3, 0, 0), material="copper")
+
+        self.assertTrue(node_matches_material_visibility(heater, True))
+        self.assertFalse(node_matches_material_visibility(body, True))
+        self.assertTrue(node_matches_material_visibility(void, True))
+        self.assertTrue(node_matches_material_visibility(solid, True))
+        self.assertTrue(node_matches_material_visibility(body, False))
 
     def test_node_connection_counts_reports_total_and_visible_neighbors(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="connection_counts"))
@@ -3153,6 +3173,83 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(len(wireframe_calls), 2)
         line_calls = [mesh for mesh, kwargs in widget.plotter.calls if kwargs.get("line_width") == 4]
         self.assertEqual(len(line_calls), 1)
+
+    def test_batched_renderer_draws_heater_and_sensor_markers(self) -> None:
+        import sys
+        import types
+
+        matplotlib_stubbed = "matplotlib" not in sys.modules
+        if matplotlib_stubbed:
+            sys.modules["matplotlib"] = types.SimpleNamespace(colormaps={})
+        try:
+            from graph_visualizer.pyvista_widget import (
+                _BATCHED_MARKER_NODE_LIMIT,
+                GraphPyVistaWidget,
+            )
+        finally:
+            if matplotlib_stubbed:
+                sys.modules.pop("matplotlib", None)
+
+        class FakePlotter:
+            def __init__(self) -> None:
+                self.points = []
+                self.labels = []
+
+            def add_points(self, points, **kwargs):
+                self.points.append((np.asarray(points, dtype=float), kwargs))
+                return object()
+
+            def add_point_labels(self, points, labels, **kwargs):
+                self.labels.append((np.asarray(points, dtype=float), list(labels)))
+                return object()
+
+        def make_widget() -> Any:
+            widget = object.__new__(GraphPyVistaWidget)
+            widget.show_heaters = True
+            widget.show_sensors = True
+            widget.show_coolers = True
+            widget.plotter = FakePlotter()
+            widget._marker_actors = []
+            widget._marker_actors_by_kind = {"heater": [], "sensor": [], "cooler": []}
+            widget._marker_actor_positions = []
+            widget._set_actor_visible = lambda actor, visible: None
+            return widget
+
+        def role_node(node_id: int, kind: str) -> NodeProperties:
+            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="Unassigned (ignored)")
+            node.center_mm = (float(node_id), 0.0, 0.0)
+            node.size_mm = (2.0, 2.0, 2.0)
+            node.node_type = kind
+            node.source_components = [f"V_GUUTZ_{kind.upper()}"]
+            setattr(node, f"is_{kind}", True)
+            return node
+
+        widget = make_widget()
+        markers = [
+            (role_node(1, "heater"), np.array([1.0, 0.0, 0.0]), 2.0),
+            (role_node(2, "sensor"), np.array([2.0, 0.0, 0.0]), 2.0),
+        ]
+        widget._draw_batched_io_markers(markers)
+
+        self.assertEqual(len(widget.plotter.points), 2)
+        # Unpaired role markers carry the warning glyph ("H!"/"S!").
+        self.assertEqual([labels for _points, labels in widget.plotter.labels], [["H!"], ["S!"]])
+        self.assertEqual(
+            sorted({kind for _actor, _position, kind in widget._marker_actor_positions}),
+            ["heater", "sensor"],
+        )
+
+        # Past the cap the markers collapse to one unlabeled point cloud per kind.
+        widget = make_widget()
+        many = [
+            (role_node(index, "heater"), np.array([float(index), 0.0, 0.0]), 2.0)
+            for index in range(_BATCHED_MARKER_NODE_LIMIT + 1)
+        ]
+        widget._draw_batched_io_markers(many)
+
+        self.assertEqual(len(widget.plotter.points), 1)
+        self.assertEqual(widget.plotter.points[0][0].shape, (_BATCHED_MARKER_NODE_LIMIT + 1, 3))
+        self.assertEqual(widget.plotter.labels, [])
 
     def test_editor_view_controls_do_not_redraw_voxel_geometry(self) -> None:
         try:

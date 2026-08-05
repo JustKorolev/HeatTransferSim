@@ -35,6 +35,11 @@ _CUBE_FACE_TEMPLATE = (
 # (bottom quad 0-1-2-3 CCW, then the matching top quad 4-5-6-7). Needed so the
 # hexahedra can be surface-extracted to cull interior faces.
 _HEX_VTK_ORDER = (0, 1, 3, 2, 4, 5, 7, 6)
+# Above this many role-carrying cells the batched renderer drops the per-node
+# "H"/"S"/"C" sphere-and-label pair (two VTK actors each) for one point cloud per
+# kind. Hit only when a role was assigned to a whole component's worth of body
+# cells; the CAD marker nodes number in the hundreds at most.
+_BATCHED_MARKER_NODE_LIMIT = 750
 
 
 class GraphPyVistaWidget:
@@ -684,6 +689,51 @@ class GraphPyVistaWidget:
                 "cooler",
                 self.show_coolers,
             )
+
+    def _draw_batched_io_markers(self, marker_nodes: list[tuple[Any, Any, float]]) -> None:
+        """Add H/S/C markers for the role cells gathered by the batched pass."""
+        if not marker_nodes:
+            return
+        if len(marker_nodes) <= _BATCHED_MARKER_NODE_LIMIT:
+            for node, center, marker_side in marker_nodes:
+                self._add_io_markers_for_node(node, center, marker_side)
+            log_event("pyvista draw_batched io markers", markers=len(marker_nodes))
+            return
+        # Degenerate case (a role assigned to a whole component): one point cloud
+        # per kind, no labels. Cross-section then hides each cloud as a unit.
+        centers_by_kind: dict[str, list[Any]] = {"heater": [], "sensor": [], "cooler": []}
+        for node, center, _marker_side in marker_nodes:
+            if node.is_heater:
+                centers_by_kind["heater"].append(center)
+            if node.is_sensor:
+                centers_by_kind["sensor"].append(center)
+            if node.has_cryocooler:
+                centers_by_kind["cooler"].append(center)
+        styles = {
+            "heater": ("#ff6b35", self.show_heaters),
+            "sensor": ("#2a9d8f", self.show_sensors),
+            "cooler": ("#06b6d4", self.show_coolers),
+        }
+        for kind, centers in centers_by_kind.items():
+            if not centers:
+                continue
+            color, visible = styles[kind]
+            points = np.asarray(centers, dtype=float)
+            actor = self.plotter.add_points(
+                points,
+                color=color,
+                point_size=9,
+                render_points_as_spheres=True,
+            )
+            self._set_actor_visible(actor, visible)
+            self._marker_actors.append(actor)
+            self._marker_actors_by_kind.setdefault(kind, []).append(actor)
+            self._marker_actor_positions.append((actor, points.mean(axis=0), kind))
+        log_event(
+            "pyvista draw_batched io markers pointcloud",
+            markers=len(marker_nodes),
+            limit=_BATCHED_MARKER_NODE_LIMIT,
+        )
 
     def _draw_role_interface_overlays(self, model: ThermalGraphModel, visible: set[int]) -> None:
         outline_groups: dict[tuple[str, float], list[int]] = {}
@@ -1388,6 +1438,10 @@ class GraphPyVistaWidget:
         # real boundary faces -- a solid-looking cut surface, correct picking, and
         # the fast culled-shell path is still used.
         cross_filter = self.cross_section_enabled and self.cross_section_coordinate() is not None
+        # Heater/sensor/cryocooler markers are collected in this same pass: the
+        # role cells are otherwise indistinguishable inside the batched hex mesh,
+        # and a separate scan over a million nodes per draw is not affordable.
+        marker_nodes: list[tuple[Any, Any, float]] = []
         for node_id in model.ordered_node_ids():
             if node_id not in visible:
                 continue
@@ -1398,6 +1452,8 @@ class GraphPyVistaWidget:
             center, lengths = geometry
             if cross_filter and not self._cross_section_keeps_point(np.asarray(center, dtype=float)):
                 continue
+            if node.is_heater or node.is_sensor or node.has_cryocooler:
+                marker_nodes.append((node, center, float(max(lengths))))
             node_ids_list.append(node_id)
             centers_list.append(center)
             lengths_list.append(lengths)
@@ -1454,6 +1510,7 @@ class GraphPyVistaWidget:
                 **mesh_kwargs,
             )
         self._enable_actor_pick(self._batched_actor)
+        self._draw_batched_io_markers(marker_nodes)
         self._show_batched_selection(self.selected_node_ids)
         if self.show_edges:
             log_event("pyvista draw_batched draw edges")

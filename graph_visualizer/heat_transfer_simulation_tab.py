@@ -23,8 +23,8 @@ from .graph_io import has_generated_role_contact_edges, load_graph_folder, save_
 from .matrix_builder import build_matrices, refresh_geometry_edges, refresh_radiation_from_exposed_faces
 from .modal_reduction import design_modal_controller
 from .models import EdgeMode, ThermalGraphModel
-from .material_library import is_unassigned_material
 from .pyvista_widget import GraphPyVistaWidget
+from .role_assignment import node_matches_material_visibility
 from .role_pairing import sensor_readout_temperature_K
 from .simulation_model import PreparedSimulation, prepare_simulation, save_trajectory
 from .simulation_runner import RunConfig, SimulationRunner
@@ -2800,13 +2800,14 @@ class HeatTransferSimulationTab:
 
     def _visible_node_ids(self) -> set[int] | None:
         """Node set to draw. ``None`` means all; otherwise unassigned-material cells
-        are filtered out (``ZERO MATTER`` stays visible via ``is_unassigned_material``)."""
+        are filtered out (``ZERO MATTER`` and CAD heater/sensor markers stay visible
+        via ``node_matches_material_visibility``)."""
         if self.model is None or not self._hide_unassigned_getter():
             return None
         return {
             int(node_id)
             for node_id, node in self.model.nodes.items()
-            if not is_unassigned_material(node.material)
+            if node_matches_material_visibility(node, True)
         }
 
     def _handle_hide_unassigned_toggled(self, *_: Any) -> None:

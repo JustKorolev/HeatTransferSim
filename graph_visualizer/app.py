@@ -30,7 +30,7 @@ from .graph_io import (
     save_graph_folder,
 )
 from .heat_transfer_simulation_tab import HeatTransferSimulationTab
-from .material_library import default_material_library, is_unassigned_material
+from .material_library import default_material_library
 from .matrix_builder import (
     refresh_auto_edges,
     refresh_geometry_edges,
@@ -53,6 +53,7 @@ from .role_assignment import (
     assign_matching_nodes_to_role,
     node_matches_heater_sensor_filters,
     node_matches_level_filter,
+    node_matches_material_visibility,
     node_matches_role_substring,
     normalize_role_match_text,
 )
@@ -1896,7 +1897,7 @@ class GraphVisualizerApp:
                 continue
             if node.component_name in self._hidden_components:
                 continue
-            if self._hide_unassigned_material and is_unassigned_material(node.material):
+            if not node_matches_material_visibility(node, self._hide_unassigned_material):
                 continue
             if not node_matches_level_filter(node, min_level, max_level):
                 continue

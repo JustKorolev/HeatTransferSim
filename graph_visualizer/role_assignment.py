@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .material_library import is_unassigned_material
 from .models import NodeProperties, ThermalGraphModel
 
 
@@ -94,3 +95,19 @@ def node_matches_level_filter(node: NodeProperties, min_level: int, max_level: i
     if getattr(node, "is_cad_role_node", False):
         return True
     return int(min_level) <= int(getattr(node, "level", 0)) <= int(max_level)
+
+
+def node_matches_material_visibility(node: NodeProperties, hide_unassigned: bool) -> bool:
+    """View filter for "hide unassigned material" cells.
+
+    CAD heater/sensor marker nodes are exempt: they carry no voxel volume, so
+    their material is whatever the role component's CAD name happened to match
+    (frequently ``Unassigned (ignored)`` on STEP builds, where role parts are not
+    in the material table). Hiding them removes every heater/sensor from the
+    scene -- including when the heater/sensor filters are the only ones active,
+    which then renders nothing at all."""
+    if not hide_unassigned:
+        return True
+    if getattr(node, "is_cad_role_node", False):
+        return True
+    return not is_unassigned_material(getattr(node, "material", ""))
