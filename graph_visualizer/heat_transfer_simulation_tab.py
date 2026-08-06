@@ -1316,8 +1316,16 @@ class HeatTransferSimulationTab:
             params=self.params,
         )
         self._headless_cancel = threading.Event()
+        # Hand the runner the graph that is ALREADY loaded here. Re-loading it from
+        # disk would hold a second full copy of the model (a 3M-cell graph reached
+        # ~50 GB that way) and would run a long Python-level parse on this process's
+        # GIL, freezing the window before the run even started.
         self._headless_runner = SimulationRunner(
-            cfg, cancel_event=self._headless_cancel, initial_state=(node_ids, init_temps)
+            cfg,
+            cancel_event=self._headless_cancel,
+            initial_state=(node_ids, init_temps),
+            model=self.model,
+            matrices=self.matrices,
         )
         out_dir = self._headless_runner.out_dir
 

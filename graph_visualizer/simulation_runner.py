@@ -187,6 +187,8 @@ class SimulationRunner:
         cancel_event: Any | None = None,
         progress_cb: Callable[[dict], None] | None = None,
         initial_state: tuple[Any, Any] | None = None,
+        model: Any | None = None,
+        matrices: Any | None = None,
     ) -> None:
         self.cfg = config
         self.cancel_event = cancel_event  # anything with .is_set(); optional
@@ -197,6 +199,13 @@ class SimulationRunner:
         # of band (not through RunConfig) so a million-node vector never bloats
         # config.json. Takes precedence over cfg.initial_temperature_uniform_K.
         self._initial_state = initial_state
+        # An already-loaded graph (the GUI has one in memory). Reusing it avoids a
+        # SECOND full copy of a multi-million-node model -- the reason a GUI-launched
+        # 3M-cell run reached ~50 GB -- and avoids re-running the long Python-level
+        # load, which holds the GIL and freezes the window ("Not Responding").
+        self._shared_model = model
+        self._shared_matrices = matrices
+        self._owns_model = model is None
         self.graph_folder = Path(config.graph_folder)
         self.graph_name = self.graph_folder.name
         self.out_dir = Path(config.output_root) / self.graph_name / _timestamp()
@@ -252,6 +261,13 @@ class SimulationRunner:
         material/capacitance changes) would otherwise be silently lost. Both a
         timestamp check and a capacity cross-check against C.npy guard this, and any
         doubt falls back to the full loader."""
+        if self._shared_model is not None and self._shared_matrices is not None:
+            self._log_event(
+                "graph_load",
+                f"reusing the caller's in-memory graph ({len(self._shared_model.nodes)} nodes); "
+                "no second copy is loaded",
+            )
+            return self._shared_model, self._shared_matrices
         if not self.cfg.low_memory_load:
             return load_graph_folder(str(self.graph_folder))
         try:
@@ -327,10 +343,13 @@ class SimulationRunner:
         # from it, so it is pure overhead for the rest of the run.
         import gc
 
-        try:
-            model.octree_graph_data = None
-        except Exception:  # noqa: BLE001
-            pass
+        if self._owns_model:
+            # Only when WE loaded it: a shared model belongs to the caller (the GUI
+            # still needs octree_graph_data to reuse its loaded matrices).
+            try:
+                model.octree_graph_data = None
+            except Exception:  # noqa: BLE001
+                pass
         gc.collect()
         history_limit = prepared._effective_history_limit()
         self._log_event(
