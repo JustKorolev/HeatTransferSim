@@ -1,0 +1,11 @@
+{
+  "status": "failed: No controller selected and allow_no_controller=False. Choose a modal_controller.npz or set allow_no_controller=True to run open-loop.",
+  "step": 0,
+  "sim_time_s": 0.0,
+  "t_final_s": 3.0,
+  "progress": 0.0,
+  "wall_elapsed_s": 9.004981994628906,
+  "eta_s": NaN,
+  "rss_gib": 0.14,
+  "updated": "2026-08-06T15:17:42"
+}

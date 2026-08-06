@@ -1,0 +1,12 @@
+[2026-08-06T15:18:01] run_start: graph=HISPEC-CRYOSTAT-TEST-v4 out=simulations\HISPEC-CRYOSTAT-TEST-v4\20260806-151801
+[2026-08-06T15:18:10] low_memory_load: nodes.csv carries no per-node controller setpoint, so setpoints come from the run config (pass --setpoint / setpoints_K); any setpoints saved only in graph.json are not applied on this fast path.
+[2026-08-06T15:18:10] low_memory_load: loaded 81405 nodes without graph.json (rss=0.4 GiB)
+[2026-08-06T15:18:11] prepared: nodes=81405 sensors=72 heaters=33 cryo=0 controller=OPEN-LOOP history_limit=1 (~1 MB) rss=0.5 GiB
+[2026-08-06T15:18:11] prepare_warning: dt_s=1 s is coarse relative to estimated fastest tau=0.001504 s.
+[2026-08-06T15:18:11] prepare_warning: Graph has 81405 nodes; dense matrix exponential playback may be slow above 1000 nodes.
+[2026-08-06T15:18:11] prepare_warning: CPU implicit tr_bdf2 solver enabled (solver=cg, rtol=1e-06, maxiter=300, precond=jacobi).
+[2026-08-06T15:18:11] graph_not_connected: graph has 8 components; 392 node(s) are outside the main body (81013/81405). Isolated nodes exchange no heat and skew whole-graph metrics (as recorded at build time).
+[2026-08-06T15:18:11] unforced_run: WARNING: nothing drives this simulation -- no heater input (input_mode='zero' and no controller); no cryocooler nodes in the graph; radiative background equals the initial temperature (T_env=293.15 K), so net radiation is zero. Temperatures will not change.
+[2026-08-06T15:18:11] setpoints: 72 sensor setpoint(s) applied: min=120.000 K max=120.000 K, 1 distinct (per-sensor detail in sensors.csv)
+[2026-08-06T15:18:13] verification: wrote sensors.csv (72 sensors) and component_temperatures.csv (4121 components)
+[2026-08-06T15:18:13] run_end: status=completed

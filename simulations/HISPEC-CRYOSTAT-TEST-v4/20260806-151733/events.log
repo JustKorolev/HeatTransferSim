@@ -1,0 +1,5 @@
+[2026-08-06T15:17:33] run_start: graph=HISPEC-CRYOSTAT-TEST-v4 out=simulations\HISPEC-CRYOSTAT-TEST-v4\20260806-151733
+[2026-08-06T15:17:41] low_memory_load: nodes.csv carries no per-node controller setpoint, so setpoints come from the run config (pass --setpoint / setpoints_K); any setpoints saved only in graph.json are not applied on this fast path.
+[2026-08-06T15:17:41] low_memory_load: loaded 81405 nodes without graph.json (rss=0.4 GiB)
+[2026-08-06T15:17:41] hard_failure: No controller selected and allow_no_controller=False. Choose a modal_controller.npz or set allow_no_controller=True to run open-loop.
+[2026-08-06T15:17:42] run_end: status=failed: No controller selected and allow_no_controller=False. Choose a modal_controller.npz or set allow_no_controller=True to run open-loop.

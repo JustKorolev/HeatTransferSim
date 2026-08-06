@@ -1,0 +1,10 @@
+{
+  "graph_name": "HISPEC-CRYOSTAT-TEST-v4",
+  "graph_folder": "graphs\\HISPEC-CRYOSTAT-TEST-v4",
+  "graph_hash": "C.npy:651368:1784239873|L_sparse.json:17311022:1784239875|node_ids.npy:651368:1784239875|graph.json:329627017:1784239875|nodes.csv:46741691:1784239875",
+  "git_commit": "57eee85e2ed51fb82a8825d15716d4e1354b58a9",
+  "python": "3.11.15",
+  "started": "2026-08-06T15:17:33",
+  "seed": 0,
+  "params_override": false
+}

@@ -1,0 +1,14 @@
+{
+  "status": "completed",
+  "step": 3,
+  "sim_time_s": 3.0,
+  "t_final_s": 3.0,
+  "progress": 1.0,
+  "wall_elapsed_s": 12.031239986419678,
+  "eta_s": 0.0,
+  "rss_gib": 0.52,
+  "updated": "2026-08-06T15:18:13",
+  "last_rms_tracking_error_K": 173.1499999999998,
+  "last_max_temp_K": 293.15000000000146,
+  "last_power_in_W": 0.0
+}
