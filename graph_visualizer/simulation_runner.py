@@ -343,6 +343,13 @@ class SimulationRunner:
         )
         for warning in prepared.warnings:
             self._log_event("prepare_warning", str(warning))
+        # The engine appends some warnings LAZILY -- notably "modal controller
+        # unavailable (...); using PID+QP allocator", which is only raised when the
+        # controller is first evaluated, i.e. after this point. Remember how many we
+        # have logged so the step loop can surface the rest; otherwise a run could
+        # silently use a different controller than the one requested.
+        self._logged_warning_count = len(prepared.warnings)
+        self._warn_if_disconnected()
         self._warn_if_unforced(prepared, params, has_controller, cryo_idx)
         self._resume_if_checkpoint(prepared)
         return prepared, params, C_diag, sensors, heaters, cryo_idx
@@ -501,6 +508,7 @@ class SimulationRunner:
                 last_ckpt_wall = time.time()
             if step % max(1, self.cfg.status_interval_steps) == 0:
                 self._update_status(step, state.time_s)
+            self._drain_engine_warnings(prepared)
 
         if step == 0:
             self._log_event(
@@ -511,6 +519,51 @@ class SimulationRunner:
         # final checkpoint + status
         self._checkpoint(prepared, state if accepted else None, step)
         self._update_status(step, self._series.get("time_s", [0.0])[-1] if self._series.get("time_s") else 0.0)
+
+    def _warn_if_disconnected(self) -> None:
+        """Surface a graph that is not fully connected.
+
+        Islands are thermally isolated: they never exchange heat with the main body,
+        so they drift on their own and quietly skew whole-graph metrics (mean/max
+        temperature, energy balance). The build already computes this, so read its
+        report rather than re-running a connected-components pass on millions of
+        nodes."""
+        path = self.graph_folder / "connectivity_analysis.json"
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if data.get("connected", True):
+            return
+        total = int(data.get("node_count", 0) or 0)
+        largest = int(data.get("largest_component_size", 0) or 0)
+        stranded = max(0, total - largest) if total else len(data.get("disconnected_node_ids", []) or [])
+        self._log_event(
+            "graph_not_connected",
+            f"graph has {int(data.get('component_count', 0))} components; {stranded} node(s) are "
+            f"outside the main body ({largest}/{total}). Isolated nodes exchange no heat and "
+            "skew whole-graph metrics (as recorded at build time).",
+        )
+
+    def _drain_engine_warnings(self, prepared) -> None:
+        """Log warnings the engine appended since the last check.
+
+        Some are only raised once a feature is first exercised -- e.g. a modal
+        controller artifact that does not match the graph is detected when the
+        controller is first evaluated and silently degrades to the PID+QP
+        allocator. Surfacing them keeps the run's log honest about what actually
+        ran."""
+        warnings = getattr(prepared, "warnings", None)
+        if not warnings:
+            return
+        seen = getattr(self, "_logged_warning_count", 0)
+        if len(warnings) <= seen:
+            return
+        for warning in warnings[seen:]:
+            self._log_event("engine_warning", str(warning))
+        self._logged_warning_count = len(warnings)
 
     def _step_is_bad(self, temps, prev, dt, thr) -> tuple[bool, str]:
         # Only genuine SOLVER failures reject-and-halve (smaller dt can help those):

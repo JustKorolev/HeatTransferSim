@@ -20,7 +20,7 @@ steady-state DC gain feedforward.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -171,7 +171,7 @@ def drop_inert_cells(
 
 # ------------------------------------------------------------------ in-memory plant maps
 
-def heater_sensor_maps_from_model(model: Any, node_ids_full, main_rows):
+def heater_sensor_maps_from_model(model: Any, node_ids_full, main_rows, issues: list | None = None):
     """F (heater watts -> node power) and S (node temps -> sensor readout) built
     directly from the in-memory graph model, restricted to the main-component rows.
 
@@ -230,6 +230,29 @@ def heater_sensor_maps_from_model(model: Any, node_ids_full, main_rows):
             if gr is not None and local[gr] >= 0:
                 S[i, local[gr]] += float(wt)
 
+    # A heater whose deposition map is missing/mismatched, or whose target nodes all
+    # fall outside the main component, leaves an ALL-ZERO column in F -- it is still
+    # counted as an actuator but can no longer move the plant. The same holds for a
+    # sensor with an all-zero row in S: it reads a constant. Both used to pass
+    # silently and produce a controller designed around dead channels, so surface
+    # them instead of letting the design look healthy.
+    if issues is not None:
+        dead_heaters = [int(heater_ids[j]) for j in range(F.shape[1]) if not np.any(F[:, j])]
+        dead_sensors = [int(sensor_ids[i]) for i in range(S.shape[0]) if not np.any(S[i, :])]
+        if dead_heaters:
+            issues.append(
+                f"{len(dead_heaters)} heater(s) have an empty power-deposition map and "
+                f"cannot affect the plant (node ids {dead_heaters[:8]}"
+                + (", ..." if len(dead_heaters) > 8 else "")
+                + "); the controller would be designed around dead actuators."
+            )
+        if dead_sensors:
+            issues.append(
+                f"{len(dead_sensors)} sensor(s) have an empty readout map and report a "
+                f"constant (node ids {dead_sensors[:8]}"
+                + (", ..." if len(dead_sensors) > 8 else "")
+                + ")."
+            )
     return F, S, monitor, np.asarray(heater_ids, dtype=int), np.asarray(sensor_ids, dtype=int)
 
 
@@ -291,6 +314,9 @@ class ModalDesignResult:
     cond_dc_gain: float
     inert_cells_dropped: int = 0
     T_op_K: float = 0.0
+    # Non-fatal problems found while building the heater/sensor maps (e.g. actuators
+    # with an empty deposition map). Empty means the design is clean.
+    warnings: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         inert = (
@@ -298,12 +324,15 @@ class ModalDesignResult:
             if self.inert_cells_dropped
             else ""
         )
-        return (
+        text = (
             f"r={self.reduced_order} (from {self.n_modes} modes over {self.main_nodes} nodes{inert}); "
             f"{self.n_heaters} heaters, {self.n_controlled}/{self.n_sensors} controlled sensors; "
             f"reduced DC err {self.dc_gain_error:.1e}, step err {self.step_response_error:.1e}, "
             f"{'stable' if self.reduced_stable else 'UNSTABLE'}; cond(G)={self.cond_dc_gain:.0f}."
         )
+        for message in self.warnings:
+            text += f"\nWARNING: {message}"
+        return text
 
 
 def _report(progress: Callable[[str], None] | None, message: str) -> None:
@@ -353,7 +382,12 @@ def design_modal_controller(
     lam, Phi, Leff, _lam_max = slow_modes(Lm, Cm, Gradm, n_modes)
 
     _report(progress, "Building heater/sensor maps…")
-    F, S, monitor, heater_ids, sensor_ids = heater_sensor_maps_from_model(model, node_ids, main_rows)
+    design_warnings: list[str] = []
+    F, S, monitor, heater_ids, sensor_ids = heater_sensor_maps_from_model(
+        model, node_ids, main_rows, issues=design_warnings
+    )
+    for message in design_warnings:
+        _report(progress, f"WARNING: {message}")
     if F.shape[1] == 0:
         raise ValueError("No valid heaters found in the graph (need at least one).")
     if S.shape[0] == 0:
@@ -450,6 +484,7 @@ def design_modal_controller(
         cond_dc_gain=float(np.linalg.cond(G)),
         inert_cells_dropped=int(inert_info["dropped"]),
         T_op_K=float(T_op_K),
+        warnings=list(design_warnings),
     )
 
 

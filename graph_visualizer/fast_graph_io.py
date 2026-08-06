@@ -122,10 +122,22 @@ def _load_sparse_L(folder: Path, report: LoadReport) -> csr_matrix | None:
     as ``L_sparse.npz`` so later runs skip the (multi-minute, multi-GB) JSON parse."""
     from .graph_io import _load_sparse_laplacian, _load_sparse_laplacian_npz
 
-    matrix = _load_sparse_laplacian_npz(folder / "L_sparse.npz")
-    if matrix is not None:
-        return matrix
-    matrix = _load_sparse_laplacian(folder / "L_sparse.json")
+    npz_path = folder / "L_sparse.npz"
+    json_path = folder / "L_sparse.json"
+    # Only trust the cache while it is at least as new as the JSON; a rebuild that
+    # rewrote only L_sparse.json must not be silently overridden by a stale matrix.
+    stale_cache = (
+        npz_path.exists()
+        and json_path.exists()
+        and json_path.stat().st_mtime > npz_path.stat().st_mtime + 1.0
+    )
+    if stale_cache:
+        report.warnings.append("L_sparse.npz is older than L_sparse.json; rebuilding it.")
+    else:
+        matrix = _load_sparse_laplacian_npz(npz_path)
+        if matrix is not None:
+            return matrix
+    matrix = _load_sparse_laplacian(json_path)
     if matrix is None:
         return None
     try:
@@ -163,7 +175,21 @@ def validate_against_matrices(model: ThermalGraphModel, matrices: dict[str, Any]
     matrices. ``C.npy`` is rewritten whenever the graph is saved, so a mismatch in
     total heat capacity means nodes.csv is stale in ways the mtime check missed.
     Returns an error string, or None when consistent."""
+    # Structural invariants the full loader gets from validate_matrices(): the row
+    # order (node_ids) must line up with C and L, and every matrix row must have a
+    # node behind it. A mismatch here would silently apply the wrong node's
+    # capacitance/conduction to a row.
+    node_ids = np.asarray(matrices.get("node_ids"), dtype=int).reshape(-1)
     C = np.asarray(matrices.get("C"), dtype=float).reshape(-1)
+    if node_ids.size and C.size and node_ids.size != C.size:
+        return f"node_ids length {node_ids.size} != C length {C.size}."
+    L = matrices.get("L")
+    if L is not None and node_ids.size and tuple(L.shape) != (node_ids.size, node_ids.size):
+        return f"L shape {tuple(L.shape)} does not match {node_ids.size} nodes."
+    if node_ids.size:
+        missing = int(np.setdiff1d(node_ids, np.fromiter(model.nodes, dtype=int)).size)
+        if missing:
+            return f"{missing} matrix node ids have no nodes.csv row."
     if C.size == 0:
         return None
     node_total = float(sum(float(getattr(n, "C_J_K", 0.0)) for n in model.nodes.values()))

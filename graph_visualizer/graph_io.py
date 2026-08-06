@@ -385,11 +385,23 @@ def _load_sparse_laplacian_npz(path: Path) -> csr_matrix | None:
 
 
 def _load_sparse_laplacian_preferred(folder: Path) -> csr_matrix | None:
-    """Prefer the binary CSR ``.npz``; fall back to the legacy COO JSON."""
-    sparse_l = _load_sparse_laplacian_npz(folder / "L_sparse.npz")
+    """Prefer the binary CSR ``.npz``; fall back to the legacy COO JSON.
+
+    The ``.npz`` is only preferred while it is at least as new as the JSON: a
+    rebuild that rewrote only ``L_sparse.json`` would otherwise be silently ignored
+    in favour of a stale conductance matrix -- wrong physics with no error.
+    """
+    npz_path = folder / "L_sparse.npz"
+    json_path = folder / "L_sparse.json"
+    if npz_path.exists() and json_path.exists():
+        if json_path.stat().st_mtime > npz_path.stat().st_mtime + 1.0:
+            matrix = _load_sparse_laplacian(json_path)
+            if matrix is not None:
+                return matrix
+    sparse_l = _load_sparse_laplacian_npz(npz_path)
     if sparse_l is not None:
         return sparse_l
-    return _load_sparse_laplacian(folder / "L_sparse.json")
+    return _load_sparse_laplacian(json_path)
 
 
 def _load_sparse_laplacian(path: Path) -> csr_matrix | None:
