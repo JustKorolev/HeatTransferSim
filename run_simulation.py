@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from graph_visualizer.simulation_parameters import load_simulation_parameters
 from graph_visualizer.simulation_runner import RunConfig, FailureThresholds, run_simulation
 
 
@@ -29,7 +30,18 @@ def main() -> None:
     p.add_argument("--notes", default="")
     p.add_argument("--run-dir", default=None,
                    help="exact output directory (default: simulations/<graph>/<timestamp>)")
+    p.add_argument("--sim-params", default=None,
+                   help="simulation_parameters.json giving the FULL physics/solver settings "
+                        "(radiation, temperature-dependent properties, cryocooler, solver, "
+                        "controller gains). Defaults to the graph's own saved file if present, "
+                        "so a headless run matches what the GUI is configured to do.")
     args = p.parse_args()
+
+    sim_params = None
+    params_path = Path(args.sim_params) if args.sim_params else Path(args.graph) / "simulation_parameters.json"
+    if params_path.is_file():
+        sim_params, _extras = load_simulation_parameters(params_path)
+        print(f"Using simulation parameters from {params_path}")
 
     cfg = RunConfig(
         graph_folder=str(Path(args.graph)),
@@ -45,6 +57,7 @@ def main() -> None:
         snapshot_interval_s=args.snapshot_interval_s,
         checkpoint_interval_s=args.checkpoint_interval_s,
         notes=args.notes,
+        params=sim_params,
         thresholds=FailureThresholds(),
     )
     out_dir = run_simulation(cfg)

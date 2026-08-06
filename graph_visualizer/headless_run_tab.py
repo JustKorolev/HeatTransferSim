@@ -110,19 +110,37 @@ class HeadlessRunTab:
         initial_row.addWidget(self.use_initial)
         form.addRow("initial T K", initial_row)
 
-        self.dt_spin = self._double(1.0e-6, 1.0e6, 1.0, 0.1)
-        form.addRow("dt s", self.dt_spin)
-        self.duration_spin = self._double(1.0e-3, 1.0e12, 3600.0, 60.0)
-        form.addRow("duration s", self.duration_spin)
         self.snapshot_spin = self._double(0.0, 1.0e12, 300.0, 60.0)
         form.addRow("snapshot every s", self.snapshot_spin)
         self.checkpoint_spin = self._double(0.0, 1.0e12, 600.0, 60.0)
         self.checkpoint_spin.setToolTip("Wall-clock seconds between resume checkpoints.")
         form.addRow("checkpoint every s", self.checkpoint_spin)
 
-        self.gpu_checkbox = self.QtWidgets.QCheckBox("Use GPU solver when available")
-        self.gpu_checkbox.setChecked(True)
-        form.addRow(self.gpu_checkbox)
+        # FULL simulation parameters. A headless run must use the same physics as the
+        # Heat Transfer Simulation tab -- radiation, temperature-dependent properties,
+        # cryocooler, solver settings, controller gains -- not the runner's defaults,
+        # or it silently simulates a different system. The form is generated from the
+        # SimulationParameters dataclass so every field is exposed and it cannot drift
+        # as fields are added; values load from the graph's own
+        # simulation_parameters.json (what the GUI saved) and are written back out for
+        # the run.
+        params_box = self.QtWidgets.QGroupBox("Simulation parameters (full set)")
+        params_outer = self.QtWidgets.QVBoxLayout(params_box)
+        self.params_filter = self.QtWidgets.QLineEdit()
+        self.params_filter.setPlaceholderText("filter parameters…")
+        self.params_filter.textChanged.connect(self._filter_params)
+        params_outer.addWidget(self.params_filter)
+        params_scroll = self.QtWidgets.QScrollArea()
+        params_scroll.setWidgetResizable(True)
+        params_scroll.setMinimumHeight(280)
+        params_host = self.QtWidgets.QWidget()
+        self.params_form = self.QtWidgets.QFormLayout(params_host)
+        params_scroll.setWidget(params_host)
+        params_outer.addWidget(params_scroll)
+        self.param_widgets: dict[str, Any] = {}
+        self.param_rows: dict[str, tuple[Any, Any]] = {}
+        self._build_parameter_widgets()
+        form.addRow(params_box)
 
         self.notes_edit = self.QtWidgets.QLineEdit()
         self.notes_edit.setPlaceholderText("optional note stored with the run")
@@ -158,6 +176,116 @@ class HeadlessRunTab:
         self.log_view.setMaximumBlockCount(2000)
         right_layout.addWidget(self.log_view, 1)
         outer.addWidget(right, 1)
+
+    # -- full parameter form (generated from the dataclass) ----------------- #
+    _CHOICES = {
+        "input_mode": ["zero", "heater_inputs"],
+        "mimo_controller_scheme": ["pid_qp", "modal_lqr"],
+        "implicit_sparse_simulation_method": ["tr_bdf2", "backward_euler"],
+    }
+    # Set by the run itself; editing them here would be ignored or misleading.
+    _SKIP_FIELDS = {
+        "playback_speed", "loop_playback", "save_trajectory", "autoscale_temperature",
+        "color_min_K", "color_max_K", "colormap", "simulation_history_limit",
+        "live_step_profiling_enabled", "live_step_profile_threshold_ms",
+        "browser_simulation_size_warning", "display_update_interval_ms",
+        "enabled_heater_node_ids", "enabled_sensor_node_ids",
+    }
+
+    def _build_parameter_widgets(self) -> None:
+        from dataclasses import fields as dataclass_fields
+
+        from .simulation_parameters import SimulationParameters
+
+        defaults = SimulationParameters()
+        for spec in dataclass_fields(SimulationParameters):
+            if spec.name in self._SKIP_FIELDS:
+                continue
+            value = getattr(defaults, spec.name)
+            type_text = str(spec.type)
+            if spec.name in self._CHOICES:
+                widget = self.QtWidgets.QComboBox()
+                widget.addItems(self._CHOICES[spec.name])
+                widget.setCurrentText(str(value))
+            elif type_text == "bool":
+                widget = self.QtWidgets.QCheckBox()
+                widget.setChecked(bool(value))
+            elif type_text == "int":
+                widget = self.QtWidgets.QSpinBox()
+                widget.setRange(-2_000_000_000, 2_000_000_000)
+                widget.setValue(int(value))
+            elif type_text == "float":
+                widget = self.QtWidgets.QDoubleSpinBox()
+                widget.setDecimals(9)
+                widget.setRange(-1.0e12, 1.0e12)
+                widget.setValue(float(value))
+            elif type_text == "str":
+                widget = self.QtWidgets.QLineEdit(str(value))
+            else:
+                continue  # unsupported (e.g. tuple|None) -- left at its saved value
+            label = self.QtWidgets.QLabel(spec.name)
+            self.params_form.addRow(label, widget)
+            self.param_widgets[spec.name] = widget
+            self.param_rows[spec.name] = (label, widget)
+
+    def _filter_params(self, text: str) -> None:
+        needle = (text or "").strip().lower()
+        for name, (label, widget) in self.param_rows.items():
+            visible = needle in name.lower() if needle else True
+            label.setVisible(visible)
+            widget.setVisible(visible)
+
+    def _load_parameters_for_graph(self, folder: Path) -> None:
+        """Populate the form from the graph's saved parameters, so a headless run
+        starts from exactly what the Heat Transfer Simulation tab last saved."""
+        from .simulation_parameters import SimulationParameters, load_simulation_parameters
+
+        path = folder / "simulation_parameters.json"
+        if path.is_file():
+            params, _extras = load_simulation_parameters(path)
+            source = f"loaded from {path.name}"
+        else:
+            params = SimulationParameters()
+            source = "defaults (graph has no saved simulation_parameters.json)"
+        for name, widget in self.param_widgets.items():
+            value = getattr(params, name, None)
+            if value is None:
+                continue
+            if isinstance(widget, self.QtWidgets.QComboBox):
+                widget.setCurrentText(str(value))
+            elif isinstance(widget, self.QtWidgets.QCheckBox):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, self.QtWidgets.QSpinBox):
+                widget.setValue(int(value))
+            elif isinstance(widget, self.QtWidgets.QDoubleSpinBox):
+                widget.setValue(float(value))
+            elif isinstance(widget, self.QtWidgets.QLineEdit):
+                widget.setText(str(value))
+        self._params_source = source
+
+    def _collect_parameters(self):
+        """Current form values as a SimulationParameters (unsupported fields keep
+        whatever the graph's saved file had)."""
+        from .simulation_parameters import SimulationParameters, load_simulation_parameters
+
+        folder = self._selected_folder()
+        path = (folder / "simulation_parameters.json") if folder else None
+        if path is not None and path.is_file():
+            params, _extras = load_simulation_parameters(path)
+        else:
+            params = SimulationParameters()
+        for name, widget in self.param_widgets.items():
+            if isinstance(widget, self.QtWidgets.QComboBox):
+                setattr(params, name, widget.currentText())
+            elif isinstance(widget, self.QtWidgets.QCheckBox):
+                setattr(params, name, bool(widget.isChecked()))
+            elif isinstance(widget, self.QtWidgets.QSpinBox):
+                setattr(params, name, int(widget.value()))
+            elif isinstance(widget, self.QtWidgets.QDoubleSpinBox):
+                setattr(params, name, float(widget.value()))
+            elif isinstance(widget, self.QtWidgets.QLineEdit):
+                setattr(params, name, widget.text())
+        return params
 
     def _double(self, minimum: float, maximum: float, value: float, step: float) -> Any:
         spin = self.QtWidgets.QDoubleSpinBox()
@@ -211,8 +339,10 @@ class HeadlessRunTab:
         self.controller_combo.addItem("none (open-loop)")
         if controllers:
             self.controller_combo.setCurrentIndex(0)
+        self._load_parameters_for_graph(folder)
         self.graph_info.setText(
-            f"{node_count} nodes • {len(controllers)} controller artifact(s) • {folder}"
+            f"{node_count} nodes • {len(controllers)} controller artifact(s) • {folder}\n"
+            f"parameters: {getattr(self, '_params_source', 'defaults')}"
         )
 
     # -- run ---------------------------------------------------------------- #
@@ -240,13 +370,27 @@ class HeadlessRunTab:
         run_dir = (
             Path("simulations") / folder.name / datetime.now().strftime("%Y%m%d-%H%M%S")
         ).resolve()
+        # Persist the full parameter set beside the run and hand it to the process,
+        # so the headless run uses exactly the physics shown in this tab (and the
+        # file doubles as a record of what was run).
+        params = self._collect_parameters()
+        run_dir.mkdir(parents=True, exist_ok=True)
+        params_path = run_dir / "simulation_parameters.json"
+        try:
+            from .simulation_parameters import save_simulation_parameters
+
+            save_simulation_parameters(params_path, params)
+        except Exception as exc:  # noqa: BLE001
+            self._status(f"Could not write the parameter file: {exc}", True)
+            return
         command = [
             sys.executable,
             str(Path(__file__).resolve().parent.parent / "run_simulation.py"),
             "--graph", str(folder),
             "--run-dir", str(run_dir),
-            "--dt", f"{self.dt_spin.value():g}",
-            "--duration", f"{self.duration_spin.value():g}",
+            "--sim-params", str(params_path),
+            "--dt", f"{float(params.dt_s):g}",
+            "--duration", f"{float(params.t_final_s):g}",
             "--snapshot-interval-s", f"{self.snapshot_spin.value():g}",
             "--checkpoint-interval-s", f"{self.checkpoint_spin.value():g}",
         ]
@@ -258,7 +402,7 @@ class HeadlessRunTab:
             command += ["--setpoint", f"{self.setpoint_spin.value():g}"]
         if self.use_initial.isChecked():
             command += ["--initial-temp", f"{self.initial_spin.value():g}"]
-        if not self.gpu_checkbox.isChecked():
+        if not bool(getattr(params, "gpu_solver_enabled", True)):
             command.append("--no-gpu")
         if self.notes_edit.text().strip():
             command += ["--notes", self.notes_edit.text().strip()]
