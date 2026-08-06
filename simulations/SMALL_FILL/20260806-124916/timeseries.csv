@@ -1,0 +1,3 @@
+time_s,avg_temp_K,max_temp_K,min_temp_K,max_temp_rate_K_per_s,power_in_W,power_out_W,radiation_W
+1,293.15,293.15,293.15,6.82121e-13,0,0,2.71807e-12
+2,293.15,293.15,293.15,5.68434e-13,0,0,3.93687e-12

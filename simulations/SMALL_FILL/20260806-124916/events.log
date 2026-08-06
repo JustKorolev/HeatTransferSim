@@ -1,0 +1,9 @@
+[2026-08-06T12:49:16] run_start: graph=SMALL_FILL out=simulations\SMALL_FILL\20260806-124916
+[2026-08-06T12:50:41] low_memory_load: nodes.csv carries no per-node controller setpoint, so setpoints come from the run config (pass --setpoint / setpoints_K); any setpoints saved only in graph.json are not applied on this fast path.
+[2026-08-06T12:50:41] low_memory_load: loaded 1039189 nodes without graph.json (rss=4.6 GiB)
+[2026-08-06T12:50:52] prepared: nodes=1039189 sensors=0 heaters=0 cryo=0 controller=OPEN-LOOP history_limit=1 (~8 MB) rss=4.8 GiB
+[2026-08-06T12:50:52] prepare_warning: dt_s=1 s is coarse relative to estimated fastest tau=0.007128 s.
+[2026-08-06T12:50:52] prepare_warning: Graph has 1039189 nodes; dense matrix exponential playback may be slow above 1000 nodes.
+[2026-08-06T12:50:52] prepare_warning: CPU implicit tr_bdf2 solver enabled (solver=cg, rtol=1e-06, maxiter=300, precond=jacobi).
+[2026-08-06T12:50:52] unforced_run: WARNING: nothing drives this simulation -- no heater input (input_mode='zero' and no controller); no cryocooler nodes in the graph; radiative background equals the initial temperature (T_env=293.15 K), so net radiation is zero. Temperatures will not change.
+[2026-08-06T12:51:00] run_end: status=completed

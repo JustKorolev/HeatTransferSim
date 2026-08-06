@@ -1,0 +1,9 @@
+[2026-08-06T13:08:52] run_start: graph=HISPEC-CRYOSTAT-TEST-v4 out=simulations\HISPEC-CRYOSTAT-TEST-v4\20260806-130852
+[2026-08-06T13:08:59] low_memory_load: nodes.csv carries no per-node controller setpoint, so setpoints come from the run config (pass --setpoint / setpoints_K); any setpoints saved only in graph.json are not applied on this fast path.
+[2026-08-06T13:08:59] low_memory_load: loaded 81405 nodes without graph.json (rss=0.4 GiB)
+[2026-08-06T13:09:00] prepared: nodes=81405 sensors=72 heaters=33 cryo=0 controller=yes history_limit=1 (~1 MB) rss=0.5 GiB
+[2026-08-06T13:09:00] prepare_warning: dt_s=1 s is coarse relative to estimated fastest tau=0.001504 s.
+[2026-08-06T13:09:00] prepare_warning: Graph has 81405 nodes; dense matrix exponential playback may be slow above 1000 nodes.
+[2026-08-06T13:09:00] prepare_warning: CPU implicit tr_bdf2 solver enabled (solver=cg, rtol=1e-06, maxiter=300, precond=jacobi).
+[2026-08-06T13:09:01] engine_warning: Modal controller unavailable (modal controller references 105 node id(s) not in this graph (built for a different graph?)); using PID+QP allocator.
+[2026-08-06T13:09:03] run_end: status=completed

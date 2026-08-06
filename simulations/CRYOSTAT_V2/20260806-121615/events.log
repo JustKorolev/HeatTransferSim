@@ -1,0 +1,7 @@
+[2026-08-06T12:16:15] run_start: graph=CRYOSTAT_V2 out=simulations\CRYOSTAT_V2\20260806-121615
+[2026-08-06T12:17:07] prepared: nodes=471412 sensors=72 heaters=33 cryo=536 controller=yes history_limit=1 (~4 MB) rss=5.5 GiB
+[2026-08-06T12:17:07] prepare_warning: dt_s=1 s is coarse relative to estimated fastest tau=0.001733 s.
+[2026-08-06T12:17:07] prepare_warning: Graph has 471412 nodes; dense matrix exponential playback may be slow above 1000 nodes.
+[2026-08-06T12:17:07] prepare_warning: Contact-gap radiation: 1 suppressed inter-part interface(s) couple by direct A<->B radiation across the gap.
+[2026-08-06T12:17:07] prepare_warning: CPU implicit tr_bdf2 solver enabled (solver=cg, rtol=1e-06, maxiter=300, precond=jacobi).
+[2026-08-06T12:17:15] run_end: status=completed

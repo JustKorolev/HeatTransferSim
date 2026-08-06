@@ -1,0 +1,10 @@
+{
+  "graph_name": "SMALL_FILL",
+  "graph_folder": "graphs\\SMALL_FILL",
+  "graph_hash": "C.npy:8313640:1785450003|L_sparse.json:260793009:1785450008|node_ids.npy:8313640:1785450003|graph.json:2056101542:1785449972|nodes.csv:360322035:1785449984",
+  "git_commit": "bd3fa4dc5894e7f4d3d3dee8f9c2d57555609f99",
+  "python": "3.11.15",
+  "started": "2026-08-06T12:49:16",
+  "seed": 0,
+  "params_override": false
+}
