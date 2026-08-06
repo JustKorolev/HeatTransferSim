@@ -80,6 +80,10 @@ class RunConfig:
     snapshot_interval_s: float = 300.0
     checkpoint_interval_s: float = 600.0  # wall-clock seconds between checkpoints
     status_interval_steps: int = 20
+    # Prefer the compact nodes.csv + binary-matrix load over parsing graph.json
+    # (which costs many GB on a multi-million-cell graph). Falls back automatically
+    # when nodes.csv is stale or missing; set False to always use the full loader.
+    low_memory_load: bool = True
     # Replay-history depth. Headless runs never scrub back, and each stored step
     # costs 8 bytes/node (256 steps x 3M nodes ~ 6 GB), so keep it minimal.
     history_limit: int = 1
@@ -238,9 +242,44 @@ class SimulationRunner:
             self._finalize()
         return self.out_dir
 
+    def _load_graph(self):
+        """Load the graph for simulation, preferring the low-memory path.
+
+        The compact path (nodes.csv + binary matrices) skips graph.json entirely --
+        1.6 GB at 471k nodes, ~10 GB at 3M, parsed into a Python dict per node, edge
+        and cell. It is only safe when nodes.csv is current: it is written when the
+        octree is BUILT, so GUI edits saved to graph.json (cryocooler assignments,
+        material/capacitance changes) would otherwise be silently lost. Both a
+        timestamp check and a capacity cross-check against C.npy guard this, and any
+        doubt falls back to the full loader."""
+        if not self.cfg.low_memory_load:
+            return load_graph_folder(str(self.graph_folder))
+        try:
+            from .fast_graph_io import load_graph_for_simulation, validate_against_matrices
+
+            model, matrices, report = load_graph_for_simulation(self.graph_folder)
+            problem = validate_against_matrices(model, matrices)
+            if problem:
+                self._log_event("low_memory_load_rejected", problem)
+            else:
+                for warning in report.warnings:
+                    self._log_event("low_memory_load", warning)
+                self._log_event(
+                    "low_memory_load",
+                    f"loaded {report.node_count} nodes without graph.json "
+                    f"(rss={_process_rss_gib():.1f} GiB)",
+                )
+                return model, matrices
+        except FileNotFoundError as exc:
+            self._log_event("low_memory_load_unavailable", str(exc))
+        except Exception as exc:  # noqa: BLE001 - never fail a run over an optimisation
+            self._log_event("low_memory_load_failed", f"{type(exc).__name__}: {exc}")
+        self._log_event("graph_load", "using the full graph.json loader")
+        return load_graph_folder(str(self.graph_folder))
+
     # -- setup -------------------------------------------------------------- #
     def _prepare(self):
-        model, matrices = load_graph_folder(str(self.graph_folder))
+        model, matrices = self._load_graph()
         # Controller gate: caller must have chosen one, or explicitly allowed none.
         controller_path = self.cfg.controller_path
         if not controller_path:
