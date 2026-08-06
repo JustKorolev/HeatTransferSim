@@ -32,6 +32,7 @@ from .models import EdgeMode, ThermalGraphModel
 from .pyvista_widget import GraphPyVistaWidget
 from .role_assignment import node_matches_material_visibility
 from .role_pairing import sensor_readout_temperature_K
+from .simulation_controls_panel import MODE_LIVE, PID_QP_LABEL, SimulationControlsPanel
 from .simulation_model import PreparedSimulation, prepare_simulation, save_trajectory
 from .simulation_runner import RunConfig, SimulationRunner
 from .simulation_parameters import (
@@ -136,6 +137,7 @@ class HeatTransferSimulationTab:
         hide_unassigned_getter: Callable[[], bool] | None = None,
         on_hide_unassigned_toggled: Callable[[bool], None] | None = None,
     ) -> None:
+        self._qt = qt
         self.QtCore = qt.QtCore
         self.QtGui = QtGui
         self.QtWidgets = qt.QtWidgets
@@ -228,51 +230,22 @@ class HeatTransferSimulationTab:
         form.addRow(load_selected)
         form.addRow(load_current)
 
-        self._add_parameter_controls(form)
-        self._add_playback_controls(form)
-        self._add_enabled_io_controls(form)
-        self._add_sys_id_controls(form)
-        self._add_stepper_diagnostic_controls(form)
-        self._add_component_temperature_controls(form)
-
-        self.warning_label = self.QtWidgets.QLabel("")
-        self._pin_two_line_label(self.warning_label)
-        form.addRow(self.warning_label)
-        self.stats_label = self.QtWidgets.QLabel("No simulation initialized.")
-        self.stats_label.setWordWrap(True)
-        form.addRow(self.stats_label)
-        self.controller_status_label = self.QtWidgets.QLabel("")
-        self._pin_two_line_label(self.controller_status_label)
-        form.addRow(self.controller_status_label)
-        self.sensor_readout_box = self.QtWidgets.QGroupBox("Thermal I/O Readouts")
-        readout_layout = self.QtWidgets.QVBoxLayout(self.sensor_readout_box)
-        self.cooling_readout_box = self.QtWidgets.QGroupBox("Cooling")
-        cooling_layout = self.QtWidgets.QVBoxLayout(self.cooling_readout_box)
-        self.cooling_readout_table = self.QtWidgets.QTableWidget(0, 7)
-        self.cooling_readout_table.setHorizontalHeaderLabels(
-            ["cryocooler", "cold-tip temperature", "base capacity", "scale", "applied cooling", "receiving nodes", "enabled"]
+        # Every control below the graph row comes from the shared panel, so this
+        # tab and the Headless Run tab cannot drift apart. The panel hands back
+        # direct widget handles (self.inputs, self.time_slider, ...) so the rest of
+        # this class is unchanged.
+        self.panel = SimulationControlsPanel(
+            self._qt,
+            params=self.params,
+            mode=MODE_LIVE,
+            actions=self._panel_actions(),
+            on_parameter_change=self._handle_parameter_change,
+            legend_text=self._legend_text(),
+            modal_operating_temperature_K=self._default_modal_operating_temperature_K(),
         )
-        self.cooling_readout_table.verticalHeader().setVisible(False)
-        self.cooling_readout_table.setEditTriggers(self.QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.cooling_readout_table.setSelectionBehavior(self.QtWidgets.QAbstractItemView.SelectRows)
-        self.cooling_readout_table.setMaximumHeight(130)
-        self.cooling_readout_table.itemSelectionChanged.connect(self._handle_cooling_table_selection)
-        cooling_layout.addWidget(self.cooling_readout_table)
-        readout_layout.addWidget(self.cooling_readout_box)
-        self.heating_readout_box = self.QtWidgets.QGroupBox("Heating")
-        heating_layout = self.QtWidgets.QVBoxLayout(self.heating_readout_box)
-        self.heating_readout_tree = self.QtWidgets.QTreeWidget()
-        self.heating_readout_tree.setHeaderLabels(["role", "cell/node", "measured temperature", "desired temperature", "error", "heater power"])
-        self.heating_readout_tree.setSelectionMode(self.QtWidgets.QAbstractItemView.SingleSelection)
-        self.heating_readout_tree.setMaximumHeight(220)
-        self.heating_readout_tree.itemSelectionChanged.connect(self._handle_heating_tree_selection)
-        heating_layout.addWidget(self.heating_readout_tree)
-        readout_layout.addWidget(self.heating_readout_box)
-        self.sensor_readout_box.setVisible(False)
-        form.addRow(self.sensor_readout_box)
-        self.legend_label = self.QtWidgets.QLabel(self._legend_text())
-        self.legend_label.setWordWrap(True)
-        form.addRow(self.legend_label)
+        self.panel.build(form)
+        self.panel.export_to(self)
+        self._refresh_controller_choices()
 
         self._build_readout_parameter_editor()
         self.viewer = GraphPyVistaWidget(
@@ -349,270 +322,36 @@ class HeatTransferSimulationTab:
         layout.addWidget(self.readout_editor_box, 0, self.QtCore.Qt.AlignBottom)
         layout.addWidget(viewer_panel, 1)
 
-    def _add_parameter_controls(self, form: Any) -> None:
-        run_box, run_form = self._section("Run")
-        run = self.QtWidgets.QPushButton("Initialize")
-        run.setToolTip("Build the simulation using the latest graph, matrices, and controller settings.")
-        run.clicked.connect(self.initialize_simulation)
-        run_form.addRow(run)
-        for name, label, minimum, maximum, step in (
-            ("dt_s", "dt_s", 1.0e-9, 1.0e9, 1.0),
-            ("t_final_s", "t_final_s", 0.0, 1.0e12, 60.0),
-            ("playback_speed", "playback speed", 0.01, 1.0e6, 0.25),
-        ):
-            self._add_double_parameter(run_form, name, label, minimum, maximum, step)
-        self._add_int_parameter(run_form, "simulation_history_limit", "history limit", 0, 1_000_000, 1)
-        self.inputs["loop_playback"] = self._checkbox(
-            "Loop playback", self.params.loop_playback, lambda *_: self._handle_parameter_change("loop_playback")
-        )
-        run_form.addRow(self.inputs["loop_playback"])
-        self.input_mode = self.QtWidgets.QComboBox()
-        self.input_mode.addItems(["zero", "heater_inputs"])
-        self.input_mode.setCurrentText(self.params.input_mode)
-        self.input_mode.currentTextChanged.connect(lambda *_: self._handle_parameter_change("input_mode"))
-        run_form.addRow("input mode", self.input_mode)
-        self.controller_scheme_combo = self.QtWidgets.QComboBox()
-        self.controller_scheme_combo.setToolTip(
-            "Heater controller for 'heater_inputs' mode.\n"
-            "- PID + QP allocator: the standard controller, always available.\n"
-            "- Modal LQR entries: one per controller actually built for this graph, labelled with "
-            "the reduced order, mode count and design operating point that distinguish them. "
-            "Build one with the 'Modal LQR Design' panel below (or tools/analyze_plant_modes.py); "
-            "until then there is nothing to select."
-        )
-        self.controller_scheme_combo.currentTextChanged.connect(
-            self._handle_controller_scheme_selection
-        )
-        self._refresh_controller_choices()
-        run_form.addRow("controller", self.controller_scheme_combo)
-        form.addRow(run_box)
-
-        environment_box, environment_form = self._section("Environment")
-        self._add_double_parameter(environment_form, "T_env_K", "exterior / ambient T K", 0.0, 1.0e6, 1.0)
-        self.inputs["T_env_K"].setToolTip(
-            "Radiative background for the OUTSIDE of the assembly (room / ambient surroundings)."
-        )
-        self._add_double_parameter(
-            environment_form, "interior_environment_temperature_K", "interior (cryo) T K", 0.0, 1.0e6, 1.0
-        )
-        self.inputs["interior_environment_temperature_K"].setToolTip(
-            "Radiative background for the INSIDE of the assembly (cryocooled vacuum enclosure). "
-            "Inward-facing surfaces radiate to this once view-factor classification assigns them."
-        )
-        self.inputs["use_ambient_radiation"] = self._checkbox(
-            "Use ambient radiation",
-            self.params.use_ambient_radiation,
-            lambda *_: self._handle_parameter_change("use_ambient_radiation"),
-        )
-        environment_form.addRow(self.inputs["use_ambient_radiation"])
-        self.inputs["use_radiative_coupling"] = self._checkbox(
-            "Surface-to-surface radiative coupling (ray-traced)",
-            getattr(self.params, "use_radiative_coupling", False),
-            lambda *_: self._handle_parameter_change("use_radiative_coupling"),
-        )
-        self.inputs["use_radiative_coupling"].setToolTip(
-            "Ray-trace view factors over the exposed faces so parts exchange radiation with "
-            "each other (a hot part can warm a cold part), not just with the background. "
-            "One-time precompute when the simulation is prepared; skipped for very large graphs."
-        )
-        environment_form.addRow(self.inputs["use_radiative_coupling"])
-        # Bulk initial-temperature control: set initial_temperature_K on EVERY
-        # component at once (the state the simulation starts from / resets to).
-        self.initial_temperature_all_spin = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
-        set_all_initial = self.QtWidgets.QPushButton("Set all components")
-        set_all_initial.setToolTip(
-            "Set the initial temperature of EVERY component to this value. Updates the loaded "
-            "graph; if a simulation is already initialized it resets to this immediately, "
-            "otherwise it takes effect on the next Initialize."
-        )
-        set_all_initial.clicked.connect(self._set_all_initial_temperatures)
-        initial_temp_container = self.QtWidgets.QWidget()
-        initial_temp_layout = self.QtWidgets.QHBoxLayout(initial_temp_container)
-        initial_temp_layout.setContentsMargins(0, 0, 0, 0)
-        initial_temp_layout.addWidget(self.initial_temperature_all_spin, 1)
-        initial_temp_layout.addWidget(set_all_initial)
-        environment_form.addRow("initial T (all) K", initial_temp_container)
-        # Testing helper: assign each sensor a random controller SETPOINT (desired
-        # temperature) = center +/- a random mK-scale spread (e.g. ~50 K +/- tens of mK).
-        self.sensor_random_center_spin = self._double_spin(0.0, 1.0e6, 50.0, 1.0)
-        self.sensor_random_spread_mK_spin = self._double_spin(0.0, 1.0e6, 50.0, 1.0)
-        randomize_setpoints = self.QtWidgets.QPushButton("Randomize setpoints")
-        randomize_setpoints.setToolTip(
-            "Assign each sensor a random controller setpoint (desired temperature) = center +/- a "
-            "uniform random offset within the spread (mK). For testing how the controller drives "
-            "the sensors to distinct targets. Applied live (the controller reads setpoints each step)."
-        )
-        randomize_setpoints.clicked.connect(self._randomize_sensor_setpoints)
-        rand_container = self.QtWidgets.QWidget()
-        rand_layout = self.QtWidgets.QHBoxLayout(rand_container)
-        rand_layout.setContentsMargins(0, 0, 0, 0)
-        rand_layout.addWidget(self.sensor_random_center_spin, 1)
-        rand_layout.addWidget(self.QtWidgets.QLabel("K  ±"))
-        rand_layout.addWidget(self.sensor_random_spread_mK_spin, 1)
-        rand_layout.addWidget(self.QtWidgets.QLabel("mK"))
-        rand_layout.addWidget(randomize_setpoints)
-        environment_form.addRow("randomize setpoints", rand_container)
-        form.addRow(environment_box)
-
-        properties_box, properties_form = self._section("Material Properties")
-        self.inputs["use_temperature_dependent_properties"] = self._checkbox(
-            "Temperature-dependent cp(T)/k(T)",
-            self.params.use_temperature_dependent_properties,
-            lambda *_: self._handle_parameter_change("use_temperature_dependent_properties"),
-        )
-        self.inputs["use_temperature_dependent_properties"].setToolTip(
-            "Recompute per-node C(T)=m*cp(T) and conduction/contact from NIST cryogenic "
-            "curves each step, instead of using constant room-temperature properties."
-        )
-        properties_form.addRow(self.inputs["use_temperature_dependent_properties"])
-        self._add_int_parameter(properties_form, "copper_rrr", "Copper RRR", 1, 100000, 10)
-        self.inputs["copper_rrr"].setToolTip(
-            "Residual resistivity ratio for OFHC copper thermal conductivity k(T). "
-            "NIST fits exist for 50/100/150/300/500 (the nearest is used). "
-            "Only affects runs with temperature-dependent properties enabled."
-        )
-        self.inputs["use_midpoint_property_coupling"] = self._checkbox(
-            "Midpoint property/radiation coupling",
-            getattr(self.params, "use_midpoint_property_coupling", True),
-            lambda *_: self._handle_parameter_change("use_midpoint_property_coupling"),
-        )
-        self.inputs["use_midpoint_property_coupling"].setToolTip(
-            "Evaluate the temperature-dependent properties and radiation at a "
-            "predicted midpoint (2nd-order-in-dt splitting) instead of the "
-            "step-start temperature. More accurate during fast transients; adds "
-            "one operator rebuild per step and only when those terms are active."
-        )
-        properties_form.addRow(self.inputs["use_midpoint_property_coupling"])
-        form.addRow(properties_box)
-
-        cooler_box, cooler_form = self._section("Cryocooler")
-        cooler_model = self.QtWidgets.QLabel("PT60 measured lift curve")
-        cooler_form.addRow("Model", cooler_model)
-        for name, label, minimum, maximum, step in (
-            ("cryocooler_max_power_W", "Maximum cooling power W", 0.0, 1.0e9, 1.0),
-            ("cryocooler_capacity_scale", "Capacity scale", 0.0, 1.0e9, 0.05),
-        ):
-            self._add_double_parameter(cooler_form, name, label, minimum, maximum, step)
-        self.inputs["cryocooler_enabled"] = self._checkbox(
-            "Enabled",
-            self.params.cryocooler_enabled,
-            lambda *_: self._handle_parameter_change("cryocooler_enabled"),
-        )
-        cooler_form.addRow(self.inputs["cryocooler_enabled"])
-        form.addRow(cooler_box)
-
-        # Global controller limits: enforced by BOTH the PID+QP and modal-LQR
-        # schemes (absolute heater-power clamp + hard slew rate). "max rate cmd"
-        # additionally bounds the PID+QP rate command; it is inert for modal-LQR
-        # (which has no rate command) but kept here as a global controller knob.
-        controller_box, controller_form = self._section("Controller (global limits)")
-        for name, label, minimum, maximum, step in (
-            ("mimo_default_heater_max_power_W", "max heater power W", 0.0, 1.0e9, 1.0),
-            ("mimo_heater_slew_rate_W_per_s", "hard slew W/s", 0.0, 1.0e9, 1.0),
-            ("mimo_v_cmd_abs_max_K_per_s", "max rate cmd K/s", 0.0, 1.0e9, 0.01),
-        ):
-            self._add_double_parameter(controller_form, name, label, minimum, maximum, step)
-        form.addRow(controller_box)
-
-        self._build_modal_design_controls(form)
-
-        mimo_box, mimo_form = self._section("MIMO Thermal-Rate QP")
-        for name, label, minimum, maximum, step in (
-            ("mimo_hold_threshold_K", "enter hold below K", 0.0, 1.0e6, 0.1),
-            ("mimo_coarse_threshold_K", "return coarse above K", 0.0, 1.0e6, 0.1),
-            ("mimo_lambda_u", "lambda_u heater effort", 0.0, 1.0e9, 0.001),
-            ("mimo_rho_du", "rho_du power change", 0.0, 1.0e9, 0.01),
-            ("heater_sensor_pair_alpha", "pair alpha", 0.0, 1.0e9, 0.01),
-            ("role_contact_tolerance_mm", "role contact tol mm", 0.0, 1.0e9, 1.0e-6),
-            ("role_contact_tolerance_max_mm", "role contact max mm", 0.0, 1.0e9, 0.1),
-            ("role_contact_tolerance_growth_factor", "role contact growth", 1.01, 1.0e6, 0.1),
-            ("drift_lpf_tau_s", "drift LPF tau s", 0.0, 1.0e9, 0.1),
-            ("derivative_dt_floor_s", "derivative dt floor s", 0.0, 1.0e9, 1.0e-6),
-            ("mimo_integral_abs_max", "integral abs max", 0.0, 1.0e12, 1.0),
-        ):
-            self._add_double_parameter(mimo_form, name, label, minimum, maximum, step)
-        self.inputs["mimo_freeze_integral_when_saturated"] = self._checkbox(
-            "Freeze integral when saturated",
-            self.params.mimo_freeze_integral_when_saturated,
-            lambda *_: self._handle_parameter_change("mimo_freeze_integral_when_saturated"),
-        )
-        mimo_form.addRow(self.inputs["mimo_freeze_integral_when_saturated"])
-        form.addRow(mimo_box)
-
-        display_box, display_form = self._section("Display")
-        self.inputs["autoscale_temperature"] = self._checkbox(
-            "Autoscale temperature",
-            self.params.autoscale_temperature,
-            lambda *_: self._handle_parameter_change("autoscale_temperature"),
-        )
-        display_form.addRow(self.inputs["autoscale_temperature"])
-        self._add_double_parameter(display_form, "color_min_K", "color min K", 0.0, 1.0e6, 1.0)
-        self._add_double_parameter(display_form, "color_max_K", "color max K", 0.0, 1.0e6, 1.0)
-        form.addRow(display_box)
-
-    def _add_playback_controls(self, form: Any) -> None:
-        row = self.QtWidgets.QHBoxLayout()
-        for text, callback in (
-            ("Play", self.play),
-            ("Pause", self.pause),
-            ("Reset", self.reset),
-            ("Step +", self.step_forward),
-            ("Step -", self.step_backward),
-        ):
-            button = self.QtWidgets.QPushButton(text)
-            if text == "Play":
-                button.setToolTip("Start live playback using the precomputed transition matrix.")
-            elif text == "Reset":
-                button.setToolTip("Return the simulation to each cell's initial_temperature_K.")
-            button.clicked.connect(callback)
-            row.addWidget(button)
-        form.addRow(row)
-        self.time_slider = self.QtWidgets.QSlider(self.QtCore.Qt.Horizontal)
-        self.time_slider.setRange(0, 0)
-        self.time_slider.valueChanged.connect(self._handle_time_slider)
-        form.addRow("time", self.time_slider)
-        save = self.QtWidgets.QPushButton("Save / Export Trajectory")
-        save.clicked.connect(self.save_current_trajectory)
-        form.addRow(save)
-        reset_controller = self.QtWidgets.QPushButton("Reset MIMO Integrators")
-        reset_controller.clicked.connect(self.reset_controller_integrators)
-        form.addRow(reset_controller)
-        # Headless overnight run: no live visualization, everything saved to
-        # simulations/<graph>/<timestamp>/ (recommended for large graphs).
-        headless_row = self.QtWidgets.QHBoxLayout()
-        self.run_headless_button = self.QtWidgets.QPushButton("Run Headless (save, no viz)")
-        self.run_headless_button.setToolTip(
-            "Run the full closed-loop simulation with NO live visualization, saving all data, "
-            "plots, checkpoints and a report to simulations/<graph>/<timestamp>/. "
-            "The window stays responsive; tail status.json for progress. Recommended for large graphs."
-        )
-        self.run_headless_button.clicked.connect(self.run_headless_simulation)
-        self.stop_headless_button = self.QtWidgets.QPushButton("Stop Headless Run")
-        self.stop_headless_button.clicked.connect(self.stop_headless_simulation)
-        self.stop_headless_button.setEnabled(False)
-        headless_row.addWidget(self.run_headless_button)
-        headless_row.addWidget(self.stop_headless_button)
-        form.addRow(headless_row)
-
-    def _add_stepper_diagnostic_controls(self, form: Any) -> None:
-        box, diag_form = self._section("Solver Diagnostic")
-        self.stepper_diagnostic_save = self._checkbox("Save matrices", True)
-        self.stepper_diagnostic_button = self.QtWidgets.QPushButton("Compare Current vs Reference")
-        self.stepper_diagnostic_button.setToolTip(
-            "Compare the current simulation state against one expm_multiply reference solve to the same time."
-        )
-        self.stepper_diagnostic_button.clicked.connect(self.run_stepper_diagnostic)
-        button_row = self.QtWidgets.QHBoxLayout()
-        button_row.addWidget(self.stepper_diagnostic_button)
-        button_row.addWidget(self.stepper_diagnostic_save)
-        self.stepper_diagnostic_target_label = self.QtWidgets.QLabel("Uses the current simulation time.")
-        self.stepper_diagnostic_target_label.setWordWrap(True)
-        diag_form.addRow("target", self.stepper_diagnostic_target_label)
-        diag_form.addRow(button_row)
-        self.stepper_diagnostic_status_label = self.QtWidgets.QLabel("Idle.")
-        self.stepper_diagnostic_status_label.setWordWrap(True)
-        diag_form.addRow("result", self.stepper_diagnostic_status_label)
-        form.addRow(box)
+    def _panel_actions(self) -> dict[str, Any]:
+        """What every button/signal in the shared control panel does here."""
+        return {
+            "initialize": self.initialize_simulation,
+            "set_all_initial_temperatures": self._set_all_initial_temperatures,
+            "randomize_setpoints": self._randomize_sensor_setpoints,
+            "controller_scheme_selected": self._handle_controller_scheme_selection,
+            "build_modal_controller": self.build_modal_controller,
+            "play": self.play,
+            "pause": self.pause,
+            "reset": self.reset,
+            "step_forward": self.step_forward,
+            "step_backward": self.step_backward,
+            "time_slider_changed": self._handle_time_slider,
+            "save_trajectory": self.save_current_trajectory,
+            "reset_controller_integrators": self.reset_controller_integrators,
+            "start_headless": self.run_headless_simulation,
+            "stop_headless": self.stop_headless_simulation,
+            "enable_all_io": self._enable_all_simulation_io,
+            "disable_all_io": self._disable_all_simulation_io,
+            "enabled_io_item_changed": self._handle_enabled_io_item_changed,
+            "refresh_sys_id_matrices": lambda: self._refresh_sys_id_matrix_list(),
+            "sys_id_matrix_selected": self._handle_sys_id_matrix_selection,
+            "run_sys_id": self.run_simulation_sys_id_for_G_ctrl,
+            "cancel_sys_id": self.cancel_sys_id,
+            "run_stepper_diagnostic": self.run_stepper_diagnostic,
+            "apply_component_initial_temperature": self.apply_component_initial_temperature,
+            "cooling_table_selected": self._handle_cooling_table_selection,
+            "heating_tree_selected": self._handle_heating_tree_selection,
+        }
 
     def _build_readout_parameter_editor(self) -> None:
         self.readout_editor_box = self.QtWidgets.QGroupBox("Parameters")
@@ -694,81 +433,6 @@ class HeatTransferSimulationTab:
         cooling_form.addRow(enabled_widget)
         layout.addWidget(self.readout_cooling_editor)
         layout.addStretch(1)
-
-    def _add_enabled_io_controls(self, form: Any) -> None:
-        box, layout = self._section("Enabled Simulation I/O")
-        button_row = self.QtWidgets.QHBoxLayout()
-        enable_all = self.QtWidgets.QPushButton("Enable All")
-        enable_all.clicked.connect(self._enable_all_simulation_io)
-        disable_all = self.QtWidgets.QPushButton("Disable All")
-        disable_all.clicked.connect(self._disable_all_simulation_io)
-        button_row.addWidget(enable_all)
-        button_row.addWidget(disable_all)
-        layout.addRow(button_row)
-        self.enabled_io_table = self.QtWidgets.QTableWidget(0, 3)
-        self.enabled_io_table.setHorizontalHeaderLabels(["cell/node", "heater", "sensor"])
-        self.enabled_io_table.verticalHeader().setVisible(False)
-        self.enabled_io_table.setEditTriggers(self.QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.enabled_io_table.setSelectionBehavior(self.QtWidgets.QAbstractItemView.SelectRows)
-        self.enabled_io_table.setMaximumHeight(170)
-        self.enabled_io_table.itemChanged.connect(self._handle_enabled_io_item_changed)
-        layout.addRow(self.enabled_io_table)
-        form.addRow(box)
-
-    def _add_component_temperature_controls(self, form: Any) -> None:
-        self.component_combo = self.QtWidgets.QComboBox()
-        self.component_temperature = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
-        apply_component = self.QtWidgets.QPushButton("Apply To Component")
-        apply_component.clicked.connect(self.apply_component_initial_temperature)
-        form.addRow("component", self.component_combo)
-        form.addRow("initial K", self.component_temperature)
-        form.addRow(apply_component)
-
-    def _add_sys_id_controls(self, form: Any) -> None:
-        box, sysid_form = self._section("Simulation Sys ID for Controller Gain Matrix")
-        self.sys_id_matrix_combo = self.QtWidgets.QComboBox()
-        self.sys_id_matrix_combo.currentIndexChanged.connect(self._handle_sys_id_matrix_selection)
-        refresh_matrix_list = self.QtWidgets.QPushButton("Refresh Matrices")
-        refresh_matrix_list.clicked.connect(lambda: self._refresh_sys_id_matrix_list())
-        matrix_row = self.QtWidgets.QHBoxLayout()
-        matrix_row.addWidget(self.sys_id_matrix_combo, 1)
-        matrix_row.addWidget(refresh_matrix_list)
-        sysid_form.addRow("active G matrix", matrix_row)
-        self.sys_id_step_power = self._double_spin(0.0, 1.0e9, 1.0, 0.1)
-        self.sys_id_global_temperature_K = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
-        self.sys_id_duration_s = self._double_spin(0.0, 1.0e9, 300.0, 10.0)
-        self.sys_id_baseline_window_s = self._double_spin(0.0, 1.0e9, 10.0, 1.0)
-        self.sys_id_final_window_s = self._double_spin(0.0, 1.0e9, 10.0, 1.0)
-        self.sys_id_restore_between_tests = self._checkbox("Restore baseline between heater tests", True)
-        self.sys_id_keep_cryocooler_active = self._checkbox("Keep cryocooler active during sys ID", True)
-        self.sys_id_uniform_baseline = self._checkbox("Start from uniform baseline temperature", True)
-        for label, widget in (
-            ("step power Delta P W", self.sys_id_step_power),
-            ("background T K", self.sys_id_global_temperature_K),
-            ("experiment duration s", self.sys_id_duration_s),
-            ("baseline averaging window s", self.sys_id_baseline_window_s),
-            ("final averaging window s", self.sys_id_final_window_s),
-        ):
-            sysid_form.addRow(label, widget)
-        sysid_form.addRow(self.sys_id_restore_between_tests)
-        sysid_form.addRow(self.sys_id_keep_cryocooler_active)
-        sysid_form.addRow(self.sys_id_uniform_baseline)
-        button_row = self.QtWidgets.QHBoxLayout()
-        self.run_sys_id_button = self.QtWidgets.QPushButton("Run G_ctrl Sys ID")
-        self.run_sys_id_button.clicked.connect(self.run_simulation_sys_id_for_G_ctrl)
-        self.cancel_sys_id_button = self.QtWidgets.QPushButton("Cancel Sys ID")
-        self.cancel_sys_id_button.clicked.connect(self.cancel_sys_id)
-        self.cancel_sys_id_button.setEnabled(False)
-        button_row.addWidget(self.run_sys_id_button)
-        button_row.addWidget(self.cancel_sys_id_button)
-        sysid_form.addRow(button_row)
-        self.sys_id_progress_label = self.QtWidgets.QLabel("Idle.")
-        self.sys_id_progress_label.setWordWrap(True)
-        self.sys_id_status_label = self.QtWidgets.QLabel("")
-        self.sys_id_status_label.setWordWrap(True)
-        sysid_form.addRow("progress", self.sys_id_progress_label)
-        sysid_form.addRow(self.sys_id_status_label)
-        form.addRow(box)
 
     def refresh_graph_list(self) -> None:
         self.graph_combo.clear()
@@ -1187,7 +851,7 @@ class HeatTransferSimulationTab:
         self._large_graph_viz_ack = True  # don't nag again this session
         return True
 
-    _PID_QP_LABEL = "PID + QP allocator"
+    _PID_QP_LABEL = PID_QP_LABEL
 
     def _refresh_controller_choices(self, select_path: Path | str | None = None) -> None:
         """Rebuild the controller dropdown from what has actually been built.
@@ -1578,92 +1242,6 @@ class HeatTransferSimulationTab:
             self.stepper_diagnostic_status_label.setText(f"Failed: {exc}")
             self._status(f"Solver diagnostic failed: {exc}", True)
             log_exception("solver diagnostic failed", exc)
-
-    def _build_modal_design_controls(self, form: Any) -> None:
-        box, design_form = self._section("Modal LQR Design")
-        self.modal_temp_spin = self._double_spin(0.0, 1.0e6, self._default_modal_operating_temperature_K(), 1.0)
-        self.modal_temp_spin.setToolTip(
-            "Operating temperature to linearize the plant about. The controller offsets its "
-            "measurements and setpoints from this."
-        )
-        design_form.addRow("operating T K", self.modal_temp_spin)
-        self.modal_modes_spin = self._int_spin(2, 100000, 120, 1)
-        self.modal_modes_spin.setToolTip(
-            "Number of slowest thermal modes solved in stage 1 (before balanced truncation). "
-            "Clamped to fit the graph."
-        )
-        design_form.addRow("slow modes", self.modal_modes_spin)
-        self.modal_order_spin = self._int_spin(1, 100000, 40, 1)
-        self.modal_order_spin.setToolTip(
-            "Reduced model order r after balanced truncation -- the controller's state dimension "
-            "(kept small so it runs on the microcontroller)."
-        )
-        design_form.addRow("reduced order r", self.modal_order_spin)
-        self.modal_effort_spin = self._double_spin(1.0e-9, 1.0e9, 1.0, 0.1)
-        self.modal_effort_spin.setToolTip(
-            "LQR control-effort weight rho (R = rho*I, Q = C^T C). Larger rho = gentler, less "
-            "aggressive heating; smaller = faster, higher-power response."
-        )
-        design_form.addRow("LQR effort weight", self.modal_effort_spin)
-        self.modal_integral_spin = self._double_spin(0.0, 1.0e9, float(getattr(self.params, "modal_integral_gain", 0.0)), 0.01)
-        self.modal_integral_spin.setToolTip(
-            "Offset-free integral gain the modal controller uses to supply the operating holding "
-            "power the linearized model omits."
-        )
-        design_form.addRow("integral gain", self.modal_integral_spin)
-        # Adaptive (learning) feedforward: online RLS correction of the exact-DC-gain
-        # feedforward from the integral's steady-state holding power. Off by default;
-        # all of these hot-swap during a running sim (they only change controller
-        # behavior, not the plant matrices).
-        self.inputs["modal_adaptive_ff_enabled"] = self._checkbox(
-            "Adaptive feedforward (RLS)",
-            bool(getattr(self.params, "modal_adaptive_ff_enabled", False)),
-            lambda *_: self._handle_parameter_change("modal_adaptive_ff_enabled"),
-        )
-        self.inputs["modal_adaptive_ff_enabled"].setToolTip(
-            "Learn the DC-gain error the model got wrong: regress the integral's steady-state "
-            "holding power against the setpoint (recursive least squares) and fold the correction "
-            "into the feedforward, so revisited setpoints get the right holding power immediately "
-            "instead of waiting for the integral. Bumpless; in-memory only (reset on re-prepare)."
-        )
-        design_form.addRow(self.inputs["modal_adaptive_ff_enabled"])
-        self._add_double_parameter(
-            design_form, "modal_adaptive_ff_forgetting", "adaptive forgetting", 0.5, 1.0, 0.001
-        )
-        self.inputs["modal_adaptive_ff_forgetting"].setToolTip(
-            "RLS forgetting factor in (0, 1]. 1 = growing-window (exact, ever-more-confident); "
-            "<1 lets a stale estimate fade for a slowly time-varying plant. Keep near 1."
-        )
-        self._add_double_parameter(
-            design_form, "modal_adaptive_ff_error_tol_K", "adaptive error tol K", 0.0, 1.0e6, 0.01
-        )
-        self._add_double_parameter(
-            design_form, "modal_adaptive_ff_rate_tol_K_per_s", "adaptive rate tol K/s", 0.0, 1.0e6, 1.0e-4
-        )
-        self.inputs["modal_adaptive_ff_error_tol_K"].setToolTip(
-            "Steady-state gate: a learning sample is only taken when every controlled sensor's "
-            "tracking error is below this AND its |dT/dt| is below the rate tolerance -- so "
-            "transient or saturated data never corrupts the static-map regression."
-        )
-        self._add_double_parameter(
-            design_form, "modal_adaptive_ff_max_correction_frac", "adaptive max corr frac", 0.0, 1.0e6, 0.1
-        )
-        self.inputs["modal_adaptive_ff_max_correction_frac"].setToolTip(
-            "Projection guard: the learned feedforward correction is clamped, per heater, to this "
-            "fraction of its max power (the effective command is clamped to [0, max] regardless)."
-        )
-        self.modal_design_button = self.QtWidgets.QPushButton("Build && Use Modal Controller")
-        self.modal_design_button.setToolTip(
-            "Reduce the CURRENT graph to a reduced-order LQR controller and load it into the "
-            "modal-LQR scheme automatically (saved as modal_controller.npz in the graph folder). "
-            "Runs in the background."
-        )
-        self.modal_design_button.clicked.connect(self.build_modal_controller)
-        design_form.addRow(self.modal_design_button)
-        self.modal_design_status_label = self.QtWidgets.QLabel("Idle.")
-        self._pin_two_line_label(self.modal_design_status_label)
-        design_form.addRow("status", self.modal_design_status_label)
-        form.addRow(box)
 
     def _default_modal_operating_temperature_K(self) -> float:
         """Median initial temperature of the sensor cells (else all cells) as a
@@ -3703,29 +3281,16 @@ class HeatTransferSimulationTab:
     def _legend_text(self) -> str:
         return "3D legend: jet colormap, bottom right."
 
-    def _pin_two_line_label(self, label: Any) -> None:
-        """Lock a status label to a fixed two-line height so runtime messages of
-        varying length can't change its size and shove the rest of the panel around.
-        Text longer than two lines wraps then clips (is cut off), not expands."""
-        label.setWordWrap(True)
-        label.setAlignment(self.QtCore.Qt.AlignTop | self.QtCore.Qt.AlignLeft)
-        # Two line-heights plus a little padding, from the label's own font metrics.
-        two_lines = label.fontMetrics().lineSpacing() * 2 + 6
-        label.setFixedHeight(int(two_lines))
-        label.setSizePolicy(self.QtWidgets.QSizePolicy.Preferred, self.QtWidgets.QSizePolicy.Fixed)
-
     def _status(self, message: str, error: bool = False) -> None:
         if self.on_status is not None:
             self.on_status(message, error)
         else:
             self.warning_label.setText(message)
 
+    # The widget helpers below belong to the shared control panel; they stay here
+    # only so the viewer-side controls and the readout editor keep their spelling.
     def _checkbox(self, text: str, checked: bool, callback: Any | None = None) -> Any:
-        widget = self.QtWidgets.QCheckBox(text)
-        widget.setChecked(checked)
-        if callback is not None:
-            widget.stateChanged.connect(callback)
-        return widget
+        return self.panel.checkbox(text, checked, callback)
 
     def _view_slider(self, minimum: int, maximum: int, value: int, callback: Any) -> Any:
         slider = self.QtWidgets.QSlider(self.QtCore.Qt.Horizontal)
@@ -3735,61 +3300,11 @@ class HeatTransferSimulationTab:
         slider.valueChanged.connect(callback)
         return slider
 
-    def _section(self, title: str) -> tuple[Any, Any]:
-        box = self.QtWidgets.QGroupBox(title)
-        box.setStyleSheet("QGroupBox { font-weight: 700; margin-top: 8px; }")
-        return box, self.QtWidgets.QFormLayout(box)
-
-    def _add_double_parameter(
-        self,
-        form: Any,
-        name: str,
-        label: str,
-        minimum: float,
-        maximum: float,
-        step: float,
-    ) -> None:
-        widget = self._double_spin(minimum, maximum, getattr(self.params, name), step)
-        widget.valueChanged.connect(lambda *_args, field=name: self._handle_parameter_change(field))
-        self.inputs[name] = widget
-        form.addRow(label, widget)
-
-    def _add_int_parameter(
-        self,
-        form: Any,
-        name: str,
-        label: str,
-        minimum: int,
-        maximum: int,
-        step: int,
-    ) -> None:
-        widget = self._int_spin(minimum, maximum, int(getattr(self.params, name)), step)
-        widget.valueChanged.connect(lambda *_args, field=name: self._handle_parameter_change(field))
-        self.inputs[name] = widget
-        form.addRow(label, widget)
-
     def _int_spin(self, minimum: int, maximum: int, value: int, step: int) -> Any:
-        class NoWheelSpinBox(self.QtWidgets.QSpinBox):
-            def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802 - Qt override name.
-                event.ignore()
-
-        widget = NoWheelSpinBox()
-        widget.setRange(int(minimum), int(maximum))
-        widget.setSingleStep(int(step))
-        widget.setValue(int(value))
-        return widget
+        return self.panel.int_spin(minimum, maximum, value, step)
 
     def _double_spin(self, minimum: float, maximum: float, value: float, step: float) -> Any:
-        class NoWheelDoubleSpinBox(self.QtWidgets.QDoubleSpinBox):
-            def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802 - Qt override name.
-                event.ignore()
-
-        widget = NoWheelDoubleSpinBox()
-        widget.setDecimals(8)
-        widget.setRange(minimum, maximum)
-        widget.setSingleStep(step)
-        widget.setValue(float(value))
-        return widget
+        return self.panel.double_spin(minimum, maximum, value, step)
 
 
 def _changed_parameter_names(before: SimulationParameters, after: SimulationParameters) -> set[str]:

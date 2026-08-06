@@ -330,6 +330,7 @@ class GraphVisualizerApp:
         self.side_panel_stack.addWidget(self.left_scroll)
         self.side_panel_stack.addWidget(self.simulation_tab.controls_scroll)
         self.side_panel_stack.addWidget(self.thermal_validation_tab.controls_scroll)
+        self.side_panel_stack.addWidget(self.headless_run_tab.controls_scroll)
         self.side_panel_stack.setCurrentWidget(self.left_scroll)
 
         self.main_splitter = self.QtWidgets.QSplitter(self.QtCore.Qt.Horizontal)
@@ -2559,6 +2560,9 @@ class GraphVisualizerApp:
             elif current is self.thermal_validation_tab.widget:
                 self.simulation_tab.pause()
                 self.side_panel_stack.setCurrentWidget(self.thermal_validation_tab.controls_scroll)
+            elif current is self.headless_run_tab.widget:
+                self.simulation_tab.pause()
+                self.side_panel_stack.setCurrentWidget(self.headless_run_tab.controls_scroll)
             else:
                 self.simulation_tab.pause()
                 self.side_panel_stack.setCurrentWidget(self.left_scroll)

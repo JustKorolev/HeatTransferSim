@@ -14,6 +14,11 @@ Consequences that matter for overnight runs:
 * the run survives closing the GUI (it is detached, not a child thread),
 * progress is read from the run's own ``status.json``, so the same view works
   whether the run was started here or from the command line.
+
+The controls come from :class:`SimulationControlsPanel`, the same class the Heat
+Transfer Simulation tab uses, so the two tabs offer the same sections, labels and
+tooltips in the same order. This tab only adds the graph picker at the top and,
+in place of the 3D viewer, the progress / status / log view on the right.
 """
 
 from __future__ import annotations
@@ -27,7 +32,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .diagnostics import log_event
-from .simulation_parameter_panel import SimulationParameterPanel
+from .modal_reduction import list_modal_artifacts
+from .simulation_controls_panel import MODE_HEADLESS, PID_QP_LABEL, SimulationControlsPanel
 
 
 class HeadlessRunTab:
@@ -49,6 +55,7 @@ class HeadlessRunTab:
         self.process: subprocess.Popen | None = None
         self.run_dir: Path | None = None
         self._log_size = 0
+        self._params_source = "defaults"
         self.widget = self.QtWidgets.QWidget(parent)
         self._build_layout()
         self.refresh_graphs()
@@ -59,11 +66,15 @@ class HeadlessRunTab:
     # -- layout ------------------------------------------------------------- #
     def _build_layout(self) -> None:
         outer = self.QtWidgets.QHBoxLayout(self.widget)
-        scroll = self.QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(380)
+        # Like the simulation tab, the controls live in the window's left side
+        # panel (app.py puts controls_scroll in side_panel_stack) and the tab body
+        # holds only the right-hand view. Same minimum width, so the two panels are
+        # the same size and their rows line up when the tabs are compared.
+        self.controls_scroll = self.QtWidgets.QScrollArea()
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setMinimumWidth(320)
         controls = self.QtWidgets.QWidget()
-        scroll.setWidget(controls)
+        self.controls_scroll.setWidget(controls)
         form = self.QtWidgets.QFormLayout(controls)
 
         intro = self.QtWidgets.QLabel(
@@ -74,6 +85,7 @@ class HeadlessRunTab:
         intro.setWordWrap(True)
         form.addRow(intro)
 
+        # The graph row is this tab's own: it picks a folder rather than loading it.
         graph_row = self.QtWidgets.QHBoxLayout()
         self.graph_combo = self.QtWidgets.QComboBox()
         self.graph_combo.currentTextChanged.connect(self._handle_graph_changed)
@@ -85,66 +97,26 @@ class HeadlessRunTab:
         self.graph_info = self.QtWidgets.QLabel("")
         self.graph_info.setWordWrap(True)
         form.addRow(self.graph_info)
-
-        self.controller_combo = self.QtWidgets.QComboBox()
-        self.controller_combo.setToolTip(
-            "Controller artifact for the run. 'none (open-loop)' runs with no heater "
-            "control -- useful for a passive cooldown, not for controller validation."
-        )
-        form.addRow("controller", self.controller_combo)
-
-        self.setpoint_spin = self._double(0.0, 1.0e6, 293.15, 1.0)
-        self.setpoint_spin.setToolTip(
-            "Constant setpoint applied to EVERY sensor. Leave the 'use setpoint' box "
-            "unchecked to keep whatever the graph already has."
-        )
-        self.use_setpoint = self.QtWidgets.QCheckBox("use setpoint")
-        self.use_setpoint.setChecked(True)
-        setpoint_row = self.QtWidgets.QHBoxLayout()
-        setpoint_row.addWidget(self.setpoint_spin, 1)
-        setpoint_row.addWidget(self.use_setpoint)
-        form.addRow("setpoint K", setpoint_row)
-
-        self.initial_spin = self._double(0.0, 1.0e6, 293.15, 1.0)
-        self.use_initial = self.QtWidgets.QCheckBox("override")
-        initial_row = self.QtWidgets.QHBoxLayout()
-        initial_row.addWidget(self.initial_spin, 1)
-        initial_row.addWidget(self.use_initial)
-        form.addRow("initial T K", initial_row)
-
-        self.snapshot_spin = self._double(0.0, 1.0e12, 300.0, 60.0)
-        form.addRow("snapshot every s", self.snapshot_spin)
-        self.checkpoint_spin = self._double(0.0, 1.0e12, 600.0, 60.0)
-        self.checkpoint_spin.setToolTip("Wall-clock seconds between resume checkpoints.")
-        form.addRow("checkpoint every s", self.checkpoint_spin)
-
-        # The SAME parameter panel as the Heat Transfer Simulation tab (same sections,
-        # labels and tooltips), minus the parts that need a loaded graph. Shared code,
-        # so the two tabs cannot drift apart -- and so a headless run uses the physics
-        # you configured rather than the runner's defaults.
-        self.param_panel = SimulationParameterPanel(self._qt)
-        self.param_panel.build(form)
-
         self.notes_edit = self.QtWidgets.QLineEdit()
         self.notes_edit.setPlaceholderText("optional note stored with the run")
         form.addRow("notes", self.notes_edit)
 
-        button_row = self.QtWidgets.QHBoxLayout()
-        self.run_button = self.QtWidgets.QPushButton("Start Headless Run")
-        self.run_button.clicked.connect(self.start_run)
-        self.stop_button = self.QtWidgets.QPushButton("Stop Run")
-        self.stop_button.clicked.connect(self.stop_run)
-        self.stop_button.setEnabled(False)
-        button_row.addWidget(self.run_button)
-        button_row.addWidget(self.stop_button)
-        form.addRow(button_row)
+        # Everything else is the shared panel -- the same sections, in the same
+        # order, as the Heat Transfer Simulation tab, with the graph-dependent and
+        # playback rows hidden and the Solver section shown.
+        self.panel = SimulationControlsPanel(
+            self._qt,
+            mode=MODE_HEADLESS,
+            actions={
+                "start_headless": self.start_run,
+                "stop_headless": self.stop_run,
+                "open_output": self.open_output,
+            },
+        )
+        self.panel.build(form)
+        self.panel.export_to(self)
 
-        self.open_button = self.QtWidgets.QPushButton("Open Output Folder")
-        self.open_button.clicked.connect(self.open_output)
-        self.open_button.setEnabled(False)
-        form.addRow(self.open_button)
-        outer.addWidget(scroll)
-
+        # In place of the 3D viewer: what the launched run is doing.
         right = self.QtWidgets.QWidget()
         right_layout = self.QtWidgets.QVBoxLayout(right)
         self.progress = self.QtWidgets.QProgressBar()
@@ -160,6 +132,7 @@ class HeadlessRunTab:
         right_layout.addWidget(self.log_view, 1)
         outer.addWidget(right, 1)
 
+    # -- parameters ---------------------------------------------------------- #
     def _load_parameters_for_graph(self, folder: Path) -> None:
         """Populate the form from the graph's saved parameters, so a headless run
         starts from exactly what the Heat Transfer Simulation tab last saved."""
@@ -172,7 +145,7 @@ class HeadlessRunTab:
         else:
             params = SimulationParameters()
             source = "defaults (graph has no saved simulation_parameters.json)"
-        self.param_panel.set_params(params)
+        self.panel.set_params(params)
         self._params_source = source
 
     def _collect_parameters(self):
@@ -187,15 +160,7 @@ class HeadlessRunTab:
         else:
             base = SimulationParameters()
         # Widgets win; fields without a widget keep the graph's saved value.
-        return self.param_panel.read(base)
-
-    def _double(self, minimum: float, maximum: float, value: float, step: float) -> Any:
-        spin = self.QtWidgets.QDoubleSpinBox()
-        spin.setDecimals(6)
-        spin.setRange(minimum, maximum)
-        spin.setSingleStep(step)
-        spin.setValue(value)
-        return spin
+        return self.panel.read(base)
 
     # -- graph discovery (metadata only -- never loads a graph) -------------- #
     def refresh_graphs(self) -> None:
@@ -224,7 +189,7 @@ class HeadlessRunTab:
 
     def _handle_graph_changed(self, *_: Any) -> None:
         folder = self._selected_folder()
-        self.controller_combo.clear()
+        self.controller_scheme_combo.clear()
         if folder is None or not folder.is_dir():
             self.graph_info.setText("")
             return
@@ -236,16 +201,41 @@ class HeadlessRunTab:
             node_count = f"{int(np.load(folder / 'node_ids.npy', mmap_mode='r').shape[0]):,}"
         except Exception:  # noqa: BLE001
             pass
-        controllers = sorted(p.name for p in folder.glob("*.npz") if "controller" in p.name.lower())
-        self.controller_combo.addItems(controllers or [])
-        self.controller_combo.addItem("none (open-loop)")
-        if controllers:
-            self.controller_combo.setCurrentIndex(0)
+        # Same list, from the same helper, as the simulation tab's controller row:
+        # a controller artifact validated by its contents, not its filename.
+        artifacts = list_modal_artifacts(folder)
+        self.controller_scheme_combo.addItem(PID_QP_LABEL, None)
+        for info in artifacts:
+            self.controller_scheme_combo.addItem(info.label, str(info.path))
+        if artifacts:
+            self.controller_scheme_combo.setCurrentIndex(1)
         self._load_parameters_for_graph(folder)
         self.graph_info.setText(
-            f"{node_count} nodes • {len(controllers)} controller artifact(s) • {folder}\n"
-            f"parameters: {getattr(self, '_params_source', 'defaults')}"
+            f"{node_count} nodes • {len(artifacts)} controller artifact(s) • {folder}\n"
+            f"parameters: {self._params_source}"
         )
+
+    def _confirm_controller_ok(self, artifact: str) -> bool:
+        """The runner enables the heater controller only when a controller artifact
+        is present, so anything else is an open-loop run -- say so before launching
+        an overnight job that never tracks the setpoint."""
+        if artifact and Path(artifact).exists():
+            return True
+        detail = (
+            f"The selected controller file is gone:\n\n{artifact}\n\n"
+            if artifact
+            else "No controller artifact is selected.\n\n"
+        )
+        reply = self.QtWidgets.QMessageBox.question(
+            self.widget,
+            "No controller",
+            detail
+            + "The run will be OPEN-LOOP: heaters stay off and nothing tracks the "
+            "setpoint.\n\nRun anyway?",
+            self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
+            self.QtWidgets.QMessageBox.No,
+        )
+        return reply == self.QtWidgets.QMessageBox.Yes
 
     # -- run ---------------------------------------------------------------- #
     def start_run(self) -> None:
@@ -256,19 +246,10 @@ class HeadlessRunTab:
         if folder is None:
             self._status("Select a graph first.", True)
             return
-        controller = self.controller_combo.currentText()
-        open_loop = (not controller) or controller.startswith("none")
-        if open_loop:
-            reply = self.QtWidgets.QMessageBox.question(
-                self.widget,
-                "No controller",
-                "No controller artifact is selected, so the run will be OPEN-LOOP: "
-                "heaters stay off and nothing tracks the setpoint.\n\nRun anyway?",
-                self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
-                self.QtWidgets.QMessageBox.No,
-            )
-            if reply != self.QtWidgets.QMessageBox.Yes:
-                return
+        artifact = self.panel.selected_controller_artifact()
+        if not self._confirm_controller_ok(artifact):
+            return
+        open_loop = not (artifact and Path(artifact).exists())
         run_dir = (
             Path("simulations") / folder.name / datetime.now().strftime("%Y%m%d-%H%M%S")
         ).resolve()
@@ -299,7 +280,7 @@ class HeadlessRunTab:
         if open_loop:
             command.append("--allow-no-controller")
         else:
-            command += ["--controller", str(folder / controller)]
+            command += ["--controller", artifact]
         if self.use_setpoint.isChecked():
             command += ["--setpoint", f"{self.setpoint_spin.value():g}"]
         if self.use_initial.isChecked():
@@ -334,9 +315,9 @@ class HeadlessRunTab:
             self._status(f"Could not start the run: {exc}", True)
             return
         log_event("headless tab started run", pid=self.process.pid, out=str(run_dir))
-        self.run_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        self.open_button.setEnabled(True)
+        self.run_headless_button.setEnabled(False)
+        self.stop_headless_button.setEnabled(True)
+        self.open_output_button.setEnabled(True)
         self.summary_label.setText(f"Started (pid {self.process.pid}) -> {run_dir}")
         self._status(f"Headless run started (pid {self.process.pid}) -> {run_dir}", False)
 
@@ -390,8 +371,8 @@ class HeadlessRunTab:
         if self.process is not None and self.process.poll() is not None:
             code = self.process.returncode
             self.process = None
-            self.run_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
+            self.run_headless_button.setEnabled(True)
+            self.stop_headless_button.setEnabled(False)
             self._tail_log()
             self._status(f"Headless run finished (exit {code}); outputs in {self.run_dir}", code != 0)
 
