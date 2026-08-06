@@ -80,6 +80,12 @@ class RunConfig:
     snapshot_interval_s: float = 300.0
     checkpoint_interval_s: float = 600.0  # wall-clock seconds between checkpoints
     status_interval_steps: int = 20
+    # Replay-history depth. Headless runs never scrub back, and each stored step
+    # costs 8 bytes/node (256 steps x 3M nodes ~ 6 GB), so keep it minimal.
+    history_limit: int = 1
+    # Cap on individually-logged sensor series (aggregate RMS error is always kept).
+    # Every series is a Python list that grows for the whole run.
+    max_logged_sensors: int = 32
     seed: int = 0
     notes: str = ""
     thresholds: FailureThresholds = field(default_factory=FailureThresholds)
@@ -107,6 +113,54 @@ def _graph_hash(graph_folder: Path) -> str:
             st = p.stat()
             parts.append(f"{name}:{st.st_size}:{int(st.st_mtime)}")
     return "|".join(parts) or "none"
+
+
+def _process_rss_gib() -> float:
+    """Resident set size of this process in GiB (0.0 if unavailable). Used to make
+    memory growth visible in events/status for long unattended runs."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        # restype/argtypes are required: without them the HANDLE is truncated on
+        # 64-bit and the call silently fails (returns 0).
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi = ctypes.WinDLL("psapi")
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_COUNTERS),
+            wintypes.DWORD,
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        counters = _COUNTERS()
+        counters.cb = ctypes.sizeof(_COUNTERS)
+        if psapi.GetProcessMemoryInfo(
+            kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+        ):
+            return float(counters.WorkingSetSize) / (1024.0**3)
+    except Exception:  # noqa: BLE001 - non-Windows or API unavailable
+        try:
+            import resource  # type: ignore
+
+            return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / (1024.0**2)
+        except Exception:  # noqa: BLE001
+            return 0.0
+    return 0.0
 
 
 def _timestamp() -> str:
@@ -227,13 +281,26 @@ class SimulationRunner:
             for x in getattr(prepared, "cryocooler_node_ids", ())
             if int(x) in prepared.node_index_by_id
         ]
+        # Release the raw parsed graph.json payload retained on the model
+        # (graph_nodes/graph_edges/octree_cells: one Python dict per node, edge and
+        # cell -- gigabytes on a multi-million-cell graph). prepare_simulation has
+        # already built the matrices, and a headless run never re-derives geometry
+        # from it, so it is pure overhead for the rest of the run.
+        import gc
+
+        try:
+            model.octree_graph_data = None
+        except Exception:  # noqa: BLE001
+            pass
+        gc.collect()
         history_limit = prepared._effective_history_limit()
         self._log_event(
             "prepared",
             f"nodes={len(C_diag)} sensors={len(sensors)} heaters={len(heaters)} "
             f"cryo={len(cryo_idx)} controller={'yes' if has_controller else 'OPEN-LOOP'} "
             f"history_limit={history_limit} "
-            f"(~{history_limit * len(C_diag) * 8 / 1024.0 / 1024.0:.0f} MB)",
+            f"(~{history_limit * len(C_diag) * 8 / 1024.0 / 1024.0:.0f} MB) "
+            f"rss={_process_rss_gib():.1f} GiB",
         )
         for warning in prepared.warnings:
             self._log_event("prepare_warning", str(warning))
@@ -289,6 +356,10 @@ class SimulationRunner:
             dt_s=float(self.cfg.dt_s),
             t_final_s=float(self.cfg.t_final_s),
             gpu_solver_enabled=bool(self.cfg.gpu_solver_enabled),
+            # Replay history exists so the GUI can scrub backwards; a headless run
+            # never does, and each stored step costs 8 bytes/node -- the default 256
+            # steps is ~6 GB on a 3M-cell graph. Keep the minimum the stepper needs.
+            simulation_history_limit=max(1, int(self.cfg.history_limit)),
             input_mode=(
                 "heater_inputs" if has_controller
                 else ("zero" if self.cfg.params is None else self.cfg.params.input_mode)
@@ -435,7 +506,12 @@ class SimulationRunner:
         # sensor temps + tracking error
         if sensor_ix:
             sens = temps[sensor_ix]
-            for j, ix in enumerate(sensor_ix):
+            # Each per-sensor series is a Python list held for the whole run; with
+            # many sensors x an overnight step count that adds up, so log individual
+            # sensors up to a cap (the aggregate RMS below always covers them all).
+            logged = min(len(sensor_ix), max(0, int(self.cfg.max_logged_sensors)))
+            for j in range(logged):
+                ix = sensor_ix[j]
                 s.setdefault(f"sensor_{j}_K", []).append(float(temps[ix]))
                 if np.isfinite(setpoints[j]):
                     s.setdefault(f"sensor_{j}_err_K", []).append(float(temps[ix] - setpoints[j]))
@@ -526,6 +602,7 @@ class SimulationRunner:
             "progress": frac,
             "wall_elapsed_s": wall,
             "eta_s": eta,
+            "rss_gib": round(_process_rss_gib(), 2),
             "updated": datetime.now().isoformat(timespec="seconds"),
         }
         for key in ("rms_tracking_error_K", "max_temp_K", "cryo_tip_K", "power_in_W"):
