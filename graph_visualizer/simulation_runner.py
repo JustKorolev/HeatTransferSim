@@ -57,6 +57,10 @@ class FailureThresholds:
 class RunConfig:
     graph_folder: str
     output_root: str = "simulations"
+    # Exact output directory. Normally left None so the run gets its own timestamped
+    # folder; a launcher that must watch the run's status.json (e.g. the headless
+    # tab, which starts the run as a separate process) sets it explicitly.
+    run_dir: str | None = None
     controller_path: str | None = None  # modal_controller.npz; None => confirm/open-loop
     allow_no_controller: bool = False  # must be True to run without a controller
     setpoints_K: dict[int, float] = field(default_factory=dict)  # sensor node id -> target
@@ -208,7 +212,11 @@ class SimulationRunner:
         self._owns_model = model is None
         self.graph_folder = Path(config.graph_folder)
         self.graph_name = self.graph_folder.name
-        self.out_dir = Path(config.output_root) / self.graph_name / _timestamp()
+        self.out_dir = (
+            Path(config.run_dir)
+            if config.run_dir
+            else Path(config.output_root) / self.graph_name / _timestamp()
+        )
         self.snap_dir = self.out_dir / "snapshots"
         self.ckpt_dir = self.out_dir / "checkpoints"
         self.plots_dir = self.out_dir / "plots"

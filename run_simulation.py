@@ -27,11 +27,14 @@ def main() -> None:
     p.add_argument("--snapshot-interval-s", type=float, default=300.0)
     p.add_argument("--checkpoint-interval-s", type=float, default=600.0)
     p.add_argument("--notes", default="")
+    p.add_argument("--run-dir", default=None,
+                   help="exact output directory (default: simulations/<graph>/<timestamp>)")
     args = p.parse_args()
 
     cfg = RunConfig(
         graph_folder=str(Path(args.graph)),
         output_root=args.output_root,
+        run_dir=args.run_dir,
         controller_path=args.controller,
         allow_no_controller=bool(args.allow_no_controller),
         global_setpoint_K=args.setpoint,

@@ -64,6 +64,7 @@ from .role_pairing import (
 )
 from .role_warnings import role_warning_reasons
 from .thermal_validation_tab import ThermalValidationTab
+from .headless_run_tab import HeadlessRunTab
 from .tooltip_formatters import format_node_tooltip
 from .two_d_graph_widget import TwoDGraphWidget
 from .validation import raise_if_errors, validate_model
@@ -305,10 +306,20 @@ class GraphVisualizerApp:
             right_panel,
             on_status=self._set_status,
         )
+        # Deliberately given no access to self.model: this tab launches runs as a
+        # separate process so a multi-million-cell simulation never loads a graph
+        # into the GUI.
+        self.headless_run_tab = HeadlessRunTab(
+            self,
+            right_panel,
+            on_status=self._set_status,
+            graphs_root=lambda: Path.cwd() / "graphs",
+        )
         self.view_tabs.addTab(self.three_d_tab, "3D Octree Graph Editor")
         self.view_tabs.addTab(self.two_d_view.widget, "2D Network Graph")
         self.view_tabs.addTab(self.simulation_tab.widget, "Heat Transfer Simulation")
         self.view_tabs.addTab(self.thermal_validation_tab.widget, "Thermal Validation")
+        self.view_tabs.addTab(self.headless_run_tab.widget, "Headless Run")
         right_layout.addWidget(self.view_tabs, 1)
 
         self.status_label = self.QtWidgets.QLabel("")
