@@ -466,11 +466,30 @@ class SimulationRunner:
     def _simulate(self, prepared, params, C_diag, sensors, heaters, cryo_idx) -> None:
         thr = self.cfg.thresholds
         node_index = prepared.node_index_by_id
-        sensor_ix = [node_index[s] for s in sensors if s in node_index]
-        setpoints = np.array(
-            [float(getattr(prepared.model.nodes[s], "controller_setpoint_K", np.nan)) for s in sensors],
-            dtype=float,
-        )
+        # Build the row indices and setpoints TOGETHER. Filtering the indices while
+        # taking setpoints from the unfiltered sensor list would shift every setpoint
+        # onto the wrong sensor as soon as one sensor is missing from the matrices.
+        sensor_ids: list[int] = []
+        sensor_ix: list[int] = []
+        setpoint_values: list[float] = []
+        for sensor_id in sensors:
+            row = node_index.get(int(sensor_id))
+            if row is None:
+                self._log_event(
+                    "sensor_missing",
+                    f"sensor node {sensor_id} is not in the matrices; excluded from tracking.",
+                )
+                continue
+            sensor_ids.append(int(sensor_id))
+            sensor_ix.append(int(row))
+            setpoint_values.append(
+                float(getattr(prepared.model.nodes[int(sensor_id)], "controller_setpoint_K", np.nan))
+            )
+        setpoints = np.array(setpoint_values, dtype=float)
+        self._sensor_ids = sensor_ids
+        self._sensor_rows = sensor_ix
+        self._sensor_setpoints = setpoints
+        self._write_sensor_manifest(prepared, sensor_ids, setpoints)
         prev_temps = np.asarray(prepared.initial_temperatures_K, dtype=float).copy()
         last_snapshot_t = -1.0e18
         last_ckpt_wall = time.time()
@@ -516,6 +535,8 @@ class SimulationRunner:
             self._collect(prepared, state, temps, prev_temps, attempt_dt,
                           C_diag, sensor_ix, setpoints, heaters, cryo_idx, thr)
             prev_temps = temps.copy()
+            self._last_temps = prev_temps  # for the end-of-run verification tables
+            self._verification_source = prepared
             step += 1
 
             # --- snapshots / checkpoints / status ---
@@ -538,6 +559,108 @@ class SimulationRunner:
         # final checkpoint + status
         self._checkpoint(prepared, state if accepted else None, step)
         self._update_status(step, self._series.get("time_s", [0.0])[-1] if self._series.get("time_s") else 0.0)
+
+    def _write_sensor_manifest(self, prepared, sensor_ids, setpoints) -> None:
+        """sensors.csv: which node each tracked sensor is, what it reads, and the
+        setpoint applied to it.
+
+        The time series are named ``sensor_<i>_K``; without this file that index is
+        meaningless, so there is no way to confirm a setpoint landed on the intended
+        sensor. Written at start (so it exists even if the run dies) and completed
+        with final values in _finalize."""
+        nodes = getattr(prepared.model, "nodes", {}) or {}
+        rows = []
+        for index, (node_id, setpoint) in enumerate(zip(sensor_ids, np.asarray(setpoints, dtype=float))):
+            node = nodes.get(int(node_id))
+            rows.append(
+                {
+                    "series": f"sensor_{index}",
+                    "node_id": int(node_id),
+                    "component_name": str(getattr(node, "component_name", "") or ""),
+                    "material": str(getattr(node, "material", "") or ""),
+                    "setpoint_K": "" if not np.isfinite(setpoint) else f"{float(setpoint):.6g}",
+                    "monitor_only": bool(getattr(node, "sensor_monitor_only", False)),
+                    "readout_nodes": len(getattr(node, "readout_node_ids", None) or []),
+                    "center_mm": ";".join(
+                        f"{float(v):.2f}" for v in (getattr(node, "center_mm", None) or ())
+                    ),
+                }
+            )
+        self._sensor_manifest_rows = rows
+        if not rows:
+            return
+        with (self.out_dir / "sensors.csv").open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        finite = np.asarray(setpoints, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size:
+            self._log_event(
+                "setpoints",
+                f"{finite.size} sensor setpoint(s) applied: min={finite.min():.3f} K "
+                f"max={finite.max():.3f} K, {len(np.unique(np.round(finite, 6)))} distinct "
+                "(per-sensor detail in sensors.csv)",
+            )
+        else:
+            self._log_event("setpoints", "no finite sensor setpoints were applied")
+
+    def _write_verification_tables(self, prepared) -> None:
+        """Final per-sensor results and a per-component temperature summary, so the
+        whole assembly can be checked -- not just the tracked sensors."""
+        temps = getattr(self, "_last_temps", None)
+        if temps is None:
+            return
+        temps = np.asarray(temps, dtype=float)
+        rows = list(getattr(self, "_sensor_manifest_rows", []) or [])
+        if rows:
+            for index, row in enumerate(rows):
+                try:
+                    value = float(temps[self._sensor_rows[index]])
+                except (IndexError, ValueError):
+                    continue
+                row["final_K"] = f"{value:.6g}"
+                setpoint = self._sensor_setpoints[index]
+                row["error_K"] = f"{value - float(setpoint):.6g}" if np.isfinite(setpoint) else ""
+            with (self.out_dir / "sensors.csv").open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+        # Per-component temperature spread. Accumulated in a dict of running stats so
+        # a multi-million-node field never materialises grouped copies.
+        nodes = getattr(prepared.model, "nodes", {}) or {}
+        node_ids = np.asarray(prepared.node_ids, dtype=int).reshape(-1)
+        stats: dict[str, list[float]] = {}
+        for row, node_id in enumerate(node_ids):
+            if row >= temps.size:
+                break
+            node = nodes.get(int(node_id))
+            name = str(getattr(node, "component_name", "") or "(unnamed)")
+            value = float(temps[row])
+            entry = stats.get(name)
+            if entry is None:
+                stats[name] = [1.0, value, value, value]  # count, sum, min, max
+            else:
+                entry[0] += 1.0
+                entry[1] += value
+                entry[2] = min(entry[2], value)
+                entry[3] = max(entry[3], value)
+        if not stats:
+            return
+        with (self.out_dir / "component_temperatures.csv").open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["component_name", "nodes", "min_K", "mean_K", "max_K", "spread_K"])
+            for name, (count, total, low, high) in sorted(
+                stats.items(), key=lambda kv: kv[1][3], reverse=True
+            ):
+                writer.writerow(
+                    [name, int(count), f"{low:.6g}", f"{total / count:.6g}", f"{high:.6g}", f"{high - low:.6g}"]
+                )
+        self._log_event(
+            "verification",
+            f"wrote sensors.csv ({len(rows)} sensors) and component_temperatures.csv "
+            f"({len(stats)} components)",
+        )
 
     def _warn_if_disconnected(self) -> None:
         """Surface a graph that is not fully connected.
@@ -786,6 +909,12 @@ class SimulationRunner:
         np.random.seed(self.cfg.seed)
 
     def _finalize(self) -> None:
+        source = getattr(self, "_verification_source", None)
+        if source is not None:
+            try:
+                self._write_verification_tables(source)
+            except Exception as exc:  # noqa: BLE001 - never lose the run over a report
+                self._log_event("verification_failed", f"{type(exc).__name__}: {exc}")
         self._write_timeseries()
         self._write_plots_and_report()
         self._update_status(
