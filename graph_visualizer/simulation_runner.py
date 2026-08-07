@@ -293,6 +293,22 @@ class SimulationRunner:
             return self._shared_model, self._shared_matrices
         if not self.cfg.low_memory_load:
             return load_graph_folder(str(self.graph_folder))
+        # nodes.csv carries geometry/material/thermal fields but NO roles -- no
+        # heaters, sensors or cryocoolers (those live only in graph.json). So a run
+        # that drives heaters, runs a controller, or uses the cryocooler must NOT
+        # take the fast path, or it silently loads a model with zero of them and
+        # simulates an inert block (no cooling, no control) -- looking like it ran.
+        # The freshness/capacity checks don't catch this because roles aren't in the
+        # matrices they compare. Fall back to the full graph.json loader, which
+        # recovers the roles.
+        if self._run_needs_graph_roles():
+            self._log_event(
+                "low_memory_load_skipped",
+                "run drives heaters / a controller / the cryocooler, but nodes.csv "
+                "carries no roles; using the full graph.json loader so heaters, "
+                "sensors and cryocoolers are not silently dropped.",
+            )
+            return load_graph_folder(str(self.graph_folder))
         try:
             from .fast_graph_io import load_graph_for_simulation, validate_against_matrices
 
@@ -315,6 +331,22 @@ class SimulationRunner:
             self._log_event("low_memory_load_failed", f"{type(exc).__name__}: {exc}")
         self._log_event("graph_load", "using the full graph.json loader")
         return load_graph_folder(str(self.graph_folder))
+
+    def _run_needs_graph_roles(self) -> bool:
+        """Whether the run needs heater/sensor/cryocooler roles that only exist in
+        graph.json (so the role-blind nodes.csv fast path would corrupt it)."""
+        if self.cfg.controller_path:
+            return True
+        params = self.cfg.params
+        if params is None:
+            # Legacy minimal config: a run without an explicit params bundle only
+            # forces heaters when a controller is present (handled above).
+            return False
+        return (
+            str(getattr(params, "input_mode", "")) == "heater_inputs"
+            or bool(getattr(params, "mimo_controller_enabled", False))
+            or bool(getattr(params, "cryocooler_enabled", False))
+        )
 
     # -- setup -------------------------------------------------------------- #
     def _prepare(self):
