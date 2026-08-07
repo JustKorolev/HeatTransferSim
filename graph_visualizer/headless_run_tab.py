@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import sys
 from datetime import datetime
@@ -34,6 +35,7 @@ from typing import Any, Callable
 from .diagnostics import log_event
 from .modal_reduction import list_modal_artifacts
 from .simulation_controls_panel import MODE_HEADLESS, PID_QP_LABEL, SimulationControlsPanel
+from .simulation_runner import STOP_REQUEST_FILENAME
 
 
 class HeadlessRunTab:
@@ -54,6 +56,7 @@ class HeadlessRunTab:
         self._graphs_root = graphs_root or (lambda: Path.cwd() / "graphs")
         self.process: subprocess.Popen | None = None
         self.run_dir: Path | None = None
+        self._stop_requested = False
         self._log_size = 0
         self._params_source = "defaults"
         self.widget = self.QtWidgets.QWidget(parent)
@@ -111,10 +114,24 @@ class HeadlessRunTab:
                 "start_headless": self.start_run,
                 "stop_headless": self.stop_run,
                 "open_output": self.open_output,
+                # The sim tab's set-all / randomize buttons edit a loaded model.
+                # Headless has none, so here they drive the whole-run initial
+                # temperature / setpoint that get passed to the subprocess instead.
+                "set_all_initial_temperatures": self._set_all_initial_temperatures,
+                "randomize_setpoints": self._randomize_setpoints,
             },
         )
         self.panel.build(form)
+        # The same per-heater/sensor/cryocooler "Parameters" editor the simulation
+        # tab shows beside its viewer. No readout tables here to drive per-row
+        # selection, so the shared panel shows it as a static defaults block.
+        self.panel.build_readout_editor()
         self.panel.export_to(self)
+        # controls_scroll is NOT added here: app.py puts it in the window's shared
+        # side-panel stack, exactly as it does for the simulation tab. The tab body
+        # holds only what sits beside the viewer there -- the "Parameters" editor
+        # and, in place of the 3D viewer, the run's progress / status / log.
+        outer.addWidget(self.readout_editor_box, 0, self.QtCore.Qt.AlignTop)
 
         # In place of the 3D viewer: what the launched run is doing.
         right = self.QtWidgets.QWidget()
@@ -131,6 +148,33 @@ class HeadlessRunTab:
         self.log_view.setMaximumBlockCount(2000)
         right_layout.addWidget(self.log_view, 1)
         outer.addWidget(right, 1)
+
+    # -- set-all / randomize (headless equivalents) -------------------------- #
+    def _set_all_initial_temperatures(self) -> None:
+        """The sim tab sets every component's initial temperature on the loaded
+        model. Headless holds no model, so this sets the whole-run initial-T
+        override that ``run_simulation.py`` applies to every cell instead."""
+        value = float(self.initial_temperature_all_spin.value())
+        self.initial_spin.setValue(value)
+        self.use_initial.setChecked(True)
+        self._status(f"Run will start every cell at {value:g} K.", False)
+
+    def _randomize_setpoints(self) -> None:
+        """The sim tab assigns each sensor a random setpoint on the loaded model.
+        The headless subprocess only takes one constant ``--setpoint`` for all
+        sensors, so this draws one value from center +/- spread and applies it to
+        the whole run. Per-sensor randomization needs the graph loaded (which this
+        tab deliberately never does)."""
+        center = float(self.sensor_random_center_spin.value())
+        spread_K = float(self.sensor_random_spread_mK_spin.value()) * 1.0e-3
+        value = center + random.uniform(-spread_K, spread_K)
+        self.setpoint_spin.setValue(value)
+        self.use_setpoint.setChecked(True)
+        self._status(
+            f"Run setpoint randomized to {value:g} K "
+            f"(one value for all sensors; per-sensor needs the graph loaded).",
+            False,
+        )
 
     # -- parameters ---------------------------------------------------------- #
     def _load_parameters_for_graph(self, folder: Path) -> None:
@@ -292,6 +336,7 @@ class HeadlessRunTab:
 
         run_dir.mkdir(parents=True, exist_ok=True)
         self.run_dir = run_dir
+        self._stop_requested = False
         self._log_size = 0
         self.log_view.clear()
         self.progress.setValue(0)
@@ -324,10 +369,26 @@ class HeadlessRunTab:
     def stop_run(self) -> None:
         if self.process is None or self.process.poll() is not None:
             return
-        # terminate() lets the runner's signal handler finalise its artifacts.
+        if self.run_dir is not None and not self._stop_requested:
+            # Graceful: ask the run to stop at the next step boundary so it still
+            # runs _finalize (plots, report, timeseries). A hard terminate() here
+            # would skip all of that -- on Windows it is an uncatchable kill.
+            self._stop_requested = True
+            try:
+                (self.run_dir / STOP_REQUEST_FILENAME).write_text("stop", encoding="utf-8")
+                self._status(
+                    "Stop requested — the run will finish the current step, then save its "
+                    "plots and report and exit. Click Stop again to force-kill.",
+                    False,
+                )
+                return
+            except OSError as exc:
+                self._status(f"Could not request a graceful stop ({exc}); force-killing.", True)
+        # Second click, or the request file could not be written: hard kill. The run
+        # keeps whatever it already wrote (snapshots/checkpoints) but skips finalize.
         try:
             self.process.terminate()
-            self._status("Stopping the headless run (it will finalise its outputs)...", False)
+            self._status("Force-stopping the run (plots/report may be incomplete).", True)
         except Exception as exc:  # noqa: BLE001
             self._status(f"Could not stop the run: {exc}", True)
 
@@ -362,11 +423,18 @@ class HeadlessRunTab:
                     if isinstance(eta, (int, float)) and eta == eta and eta not in (float("inf"),)
                     else ""
                 )
+                rebuild = data.get("property_rebuild_ms")
+                solve = data.get("model_solve_ms")
+                profile_text = (
+                    f"\nper step: rebuild {float(rebuild):.0f} ms, solve {float(solve):.0f} ms"
+                    if isinstance(rebuild, (int, float)) and isinstance(solve, (int, float))
+                    else ""
+                )
                 self.summary_label.setText(
                     f"{data.get('status', '?')} — t={float(data.get('sim_time_s', 0.0)):.1f}"
                     f"/{float(data.get('t_final_s', 0.0)):.0f} s"
                     f" ({progress * 100:.1f}%), step {data.get('step', 0)}"
-                    f", RSS {data.get('rss_gib', 0.0)} GiB{eta_text}"
+                    f", RSS {data.get('rss_gib', 0.0)} GiB{eta_text}{profile_text}"
                 )
         if self.process is not None and self.process.poll() is not None:
             code = self.process.returncode

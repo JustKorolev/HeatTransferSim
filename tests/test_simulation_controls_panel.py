@@ -67,6 +67,9 @@ class _Widget:
     def setMinimumWidth(self, _value) -> None:
         pass
 
+    def setMaximumWidth(self, _value) -> None:
+        pass
+
     def setMaximumHeight(self, _value) -> None:
         pass
 
@@ -309,6 +312,9 @@ class QHBoxLayout:
     def addWidget(self, widget, *_args) -> None:
         self.widgets.append(widget)
 
+    def addStretch(self, *_args) -> None:
+        pass
+
 
 class QVBoxLayout(QHBoxLayout):
     pass
@@ -512,8 +518,6 @@ def test_headless_mode_hides_playback_and_graph_dependent_controls():
         "loop_playback",
         "transport",
         "time_slider",
-        "initial_temperature_all",
-        "randomize_setpoints",
         "component",
         "legend",
         # Inside the hidden Display section.
@@ -522,7 +526,17 @@ def test_headless_mode_hides_playback_and_graph_dependent_controls():
         "color_max_K",
     ):
         assert panel._rows[key][1].visible is False, key
-    for key in ("dt_s", "t_final_s", "input_mode", "controller", "headless_run", "open_output"):
+    for key in (
+        "dt_s",
+        "t_final_s",
+        "input_mode",
+        "controller",
+        "headless_run",
+        "open_output",
+        # Kept: config features useful even for a non-live run.
+        "initial_temperature_all",
+        "randomize_setpoints",
+    ):
         assert panel._rows[key][1].visible is True, key
     for key in ("display", "enabled_io", "sys_id", "stepper_diagnostic"):
         assert panel._sections[key].visible is False, key
@@ -676,6 +690,54 @@ def test_every_input_maps_to_a_real_parameter(mode):
     panel, _form = _build(mode)
     unknown = [name for name in panel.inputs if not hasattr(params, name)]
     assert unknown == []
+
+
+@pytest.mark.parametrize("mode", [MODE_LIVE, MODE_HEADLESS])
+def test_readout_editor_builds_the_same_heater_sensor_options(mode):
+    panel, _form = _build(mode)
+    panel.build_readout_editor()
+    # setpoint, heater power/PID and cryocooler options exist in both tabs.
+    for field in (
+        "controller_setpoint_K",
+        "sensor_control_mode",
+        "heater_max_power_W",
+        "heater_efficiency",
+        "controller_kp_coarse",
+        "cryocooler_max_power_W",
+        "cryocooler_enabled",
+    ):
+        assert field in panel.readout_editor_inputs, field
+    owner = type("O", (), {})()
+    panel.export_to(owner)
+    assert owner.readout_editor_inputs is panel.readout_editor_inputs
+    assert owner.readout_sensor_editor is panel.readout_sensor_editor
+
+
+def test_readout_editor_change_routes_to_the_owner_action():
+    seen: list[str] = []
+    panel = SimulationControlsPanel(
+        _QtStub,
+        mode=MODE_LIVE,
+        actions={"readout_heater_change": seen.append},
+    )
+    panel.build(QFormLayout())
+    panel.build_readout_editor()
+    panel.readout_editor_inputs["heater_max_power_W"].setValue(12.0)
+    assert seen == ["heater_max_power_W"]
+
+
+def test_headless_randomize_and_set_all_drive_the_whole_run_fields(tmp_path):
+    tab = _headless_tab(tmp_path / "graphs")
+    tab.initial_temperature_all_spin.setValue(77.0)
+    tab._set_all_initial_temperatures()
+    assert tab.initial_spin.value() == pytest.approx(77.0)
+    assert tab.use_initial.isChecked() is True
+
+    tab.sensor_random_center_spin.setValue(50.0)
+    tab.sensor_random_spread_mK_spin.setValue(0.0)  # zero spread -> deterministic
+    tab._randomize_setpoints()
+    assert tab.setpoint_spin.value() == pytest.approx(50.0)
+    assert tab.use_setpoint.isChecked() is True
 
 
 # --- the headless tab, built on the same stubs ----------------------------- #

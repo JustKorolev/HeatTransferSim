@@ -53,6 +53,14 @@ class FailureThresholds:
     step_wall_timeout_s: float = 0.0  # 0 = disabled watchdog
 
 
+# A launcher that started the run as a separate, detached process (the headless
+# tab) cannot deliver SIGINT/SIGTERM to it -- on Windows terminate() is an
+# uncatchable kill that skips _finalize (plots, report, timeseries). Dropping this
+# file in the run directory asks the loop to stop at the next step boundary and
+# exit through _finalize normally.
+STOP_REQUEST_FILENAME = "stop.request"
+
+
 @dataclass
 class RunConfig:
     graph_folder: str
@@ -225,12 +233,19 @@ class SimulationRunner:
         self._series: dict[str, list[float]] = {}
         self._stop = False  # set by SIGTERM/SIGINT or cancel_event
         self._exit_status = "running"
+        self._last_step_profile: dict[str, float] = {}
         self._start_wall = time.time()
 
     # -- lifecycle ---------------------------------------------------------- #
     def run(self) -> Path:
         for d in (self.out_dir, self.snap_dir, self.ckpt_dir, self.plots_dir):
             d.mkdir(parents=True, exist_ok=True)
+        # A leftover stop request from a previous run into this same dir (a resume)
+        # must not immediately stop this one.
+        try:
+            (self.out_dir / STOP_REQUEST_FILENAME).unlink()
+        except OSError:
+            pass
         self._install_signal_handlers()
         self._log_event("run_start", f"graph={self.graph_name} out={self.out_dir}")
         # Graph load can take a while with no visible progress; publish a status so
@@ -545,6 +560,10 @@ class SimulationRunner:
             prev_temps = temps.copy()
             self._last_temps = prev_temps  # for the end-of-run verification tables
             self._verification_source = prepared
+            # Per-step timing breakdown, so status.json shows where wall-clock goes
+            # (the temperature-dependent operator rebuild vs. the linear solve) --
+            # the number needed to decide whether to lag properties or add a GPU.
+            self._last_step_profile = dict(getattr(prepared, "last_step_profile_ms", {}) or {})
             step += 1
 
             # --- snapshots / checkpoints / status ---
@@ -850,6 +869,11 @@ class SimulationRunner:
         for key in ("rms_tracking_error_K", "max_temp_K", "cryo_tip_K", "power_in_W"):
             if self._series.get(key):
                 payload[f"last_{key}"] = self._series[key][-1]
+        profile = getattr(self, "_last_step_profile", None)
+        if profile:
+            for key in ("property_rebuild_ms", "model_solve_ms", "total_ms"):
+                if key in profile:
+                    payload[key] = round(float(profile[key]), 1)
         _atomic_write_json(self.status_path, payload)
         if self.progress_cb is not None:
             try:
@@ -881,6 +905,14 @@ class SimulationRunner:
         if self.cancel_event is not None and getattr(self.cancel_event, "is_set", lambda: False)():
             self._exit_status = "cancelled"
             return True
+        # Cross-process graceful stop for a detached/console-less subprocess, where
+        # a signal cannot reach us and terminate() would skip _finalize.
+        try:
+            if (self.out_dir / STOP_REQUEST_FILENAME).exists():
+                self._exit_status = "stopped"
+                return True
+        except OSError:
+            pass
         return False
 
     # -- finalize ----------------------------------------------------------- #

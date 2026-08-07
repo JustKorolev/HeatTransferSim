@@ -244,10 +244,10 @@ class HeatTransferSimulationTab:
             modal_operating_temperature_K=self._default_modal_operating_temperature_K(),
         )
         self.panel.build(form)
+        self.panel.build_readout_editor()
         self.panel.export_to(self)
         self._refresh_controller_choices()
 
-        self._build_readout_parameter_editor()
         self.viewer = GraphPyVistaWidget(
             self.widget,
             on_pick_node=self._handle_pick,
@@ -351,88 +351,10 @@ class HeatTransferSimulationTab:
             "apply_component_initial_temperature": self.apply_component_initial_temperature,
             "cooling_table_selected": self._handle_cooling_table_selection,
             "heating_tree_selected": self._handle_heating_tree_selection,
+            "readout_sensor_change": self._apply_readout_sensor_editor_change,
+            "readout_heater_change": self._apply_readout_heater_editor_change,
+            "readout_cooling_change": self._apply_readout_cooling_editor_change,
         }
-
-    def _build_readout_parameter_editor(self) -> None:
-        self.readout_editor_box = self.QtWidgets.QGroupBox("Parameters")
-        self.readout_editor_box.setVisible(False)
-        self.readout_editor_box.setMinimumWidth(260)
-        self.readout_editor_box.setMaximumWidth(340)
-        self.readout_editor_box.setSizePolicy(
-            self.QtWidgets.QSizePolicy.Fixed,
-            self.QtWidgets.QSizePolicy.Preferred,
-        )
-        layout = self.QtWidgets.QVBoxLayout(self.readout_editor_box)
-        self.readout_editor_title = self.QtWidgets.QLabel("Select a readout row.")
-        self.readout_editor_title.setWordWrap(True)
-        layout.addWidget(self.readout_editor_title)
-
-        self.readout_sensor_editor = self.QtWidgets.QWidget()
-        sensor_form = self.QtWidgets.QFormLayout(self.readout_sensor_editor)
-        widget = self._double_spin(0.0, 1.0e6, 293.15, 1.0)
-        widget.valueChanged.connect(lambda *_args: self._apply_readout_sensor_editor_change("controller_setpoint_K"))
-        self.readout_editor_inputs["controller_setpoint_K"] = widget
-        sensor_form.addRow("setpoint K", widget)
-        layout.addWidget(self.readout_sensor_editor)
-
-        self.readout_heater_editor = self.QtWidgets.QWidget()
-        heater_form = self.QtWidgets.QFormLayout(self.readout_heater_editor)
-        mode = self.QtWidgets.QComboBox()
-        mode.addItems(["manual", "mimo"])
-        mode.currentTextChanged.connect(lambda *_: self._apply_readout_heater_editor_change("sensor_control_mode"))
-        self.readout_editor_inputs["sensor_control_mode"] = mode
-        heater_form.addRow("mode", mode)
-        for name, label, minimum, maximum, step in (
-            ("heater_id", "heater id", -1, 1_000_000_000, 1),
-            ("heater_min_power_W", "min power W", 0.0, 1.0e9, 1.0),
-            ("heater_max_power_W", "max power W", 0.0, 1.0e9, 1.0),
-            ("heater_efficiency", "efficiency", 0.0, 1.0e6, 0.05),
-        ):
-            if name == "heater_id":
-                widget = self._int_spin(int(minimum), int(maximum), 0, int(step))
-                widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_heater_editor_change(field))
-            else:
-                widget = self._double_spin(float(minimum), float(maximum), 0.0, float(step))
-                widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_heater_editor_change(field))
-            self.readout_editor_inputs[name] = widget
-            heater_form.addRow(label, widget)
-        for name, label, minimum, maximum, step in (
-            ("sensor_manual_power_W", "manual power W", 0.0, 1.0e9, 1.0),
-            ("controller_weight", "weight", 0.0, 1.0e9, 0.1),
-            ("sensor_settling_time_s", "settling time s", 0.0, 1.0e9, 1.0),
-            ("controller_kp_coarse", "coarse kP", 0.0, 1.0e9, 0.1),
-            ("controller_ki_coarse", "coarse kI", 0.0, 1.0e9, 0.1),
-            ("controller_kd_coarse", "coarse kD", 0.0, 1.0e9, 0.1),
-            ("controller_kp_hold", "hold kP", 0.0, 1.0e9, 0.1),
-            ("controller_ki_hold", "hold kI", 0.0, 1.0e9, 0.1),
-            ("controller_kd_hold", "hold kD", 0.0, 1.0e9, 0.1),
-        ):
-            widget = self._double_spin(minimum, maximum, 0.0, step)
-            widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_heater_editor_change(field))
-            self.readout_editor_inputs[name] = widget
-            heater_form.addRow(label, widget)
-        layout.addWidget(self.readout_heater_editor)
-
-        self.readout_cooling_editor = self.QtWidgets.QWidget()
-        cooling_form = self.QtWidgets.QFormLayout(self.readout_cooling_editor)
-        cooling_form.addRow("Model", self.QtWidgets.QLabel("PT60 measured lift curve"))
-        for name, label, minimum, maximum, step in (
-            ("cryocooler_max_power_W", "Maximum cooling power W", 0.0, 1.0e9, 1.0),
-            ("cryocooler_capacity_scale", "Capacity scale", 0.0, 1.0e9, 0.05),
-        ):
-            widget = self._double_spin(minimum, maximum, float(getattr(self.params, name)), step)
-            widget.valueChanged.connect(lambda *_args, field=name: self._apply_readout_cooling_editor_change(field))
-            self.readout_editor_inputs[name] = widget
-            cooling_form.addRow(label, widget)
-        enabled_widget = self._checkbox(
-            "Enabled",
-            self.params.cryocooler_enabled,
-            lambda *_args: self._apply_readout_cooling_editor_change("cryocooler_enabled"),
-        )
-        self.readout_editor_inputs["cryocooler_enabled"] = enabled_widget
-        cooling_form.addRow(enabled_widget)
-        layout.addWidget(self.readout_cooling_editor)
-        layout.addStretch(1)
 
     def refresh_graph_list(self) -> None:
         self.graph_combo.clear()

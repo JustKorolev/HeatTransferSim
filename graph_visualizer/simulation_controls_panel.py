@@ -48,8 +48,6 @@ _HEADLESS_HIDDEN_ROWS = frozenset(
         "playback_speed",
         "simulation_history_limit",
         "loop_playback",
-        "initial_temperature_all",
-        "randomize_setpoints",
         "modal_operating_temperature",
         "modal_modes",
         "modal_order",
@@ -145,6 +143,14 @@ _EXPORTED_SHARED = (
     "use_initial",
 )
 _EXPORTED = _EXPORTED_LIVE_ONLY + _EXPORTED_SHARED
+# The per-node "Parameters" editor, exported only once build_readout_editor ran.
+_EXPORTED_READOUT = (
+    "readout_editor_box",
+    "readout_editor_title",
+    "readout_sensor_editor",
+    "readout_heater_editor",
+    "readout_cooling_editor",
+)
 
 
 class SimulationControlsPanel:
@@ -171,6 +177,8 @@ class SimulationControlsPanel:
         self._modal_operating_temperature_K = float(modal_operating_temperature_K)
         # name -> widget for every field backed by a SimulationParameters field.
         self.inputs: dict[str, Any] = {}
+        # The per-node "Parameters" editor's widgets (built by build_readout_editor).
+        self.readout_editor_inputs: dict[str, Any] = {}
         # row key -> (form, widget) so a row can be hidden with its label.
         self._rows: dict[str, tuple[Any, Any]] = {}
         self._sections: dict[str, Any] = {}
@@ -834,6 +842,110 @@ class SimulationControlsPanel:
         self.legend_label.setWordWrap(True)
         self._row(form, "legend", self.legend_label)
 
+    # -- the per-node "Parameters" editor ------------------------------------ #
+    def _readout_slot(self, action: str, field: str) -> Callable[..., None]:
+        callback = self._act(action)
+        if callback is None:
+            return lambda *_args: None
+        return lambda *_args, f=field: callback(f)
+
+    def build_readout_editor(self) -> Any:
+        """Build the per-heater/sensor/cryocooler "Parameters" box.
+
+        This is the sim tab's heater/sensor editor (setpoint K, heater mode /
+        power / efficiency / PID, cryocooler). It sits beside the viewer in the
+        live tab and beside the log in the headless tab, so both tabs offer the
+        same heater/sensor options. Its ``valueChanged`` slots call back into the
+        owning tab via the ``readout_*_change`` actions; the headless tab, which
+        has no per-node model to write to, simply passes no such actions.
+        """
+        box = self.QtWidgets.QGroupBox("Parameters")
+        box.setMinimumWidth(260)
+        box.setMaximumWidth(340)
+        box.setSizePolicy(self.QtWidgets.QSizePolicy.Fixed, self.QtWidgets.QSizePolicy.Preferred)
+        layout = self.QtWidgets.QVBoxLayout(box)
+        self.readout_editor_box = box
+        self.readout_editor_title = self.QtWidgets.QLabel("Select a readout row.")
+        self.readout_editor_title.setWordWrap(True)
+        layout.addWidget(self.readout_editor_title)
+
+        self.readout_sensor_editor = self.QtWidgets.QWidget()
+        sensor_form = self.QtWidgets.QFormLayout(self.readout_sensor_editor)
+        widget = self.double_spin(0.0, 1.0e6, 293.15, 1.0)
+        widget.valueChanged.connect(self._readout_slot("readout_sensor_change", "controller_setpoint_K"))
+        self.readout_editor_inputs["controller_setpoint_K"] = widget
+        sensor_form.addRow("setpoint K", widget)
+        layout.addWidget(self.readout_sensor_editor)
+
+        self.readout_heater_editor = self.QtWidgets.QWidget()
+        heater_form = self.QtWidgets.QFormLayout(self.readout_heater_editor)
+        mode = self.QtWidgets.QComboBox()
+        mode.addItems(["manual", "mimo"])
+        mode.currentTextChanged.connect(self._readout_slot("readout_heater_change", "sensor_control_mode"))
+        self.readout_editor_inputs["sensor_control_mode"] = mode
+        heater_form.addRow("mode", mode)
+        for name, label, minimum, maximum, step in (
+            ("heater_id", "heater id", -1, 1_000_000_000, 1),
+            ("heater_min_power_W", "min power W", 0.0, 1.0e9, 1.0),
+            ("heater_max_power_W", "max power W", 0.0, 1.0e9, 1.0),
+            ("heater_efficiency", "efficiency", 0.0, 1.0e6, 0.05),
+        ):
+            if name == "heater_id":
+                widget = self.int_spin(int(minimum), int(maximum), 0, int(step))
+            else:
+                widget = self.double_spin(float(minimum), float(maximum), 0.0, float(step))
+            widget.valueChanged.connect(self._readout_slot("readout_heater_change", name))
+            self.readout_editor_inputs[name] = widget
+            heater_form.addRow(label, widget)
+        for name, label, minimum, maximum, step in (
+            ("sensor_manual_power_W", "manual power W", 0.0, 1.0e9, 1.0),
+            ("controller_weight", "weight", 0.0, 1.0e9, 0.1),
+            ("sensor_settling_time_s", "settling time s", 0.0, 1.0e9, 1.0),
+            ("controller_kp_coarse", "coarse kP", 0.0, 1.0e9, 0.1),
+            ("controller_ki_coarse", "coarse kI", 0.0, 1.0e9, 0.1),
+            ("controller_kd_coarse", "coarse kD", 0.0, 1.0e9, 0.1),
+            ("controller_kp_hold", "hold kP", 0.0, 1.0e9, 0.1),
+            ("controller_ki_hold", "hold kI", 0.0, 1.0e9, 0.1),
+            ("controller_kd_hold", "hold kD", 0.0, 1.0e9, 0.1),
+        ):
+            widget = self.double_spin(minimum, maximum, 0.0, step)
+            widget.valueChanged.connect(self._readout_slot("readout_heater_change", name))
+            self.readout_editor_inputs[name] = widget
+            heater_form.addRow(label, widget)
+        layout.addWidget(self.readout_heater_editor)
+
+        self.readout_cooling_editor = self.QtWidgets.QWidget()
+        cooling_form = self.QtWidgets.QFormLayout(self.readout_cooling_editor)
+        cooling_form.addRow("Model", self.QtWidgets.QLabel("PT60 measured lift curve"))
+        for name, label, minimum, maximum, step in (
+            ("cryocooler_max_power_W", "Maximum cooling power W", 0.0, 1.0e9, 1.0),
+            ("cryocooler_capacity_scale", "Capacity scale", 0.0, 1.0e9, 0.05),
+        ):
+            widget = self.double_spin(minimum, maximum, float(getattr(self.params, name)), step)
+            widget.valueChanged.connect(self._readout_slot("readout_cooling_change", name))
+            self.readout_editor_inputs[name] = widget
+            cooling_form.addRow(label, widget)
+        enabled_widget = self.checkbox(
+            "Enabled",
+            self.params.cryocooler_enabled,
+            self._readout_slot("readout_cooling_change", "cryocooler_enabled"),
+        )
+        self.readout_editor_inputs["cryocooler_enabled"] = enabled_widget
+        cooling_form.addRow(enabled_widget)
+        layout.addWidget(self.readout_cooling_editor)
+        layout.addStretch(1)
+
+        if self.mode == MODE_HEADLESS:
+            # No readout tables to select a row from, so show the whole editor as a
+            # static defaults block rather than hiding it until a selection.
+            self.readout_editor_title.setText(
+                "Heater / sensor / cryocooler defaults (applied to the run's graph)."
+            )
+        else:
+            # Live tab drives it from readout-row selection; hidden until then.
+            box.setVisible(False)
+        return box
+
     # -- mode ---------------------------------------------------------------- #
     def _set_row_visible(self, key: str, visible: bool) -> None:
         entry = self._rows.get(key)
@@ -876,6 +988,10 @@ class SimulationControlsPanel:
         owner.inputs = self.inputs
         for name in _EXPORTED:
             setattr(owner, name, getattr(self, name))
+        if hasattr(self, "readout_editor_box"):
+            owner.readout_editor_inputs = self.readout_editor_inputs
+            for name in _EXPORTED_READOUT:
+                setattr(owner, name, getattr(self, name))
 
     # -- parameters ----------------------------------------------------------- #
     def set_params(self, params: SimulationParameters) -> None:

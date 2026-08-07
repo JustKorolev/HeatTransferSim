@@ -553,6 +553,16 @@ def _save_octree_graph_folder_lightweight(
             matrices["L"] = sparse_l
         else:
             matrices["L"] = _sparse_laplacian_from_model(model, matrices["node_ids"])
+        # This branch keeps the existing dense matrices, so it used to skip
+        # nodes.csv entirely -- which left it older than the just-written
+        # graph.json and disqualified the low-memory loader (fast_graph_io), forcing
+        # every later run through the multi-minute, tens-of-GB graph.json parse.
+        # Rewriting the compact nodes.csv here (cheap next to the graph.json already
+        # written above) keeps the fast, low-RAM load valid across edits. C.npy/L are
+        # deliberately NOT rewritten: if an edit actually changed the matrices,
+        # fast_graph_io.validate_against_matrices catches the capacity/coverage
+        # mismatch and safely falls back to the full loader.
+        _write_nodes_csv(model, folder)
         return matrices
     if len(model.nodes) > _DENSE_OCTREE_MATRIX_NODE_LIMIT:
         matrices = _build_sparse_octree_matrices_from_model(model)
@@ -566,7 +576,13 @@ def _has_existing_octree_matrix_payload(folder: Path) -> bool:
     return any((folder / name).exists() for name in ("L_sparse.npz", "L_sparse.json", "L.npy", "G.npy", MATRIX_FILE))
 
 
-def _save_octree_outputs(model: ThermalGraphModel, matrices: dict[str, np.ndarray], folder: Path) -> None:
+def _write_nodes_csv(model: ThermalGraphModel, folder: Path) -> None:
+    """Write the compact per-node ``nodes.csv`` the low-memory loader reads.
+
+    Kept separate from ``_save_octree_outputs`` so the lightweight save can refresh
+    just this file (keeping the fast-load path valid after an edit) without also
+    re-emitting the heavy ``edges.csv`` / browser JSON exports on a 3M-node graph.
+    """
     node_rows = [
         _flatten_node_row(model.nodes[node_id].to_octree_node_dict())
         for node_id in model.ordered_node_ids()
@@ -593,6 +609,10 @@ def _save_octree_outputs(model: ThermalGraphModel, matrices: dict[str, np.ndarra
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(node_rows)
+
+
+def _save_octree_outputs(model: ThermalGraphModel, matrices: dict[str, np.ndarray], folder: Path) -> None:
+    _write_nodes_csv(model, folder)
     with (folder / "edges.csv").open("w", newline="", encoding="utf-8") as handle:
         fields = ["edge_id", "node_i", "node_j", "edge_type", "G_W_K", "shared_area_m2", "distance_m", "contact_confidence", "source"]
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
