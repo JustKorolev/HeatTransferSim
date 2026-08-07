@@ -849,6 +849,31 @@ class SimulationControlsPanel:
             return lambda *_args: None
         return lambda *_args, f=field: callback(f)
 
+    def _readout_field_defaults(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """(node-level, heater-hardware) default values a fresh heater/sensor gets
+        in the simulation tab, read straight from the model dataclasses so the
+        headless editor -- which has no graph to read from -- shows the same
+        reasonable presets (e.g. heater max power 30 W, efficiency 1.0, setpoint
+        293.15 K) rather than zeros. Falls back to hardcoded values if models can't
+        be imported (e.g. a minimal test stub)."""
+        try:
+            import dataclasses
+
+            from .models import HeaterProperties, NodeProperties
+
+            node_defaults = {
+                f.name: f.default
+                for f in dataclasses.fields(NodeProperties)
+                if f.default is not dataclasses.MISSING
+            }
+            heater_defaults = dataclasses.asdict(HeaterProperties())
+            return node_defaults, heater_defaults
+        except Exception:  # noqa: BLE001 - defaults are a convenience, never fatal
+            return (
+                {"controller_setpoint_K": 293.15},
+                {"heater_min_power_W": 0.0, "heater_max_power_W": 30.0, "heater_efficiency": 1.0},
+            )
+
     def build_readout_editor(self) -> Any:
         """Build the per-heater/sensor/cryocooler "Parameters" box.
 
@@ -858,7 +883,13 @@ class SimulationControlsPanel:
         same heater/sensor options. Its ``valueChanged`` slots call back into the
         owning tab via the ``readout_*_change`` actions; the headless tab, which
         has no per-node model to write to, simply passes no such actions.
+
+        Field initial values are the model's own heater/sensor defaults, so the
+        headless tab (which can't read a graph) still shows sensible presets. The
+        live tab overwrites them from the selected node on every row selection, so
+        these seeds only surface where there is no graph to read.
         """
+        node_defaults, heater_defaults = self._readout_field_defaults()
         box = self.QtWidgets.QGroupBox("Parameters")
         box.setMinimumWidth(260)
         box.setMaximumWidth(340)
@@ -871,7 +902,9 @@ class SimulationControlsPanel:
 
         self.readout_sensor_editor = self.QtWidgets.QWidget()
         sensor_form = self.QtWidgets.QFormLayout(self.readout_sensor_editor)
-        widget = self.double_spin(0.0, 1.0e6, 293.15, 1.0)
+        widget = self.double_spin(
+            0.0, 1.0e6, float(node_defaults.get("controller_setpoint_K", 293.15)), 1.0
+        )
         widget.valueChanged.connect(self._readout_slot("readout_sensor_change", "controller_setpoint_K"))
         self.readout_editor_inputs["controller_setpoint_K"] = widget
         sensor_form.addRow("setpoint K", widget)
@@ -893,7 +926,9 @@ class SimulationControlsPanel:
             if name == "heater_id":
                 widget = self.int_spin(int(minimum), int(maximum), 0, int(step))
             else:
-                widget = self.double_spin(float(minimum), float(maximum), 0.0, float(step))
+                widget = self.double_spin(
+                    float(minimum), float(maximum), float(heater_defaults.get(name, 0.0)), float(step)
+                )
             widget.valueChanged.connect(self._readout_slot("readout_heater_change", name))
             self.readout_editor_inputs[name] = widget
             heater_form.addRow(label, widget)
@@ -908,7 +943,7 @@ class SimulationControlsPanel:
             ("controller_ki_hold", "hold kI", 0.0, 1.0e9, 0.1),
             ("controller_kd_hold", "hold kD", 0.0, 1.0e9, 0.1),
         ):
-            widget = self.double_spin(minimum, maximum, 0.0, step)
+            widget = self.double_spin(minimum, maximum, float(node_defaults.get(name, 0.0)), step)
             widget.valueChanged.connect(self._readout_slot("readout_heater_change", name))
             self.readout_editor_inputs[name] = widget
             heater_form.addRow(label, widget)

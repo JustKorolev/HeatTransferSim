@@ -713,6 +713,16 @@ def test_readout_editor_builds_the_same_heater_sensor_options(mode):
     assert owner.readout_sensor_editor is panel.readout_sensor_editor
 
 
+def test_readout_editor_seeds_model_heater_defaults():
+    # Headless has no graph to read, so the editor must still show reasonable
+    # presets (the model's own heater/sensor defaults), not zeros.
+    panel, _form = _build(MODE_HEADLESS)
+    panel.build_readout_editor()
+    assert panel.readout_editor_inputs["heater_max_power_W"].value() == pytest.approx(30.0)
+    assert panel.readout_editor_inputs["heater_efficiency"].value() == pytest.approx(1.0)
+    assert panel.readout_editor_inputs["controller_setpoint_K"].value() == pytest.approx(293.15)
+
+
 def test_readout_editor_change_routes_to_the_owner_action():
     seen: list[str] = []
     panel = SimulationControlsPanel(
