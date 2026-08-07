@@ -796,14 +796,24 @@ class SimulationRunner:
         s.setdefault("power_in_W", []).append(p_in)
         s.setdefault("power_out_W", []).append(p_out)
         s.setdefault("radiation_W", []).append(p_rad)
-        if thr.forbid_negative_heater_power:
-            try:
-                neg = [k for k, v in prepared.heater_power_by_node().items()
-                       if int(k) in set(heaters) and float(v) < -1e-9]
+        s.setdefault("net_W", []).append(net_W)
+        # Per-heater commanded power, so the report can plot each heater's own
+        # trajectory (not just the total power_in_W). One heater_<id>_W series per
+        # heater, mirroring the per-sensor temperature series above.
+        try:
+            heater_power = prepared.heater_power_by_node()
+        except Exception:
+            heater_power = None
+        if heater_power is not None:
+            heater_set = {int(h) for h in heaters}
+            for node_id, value in heater_power.items():
+                if int(node_id) in heater_set:
+                    s.setdefault(f"heater_{int(node_id)}_W", []).append(float(value))
+            if thr.forbid_negative_heater_power:
+                neg = [k for k, v in heater_power.items()
+                       if int(k) in heater_set and float(v) < -1e-9]
                 if neg:
                     self._log_event("controller_check", f"negative heater power on nodes {neg[:5]}")
-            except Exception:
-                pass
         # Energy-conservation drift (soft, silent-failure detector): the engine's
         # net power INTO the system should match the observed dU/dt. Skip the first
         # couple of steps (start-up transient of the implicit integrator).
@@ -1033,13 +1043,24 @@ class SimulationRunner:
                 plt.close(fig)
                 plotted.append(fname)
 
+            def _heater_id(key: str) -> int:
+                try:
+                    return int(key.split("_")[1])
+                except (IndexError, ValueError):
+                    return 0
+
             sensor_keys = sorted(k for k in series if k.startswith("sensor_") and k.endswith("_K"))
             err_keys = sorted(k for k in series if k.endswith("_err_K"))
+            heater_keys = sorted(
+                (k for k in series if k.startswith("heater_") and k.endswith("_W")), key=_heater_id
+            )
             _plot(sensor_keys, "Tracked sensor temperatures", "T [K]", "sensor_temps.png")
             _plot(err_keys + ["rms_tracking_error_K"], "Tracking error", "error [K]", "tracking_error.png")
             _plot(["avg_temp_K", "max_temp_K", "min_temp_K"], "System temperature", "T [K]", "system_temp.png")
             _plot(["cryo_tip_K"], "Cryo tip temperature", "T [K]", "cryo_tip.png")
-            _plot(["power_in_W", "power_out_W"], "Power in / out", "power [W]", "power_balance.png")
+            _plot(heater_keys, "Heater power (per heater)", "power [W]", "heater_power.png")
+            _plot(["power_in_W", "power_out_W", "net_W"], "Power balance", "power [W]", "power_balance.png")
+            _plot(["max_temp_rate_K_per_s"], "Max cell temperature rate", "dT/dt [K/s]", "temp_rate.png")
             _plot(["energy_drift_rel"], "Energy-conservation drift (should stay small)", "rel drift", "energy_drift.png")
         except Exception as exc:  # noqa: BLE001
             self._log_event("plot_skipped", str(exc))
