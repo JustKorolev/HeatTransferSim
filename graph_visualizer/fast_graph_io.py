@@ -170,6 +170,37 @@ def can_load_fast(folder: str | Path) -> tuple[bool, str]:
     return True, "ok"
 
 
+REFRESH_LOG_FILENAME = "refresh_fast_load.log"
+
+
+def launch_refresh_subprocess(folder: str | Path) -> "subprocess.Popen":
+    """Start ``refresh_fast_load.py`` on ``folder`` in a SEPARATE process.
+
+    The refresh has to parse the (multi-GB) graph.json once, so it must never run
+    in the GUI process -- that would reintroduce exactly the load this whole path
+    exists to avoid. Output goes to ``<folder>/refresh_fast_load.log`` so a failure
+    is diagnosable. The caller polls ``proc.poll()`` for completion.
+    """
+    import subprocess
+
+    folder = Path(folder)
+    script = Path(__file__).resolve().parent.parent / "refresh_fast_load.py"
+    log_path = folder / REFRESH_LOG_FILENAME
+    log_handle = log_path.open("w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(  # noqa: S603
+            [sys.executable, str(script), str(folder)],
+            cwd=str(script.parent),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    finally:
+        # The child inherited its own descriptor; the parent's copy can close.
+        log_handle.close()
+    return proc
+
+
 def validate_against_matrices(model: ThermalGraphModel, matrices: dict[str, Any]) -> str | None:
     """Cross-check the CSV-derived per-node data against the authoritative binary
     matrices. ``C.npy`` is rewritten whenever the graph is saved, so a mismatch in

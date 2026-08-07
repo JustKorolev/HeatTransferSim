@@ -204,6 +204,10 @@ class HeatTransferSimulationTab:
         self.sys_id_timer = self.QtCore.QTimer(self.widget)
         self.sys_id_timer.timeout.connect(self._step_sys_id)
         self.sys_id_state: dict[str, Any] | None = None
+        self._refresh_process: Any = None
+        self._refresh_folder: Path | None = None
+        self._refresh_poll_timer = self.QtCore.QTimer(self.widget)
+        self._refresh_poll_timer.timeout.connect(self._poll_graph_refresh)
         self._build_layout()
         self.refresh_graph_list()
 
@@ -229,6 +233,13 @@ class HeatTransferSimulationTab:
         load_current.clicked.connect(self.use_current_graph)
         form.addRow(load_selected)
         form.addRow(load_current)
+        self.update_graph_button = self.QtWidgets.QPushButton("Update graph (rebuild nodes.csv)")
+        self.update_graph_button.setToolTip(
+            "Regenerate the fast-load nodes.csv from graph.json in a SEPARATE process, so "
+            "headless runs load fast and use less memory. Run this once after editing a graph."
+        )
+        self.update_graph_button.clicked.connect(self.update_graph)
+        form.addRow(self.update_graph_button)
 
         # Every control below the graph row comes from the shared panel, so this
         # tab and the Headless Run tab cannot drift apart. The panel hands back
@@ -362,6 +373,56 @@ class HeatTransferSimulationTab:
         if not root.exists():
             return
         self.graph_combo.addItems([path.name for path in sorted(root.iterdir()) if (path / "graph.json").exists()])
+
+    def update_graph(self) -> None:
+        """Rebuild the selected graph's fast-load nodes.csv from graph.json in a
+        SEPARATE process, so the (multi-GB) parse never runs in the GUI. Use after
+        editing a graph so headless runs load fast and lean."""
+        if self._refresh_process is not None and self._refresh_process.poll() is None:
+            self._status("A graph update is already running.", True)
+            return
+        name = self.graph_combo.currentText().strip()
+        if not name:
+            self._status("Select a graph first.", True)
+            return
+        folder = Path.cwd() / "graphs" / name
+        if not (folder / "graph.json").exists():
+            self._status(f"No graph.json in {folder}.", True)
+            return
+        try:
+            from .fast_graph_io import launch_refresh_subprocess
+
+            self._refresh_process = launch_refresh_subprocess(folder)
+        except Exception as exc:  # noqa: BLE001
+            self._status(f"Could not start the graph update: {exc}", True)
+            return
+        self._refresh_folder = folder
+        self.update_graph_button.setEnabled(False)
+        self._refresh_poll_timer.start(1000)
+        self._status(f"Updating {name}: rebuilding nodes.csv from graph.json (separate process)…")
+
+    def _poll_graph_refresh(self) -> None:
+        proc = self._refresh_process
+        if proc is None or proc.poll() is None:
+            return
+        code = proc.returncode
+        folder = self._refresh_folder
+        self._refresh_process = None
+        self._refresh_poll_timer.stop()
+        self.update_graph_button.setEnabled(True)
+        if code == 0 and folder is not None:
+            from .fast_graph_io import can_load_fast
+
+            usable, reason = can_load_fast(folder)
+            if usable:
+                self._status("Graph updated — headless runs will load fast and lean.")
+            else:
+                self._status(f"Graph update ran but fast load is still unavailable: {reason}.", True)
+        else:
+            self._status(
+                f"Graph update failed (exit {code}); see refresh_fast_load.log in the graph folder.",
+                True,
+            )
 
     def _refresh_sys_id_matrix_list(self, select_path: Path | str | None = None) -> None:
         if not hasattr(self, "sys_id_matrix_combo"):

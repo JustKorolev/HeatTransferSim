@@ -57,6 +57,8 @@ class HeadlessRunTab:
         self.process: subprocess.Popen | None = None
         self.run_dir: Path | None = None
         self._stop_requested = False
+        self._refresh_process: subprocess.Popen | None = None
+        self._refresh_folder: Path | None = None
         self._log_size = 0
         self._params_source = "defaults"
         self.widget = self.QtWidgets.QWidget(parent)
@@ -100,6 +102,14 @@ class HeadlessRunTab:
         self.graph_info = self.QtWidgets.QLabel("")
         self.graph_info.setWordWrap(True)
         form.addRow(self.graph_info)
+        self.update_graph_button = self.QtWidgets.QPushButton("Update graph (rebuild nodes.csv)")
+        self.update_graph_button.setToolTip(
+            "Regenerate the fast-load nodes.csv from graph.json in a SEPARATE process "
+            "(the graph is never loaded into this window). Run this once after editing a "
+            "graph so later runs load fast and use less memory."
+        )
+        self.update_graph_button.clicked.connect(self.update_graph)
+        form.addRow(self.update_graph_button)
         self.notes_edit = self.QtWidgets.QLineEdit()
         self.notes_edit.setPlaceholderText("optional note stored with the run")
         form.addRow("notes", self.notes_edit)
@@ -148,6 +158,58 @@ class HeadlessRunTab:
         self.log_view.setMaximumBlockCount(2000)
         right_layout.addWidget(self.log_view, 1)
         outer.addWidget(right, 1)
+
+    # -- update graph (rebuild fast-load nodes.csv from graph.json) ---------- #
+    def update_graph(self) -> None:
+        if self._refresh_process is not None and self._refresh_process.poll() is None:
+            self._status("A graph update is already running.", True)
+            return
+        folder = self._selected_folder()
+        if folder is None:
+            self._status("Select a graph first.", True)
+            return
+        if not (folder / "graph.json").exists():
+            self._status(f"No graph.json in {folder}.", True)
+            return
+        try:
+            from .fast_graph_io import launch_refresh_subprocess
+
+            self._refresh_process = launch_refresh_subprocess(folder)
+        except Exception as exc:  # noqa: BLE001
+            self._status(f"Could not start the graph update: {exc}", True)
+            return
+        self._refresh_folder = folder
+        self.update_graph_button.setEnabled(False)
+        self._status(
+            f"Updating {folder.name}: rebuilding nodes.csv from graph.json "
+            "(separate process; this window stays responsive)…",
+            False,
+        )
+
+    def _poll_refresh(self) -> None:
+        proc = self._refresh_process
+        if proc is None or proc.poll() is None:
+            return
+        code = proc.returncode
+        folder = self._refresh_folder
+        self._refresh_process = None
+        self.update_graph_button.setEnabled(True)
+        if code == 0 and folder is not None:
+            from .fast_graph_io import REFRESH_LOG_FILENAME, can_load_fast
+
+            usable, reason = can_load_fast(folder)
+            self._handle_graph_changed()  # refresh the node-count / params line
+            if usable:
+                self._status(f"Graph updated — future runs will load fast and lean.", False)
+            else:
+                self._status(
+                    f"Graph update ran but fast load is still unavailable: {reason} "
+                    f"(see {folder / REFRESH_LOG_FILENAME}).",
+                    True,
+                )
+        else:
+            log = (folder / "refresh_fast_load.log") if folder is not None else "the run folder"
+            self._status(f"Graph update failed (exit {code}); see {log}.", True)
 
     # -- set-all / randomize (headless equivalents) -------------------------- #
     def _set_all_initial_temperatures(self) -> None:
@@ -405,6 +467,7 @@ class HeadlessRunTab:
 
     # -- monitoring (reads the run's own artifacts) ------------------------- #
     def _poll(self) -> None:
+        self._poll_refresh()
         if self.run_dir is None:
             return
         self._tail_log()

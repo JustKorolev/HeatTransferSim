@@ -17,7 +17,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 
 from graph_visualizer import graph_io
-from graph_visualizer.fast_graph_io import can_load_fast
+from graph_visualizer.fast_graph_io import can_load_fast, launch_refresh_subprocess
 from graph_visualizer.graph_io import save_graph_folder
 from graph_visualizer.models import GraphMetadata, NodeProperties, ThermalGraphModel
 
@@ -76,3 +76,22 @@ def test_lightweight_save_of_large_graph_keeps_fast_load_valid(monkeypatch) -> N
         graph_mtime = (folder / "graph.json").stat().st_mtime
         nodes_mtime = (folder / "nodes.csv").stat().st_mtime
         assert nodes_mtime >= graph_mtime - 1.0
+
+
+def test_refresh_subprocess_restores_a_stale_fast_load(tmp_path) -> None:
+    """End-to-end: the 'Update graph' path (refresh_fast_load.py via
+    launch_refresh_subprocess) regenerates nodes.csv from graph.json without the
+    GUI, turning an unusable fast-load folder back into a usable one."""
+    folder = tmp_path / "graph"
+    folder.mkdir()
+    save_graph_folder(_two_node_octree_model("refresh_subproc"), folder)
+    np.save(folder / "node_ids.npy", np.array([1, 2], dtype=int))
+    old = 1_000_000.0
+    os.utime(folder / "nodes.csv", (old, old))
+    assert can_load_fast(folder)[0] is False
+
+    proc = launch_refresh_subprocess(folder)
+    assert proc.wait(timeout=120) == 0, (folder / "refresh_fast_load.log").read_text(encoding="utf-8")
+
+    usable, reason = can_load_fast(folder)
+    assert usable, reason

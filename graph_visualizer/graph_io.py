@@ -576,6 +576,28 @@ def _has_existing_octree_matrix_payload(folder: Path) -> bool:
     return any((folder / name).exists() for name in ("L_sparse.npz", "L_sparse.json", "L.npy", "G.npy", MATRIX_FILE))
 
 
+def write_fast_load_artifacts(
+    model: ThermalGraphModel, matrices: dict[str, Any], folder: Path
+) -> None:
+    """Write exactly the files the low-memory loader (fast_graph_io) reads --
+    ``node_ids.npy``, ``C.npy``, ``L_sparse.npz`` and ``nodes.csv`` -- from one
+    consistent model + matrices, so the fast path stays valid after an edit.
+
+    ``nodes.csv`` is written LAST so its mtime beats ``graph.json``'s, satisfying
+    ``can_load_fast``'s freshness check.
+    """
+    folder = Path(folder)
+    if "node_ids" in matrices:
+        np.save(folder / "node_ids.npy", np.asarray(matrices["node_ids"], dtype=int))
+    if "C" in matrices:
+        np.save(folder / "C.npy", np.asarray(matrices["C"], dtype=float))
+    if matrices.get("L") is not None:
+        L = matrices["L"]
+        L_csr = L.tocsr() if issparse(L) else csr_matrix(np.asarray(L, dtype=float))
+        save_npz(str(folder / "L_sparse.npz"), L_csr)
+    _write_nodes_csv(model, folder)
+
+
 def _write_nodes_csv(model: ThermalGraphModel, folder: Path) -> None:
     """Write the compact per-node ``nodes.csv`` the low-memory loader reads.
 
