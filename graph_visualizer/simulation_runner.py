@@ -48,6 +48,13 @@ class FailureThresholds:
     min_temperature_K: float = 0.0  # hard: below absolute zero => broken
     max_temperature_rate_K_per_s: float = 500.0  # hard: runaway (per accepted step)
     energy_drift_rel_tol: float = 0.10  # soft: |net_W - dU/dt| / scale (implicit disc. residual is a few %)
+    # Hard divergence guard: if the solve stops conserving energy this badly for
+    # this many consecutive steps, the run is producing garbage (the 3443 K / drift
+    # ~1.0 case) -- abort with a clear reason instead of burning hours, still
+    # finalizing plots. High threshold + sustained count so a real transient never
+    # trips it. 0 steps disables it.
+    energy_drift_abort_rel: float = 0.9
+    energy_drift_abort_steps: int = 20
     forbid_negative_heater_power: bool = True  # soft: controller commanded cooling
     max_dt_retries: int = 6  # step-back halvings before giving up (hard)
     step_wall_timeout_s: float = 0.0  # 0 = disabled watchdog
@@ -234,6 +241,7 @@ class SimulationRunner:
         self._stop = False  # set by SIGTERM/SIGINT or cancel_event
         self._exit_status = "running"
         self._last_step_profile: dict[str, float] = {}
+        self._consecutive_high_drift = 0
         self._start_wall = time.time()
 
     # -- lifecycle ---------------------------------------------------------- #
@@ -584,8 +592,14 @@ class SimulationRunner:
                 break
             if not accepted:
                 raise _HardFailure(
-                    f"step {step}: solver/step failed after {thr.max_dt_retries} dt halvings "
-                    f"(down to {attempt_dt:g}s). Last state checkpointed."
+                    f"step {step}: the implicit step could not produce a physical result after "
+                    f"{thr.max_dt_retries} dt halvings (down to {attempt_dt:g}s); last reason: "
+                    f"{reason or 'unknown'}. This is the graph diverging, not a transient -- most "
+                    "often dt is far larger than the graph's fastest thermal time constant (see the "
+                    "'dt_s coarse relative to tau' prepare warning) and/or aggressive cryocooler "
+                    "cooling overshoots below 0 K. Reduce dt substantially (or raise adaptive "
+                    "max substeps) and check for degenerate near-zero-capacity nodes. "
+                    "Last state checkpointed."
                 )
             params.dt_s = base_dt  # recover after a successful accept
 
@@ -595,6 +609,22 @@ class SimulationRunner:
             prev_temps = temps.copy()
             self._last_temps = prev_temps  # for the end-of-run verification tables
             self._verification_source = prepared
+            # Fail fast on a diverging solve: hours of a run that conserves no energy
+            # is worthless. _finalize still runs (via run()'s finally), so the partial
+            # plots/report survive and show the divergence.
+            if (
+                thr.energy_drift_abort_steps > 0
+                and self._consecutive_high_drift >= thr.energy_drift_abort_steps
+            ):
+                self._checkpoint(prepared, state, step)
+                raise _HardFailure(
+                    f"energy drift exceeded {thr.energy_drift_abort_rel:g} for "
+                    f"{self._consecutive_high_drift} consecutive steps at t={state.time_s:.1f}s "
+                    f"(max T={float(np.max(temps)):.3g} K): the solve is diverging / not "
+                    "conserving energy. Likely causes: dt too large for the graph's stiffness, "
+                    "degenerate near-zero node capacitances, or disconnected components. "
+                    "Aborting so the run does not waste further time."
+                )
             # Per-step timing breakdown, so status.json shows where wall-clock goes
             # (the temperature-dependent operator rebuild vs. the linear solve) --
             # the number needed to decide whether to lag properties or add a GPU.
@@ -862,6 +892,12 @@ class SimulationRunner:
                     "energy_drift",
                     f"t={state.time_s:.1f}s drift={drift:.3f} (net={net_W:.3g}W dU/dt={dU_dt:.3g}W)",
                 )
+            # Sustained gross drift = the solve is diverging (energy created/lost from
+            # nowhere); track a run of it so the loop can abort fast.
+            if np.isfinite(drift) and drift > thr.energy_drift_abort_rel:
+                self._consecutive_high_drift += 1
+            else:
+                self._consecutive_high_drift = 0
 
     # -- checkpoint / resume ------------------------------------------------ #
     def _checkpoint(self, prepared, state, step) -> None:
