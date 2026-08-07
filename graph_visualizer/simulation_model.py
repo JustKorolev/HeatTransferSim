@@ -977,6 +977,7 @@ class PreparedSimulation:
         more substeps, up to _MAX_STEP_SUBDIVISIONS doublings."""
         mask = self._physical_step_check_mask()
         temp_floor = float(getattr(self.params, "implicit_temperature_floor_K", 0.0) or 0.0)
+        temp_ceiling = float(getattr(self.params, "implicit_temperature_ceiling_K", 0.0) or 0.0)
         min_substeps = 1
         last_error: Exception | None = None
         best_finite: np.ndarray | None = None  # finest finite attempt, for best-effort fallback
@@ -1010,6 +1011,8 @@ class PreparedSimulation:
             # positive runaway (huge upward jump) still fails the check and subdivides.
             if result is not None and temp_floor > 0.0:
                 result = np.maximum(np.asarray(result, dtype=float), temp_floor)
+            if result is not None and temp_ceiling > 0.0:
+                result = np.minimum(np.asarray(result, dtype=float), temp_ceiling)
             if result is not None and bool(np.all(np.isfinite(np.asarray(result, dtype=float)))):
                 best_finite = np.asarray(result, dtype=float)
                 best_backend = (backend_stepper, backend_name) if backend_stepper is not None else None

@@ -133,6 +133,13 @@ class SimulationParameters:
     # temperature. Set the capacitance floor to 0 to disable regularization.
     implicit_capacitance_floor_J_K: float = 1.0e-3
     implicit_temperature_floor_K: float = 1.0e-3
+    # Optional upper clamp (0 = disabled). Isolated / tiny-capacitance artifact
+    # cells (thin 5 mm shells, stranded nodes with no conduction path) can absorb
+    # heater/conducted energy they cannot shed and run away to thousands of K,
+    # aborting the run -- while the connected body is fine. A ceiling pins those
+    # artifacts without affecting real cells (set it well above the operating
+    # regime, e.g. a few hundred K for a cryostat).
+    implicit_temperature_ceiling_K: float = 0.0
     use_temperature_dependent_properties: bool = False
     # Evaluate the lagged nonlinear terms (temperature-dependent C/L and
     # radiation) at a forward-Euler midpoint instead of the step-start

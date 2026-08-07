@@ -904,8 +904,20 @@ class SimulationRunner:
         # Energy-conservation drift (soft, silent-failure detector): the engine's
         # net power INTO the system should match the observed dU/dt. Skip the first
         # couple of steps (start-up transient of the implicit integrator).
-        if dt > 0 and prev.shape == temps.shape and C_diag.shape == temps.shape and len(s["time_s"]) > 2:
-            dU_dt = float(np.dot(C_diag, temps - prev) / dt)
+        #
+        # Use the LIVE capacitance the solve actually integrates with, not the
+        # build-time C. With temperature-dependent properties the two differ a lot
+        # (cryogenic cp is ~10x smaller than at build/room temperature), so the
+        # static C made dU/dt read ~10x too high -- a spurious "energy drift ~0.9"
+        # that is a metrology error, not a physics one.
+        inv_C = getattr(prepared, "inv_C", None)
+        if inv_C is not None:
+            inv_C = np.asarray(inv_C, dtype=float).reshape(-1)
+            C_eff = np.where(inv_C > 0.0, 1.0 / np.where(inv_C > 0.0, inv_C, 1.0), C_diag)
+        else:
+            C_eff = C_diag
+        if dt > 0 and prev.shape == temps.shape and C_eff.shape == temps.shape and len(s["time_s"]) > 2:
+            dU_dt = float(np.dot(C_eff, temps - prev) / dt)
             scale = max(abs(net_W), abs(dU_dt), 1.0)
             drift = abs(net_W - dU_dt) / scale if np.isfinite(net_W) else float("nan")
             s.setdefault("energy_drift_rel", []).append(float(drift))

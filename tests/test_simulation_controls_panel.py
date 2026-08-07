@@ -502,6 +502,7 @@ def test_live_mode_hides_only_the_headless_extras():
         "implicit_sparse_residual_check_enabled",
         "implicit_capacitance_floor_J_K",
         "implicit_temperature_floor_K",
+        "implicit_temperature_ceiling_K",
         "gpu_solver_enabled",
         # Not a mode difference: the readout box starts hidden in both tabs and the
         # simulation tab reveals it once a simulation is initialized.

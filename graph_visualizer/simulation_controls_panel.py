@@ -664,6 +664,16 @@ class SimulationControlsPanel:
             "residual solver error can never leave a non-physical negative temperature. Keep "
             "well below any real cryogenic temperature (e.g. 1e-3 K)."
         )
+        self._add_double(
+            solver_form, "implicit_temperature_ceiling_K", "temperature ceiling K", 0.0, 1.0e9, 1.0
+        )
+        self.inputs["implicit_temperature_ceiling_K"].setToolTip(
+            "Optional upper clamp (0 = off). Isolated / tiny-capacitance artifact cells (thin "
+            "shells, stranded nodes) can absorb heat they can't shed and run away to thousands "
+            "of K, aborting the run, while the connected body is fine. Set this well above your "
+            "operating regime (e.g. a few hundred K for a cryostat) to pin those artifacts "
+            "without affecting real cells."
+        )
         self._add_checkbox(solver_form, "gpu_solver_enabled", "Use GPU solver when available")
 
     def _build_playback_controls(self, form: Any) -> None:
