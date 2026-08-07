@@ -646,6 +646,24 @@ class SimulationControlsPanel:
         self._add_checkbox(
             solver_form, "implicit_sparse_residual_check_enabled", "Residual check"
         )
+        self._add_double(
+            solver_form, "implicit_capacitance_floor_J_K", "capacitance floor J/K", 0.0, 1.0e9, 0.001
+        )
+        self.inputs["implicit_capacitance_floor_J_K"].setToolTip(
+            "Floor per-node heat capacity to this value. Degenerate near-zero-capacitance "
+            "cells (thin-shell / marker mesh artifacts) blow up the solve's condition number, "
+            "so the linear solver returns an inaccurate result that overshoots temperatures "
+            "(negative on cooling, runaway-hot on heating). Raise this (e.g. 0.1-1.0) on a graph "
+            "that diverges; too high slows the smallest cells' response. 0 disables."
+        )
+        self._add_double(
+            solver_form, "implicit_temperature_floor_K", "temperature floor K", 0.0, 1.0e6, 0.001
+        )
+        self.inputs["implicit_temperature_floor_K"].setToolTip(
+            "Clamp every cell to at least this temperature after each implicit step, so a "
+            "residual solver error can never leave a non-physical negative temperature. Keep "
+            "well below any real cryogenic temperature (e.g. 1e-3 K)."
+        )
         self._add_checkbox(solver_form, "gpu_solver_enabled", "Use GPU solver when available")
 
     def _build_playback_controls(self, form: Any) -> None:
