@@ -138,7 +138,7 @@ class SimulationParameters:
     # C~1e-3, next to bulk ~50) and leaves well-conditioned graphs untouched. 0
     # disables it; the effective floor is max(implicit_capacitance_floor_J_K,
     # max(C)/implicit_capacitance_condition_cap).
-    implicit_capacitance_condition_cap: float = 100.0
+    implicit_capacitance_condition_cap: float = 0.0
     implicit_temperature_floor_K: float = 1.0e-3
     # Optional upper clamp (0 = disabled). Isolated / tiny-capacitance artifact
     # cells (thin 5 mm shells, stranded nodes with no conduction path) can absorb
