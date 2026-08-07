@@ -293,25 +293,28 @@ class SimulationRunner:
             return self._shared_model, self._shared_matrices
         if not self.cfg.low_memory_load:
             return load_graph_folder(str(self.graph_folder))
-        # nodes.csv carries geometry/material/thermal fields but NO roles -- no
-        # heaters, sensors or cryocoolers (those live only in graph.json). So a run
-        # that drives heaters, runs a controller, or uses the cryocooler must NOT
-        # take the fast path, or it silently loads a model with zero of them and
-        # simulates an inert block (no cooling, no control) -- looking like it ran.
-        # The freshness/capacity checks don't catch this because roles aren't in the
-        # matrices they compare. Fall back to the full graph.json loader, which
-        # recovers the roles.
-        if self._run_needs_graph_roles():
+        # A run that drives heaters, runs a controller, or uses the cryocooler needs
+        # roles that historically lived only in graph.json. Newer nodes.csv carries
+        # them in a role_json column (fast_load_has_roles); when it does NOT, taking
+        # the fast path would silently load a model with zero heaters/sensors/
+        # cryocoolers and simulate an inert block that only looks like it ran, so we
+        # fall back to the full graph.json loader.
+        from .fast_graph_io import (
+            fast_load_has_roles,
+            load_graph_for_simulation,
+            validate_against_matrices,
+        )
+
+        if self._run_needs_graph_roles() and not fast_load_has_roles(self.graph_folder):
             self._log_event(
                 "low_memory_load_skipped",
                 "run drives heaters / a controller / the cryocooler, but nodes.csv "
-                "carries no roles; using the full graph.json loader so heaters, "
-                "sensors and cryocoolers are not silently dropped.",
+                "has no role_json column; using the full graph.json loader so "
+                "heaters, sensors and cryocoolers are not silently dropped "
+                "(re-save the graph or run 'Update graph' to add roles to nodes.csv).",
             )
             return load_graph_folder(str(self.graph_folder))
         try:
-            from .fast_graph_io import load_graph_for_simulation, validate_against_matrices
-
             model, matrices, report = load_graph_for_simulation(self.graph_folder)
             problem = validate_against_matrices(model, matrices)
             if problem:

@@ -84,13 +84,29 @@ def _parse_cell(column: str, raw: str) -> Any:
         return raw
 
 
+ROLE_JSON_COLUMN = "role_json"
+
+
 def _row_to_node_dict(row: dict[str, str]) -> dict[str, Any]:
     """Invert the octree writer's CSV flattening back to a node dict that
-    ``NodeProperties.from_dict`` understands (``radiation_*`` -> ``radiation``)."""
+    ``NodeProperties.from_dict`` understands (``radiation_*`` -> ``radiation``).
+
+    A role node carries its COMPLETE dict in ``role_json`` (heaters/sensors/
+    cryocoolers/pairing that the flat columns can't represent); when present it is
+    authoritative and rebuilds the node exactly as the full graph.json loader
+    would. Plain cells fall back to the flat columns."""
+    role_json = row.get(ROLE_JSON_COLUMN)
+    if role_json and str(role_json).strip():
+        try:
+            data = json.loads(role_json)
+            if isinstance(data, dict):
+                return data
+        except (ValueError, TypeError):
+            pass  # corrupt cell -> fall back to the flat reconstruction below
     data: dict[str, Any] = {}
     radiation: dict[str, Any] = {}
     for column, raw in row.items():
-        if column is None:
+        if column is None or column == ROLE_JSON_COLUMN:
             continue
         value = _parse_cell(column, raw)
         if value is None:
@@ -102,6 +118,24 @@ def _row_to_node_dict(row: dict[str, str]) -> dict[str, Any]:
     if radiation:
         data["radiation"] = radiation
     return data
+
+
+def fast_load_has_roles(folder: str | Path) -> bool:
+    """True if nodes.csv carries the ``role_json`` column, i.e. heaters, sensors
+    and cryocoolers survive the fast load. Older nodes.csv (written before this
+    column existed) returns False, so a role-dependent run falls back to the full
+    graph.json loader instead of silently dropping its roles. Reads only the header
+    line, not the whole (multi-million-row) file."""
+    path = Path(folder) / "nodes.csv"
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, [])
+    except (OSError, StopIteration):
+        return False
+    return ROLE_JSON_COLUMN in header
 
 
 def _load_metadata(folder: Path) -> GraphMetadata:

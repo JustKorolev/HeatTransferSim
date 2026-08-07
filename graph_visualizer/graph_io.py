@@ -598,39 +598,73 @@ def write_fast_load_artifacts(
     _write_nodes_csv(model, folder)
 
 
+# Columns that describe a node's ROLE (heater/sensor/cryocooler/controller/
+# pairing) live only in graph.json, not in the flat nodes.csv columns. Rather than
+# flatten every nested/list field into its own column across millions of rows, a
+# node that HAS a role carries its complete octree_node_dict as one JSON cell, so
+# the low-memory loader can rebuild it with the same NodeProperties.from_dict the
+# full loader uses -- i.e. identically. Plain cells leave the cell empty.
+_NODES_CSV_ROLE_COLUMN = "role_json"
+
+
+def _node_dict_has_role(data: dict[str, Any]) -> bool:
+    """Whether a node's octree dict carries role/pairing/cryocooler data that the
+    flat columns don't (so it must be preserved via ``role_json``)."""
+    return bool(
+        data.get("is_heater")
+        or data.get("is_sensor")
+        or ("cryocooler" in data)
+        or data.get("assigned_sensor_id") is not None
+        or data.get("assigned_heater_id") is not None
+        or data.get("assigned_heater_ids")
+        or data.get("power_deposition_node_ids")
+        or data.get("readout_node_ids")
+        or data.get("sensor_connected_node_ids")
+    )
+
+
 def _write_nodes_csv(model: ThermalGraphModel, folder: Path) -> None:
     """Write the compact per-node ``nodes.csv`` the low-memory loader reads.
 
     Kept separate from ``_save_octree_outputs`` so the lightweight save can refresh
     just this file (keeping the fast-load path valid after an edit) without also
     re-emitting the heavy ``edges.csv`` / browser JSON exports on a 3M-node graph.
+
+    Role nodes (heaters/sensors/cryocoolers/paired cells) additionally carry their
+    full node dict in the ``role_json`` column so the fast load preserves the
+    heaters, sensors and cryocoolers a controlled run needs.
     """
-    node_rows = [
-        _flatten_node_row(model.nodes[node_id].to_octree_node_dict())
-        for node_id in model.ordered_node_ids()
+    fields = [
+        "node_id",
+        "cell_id",
+        "component_name",
+        "material_name",
+        "level",
+        "volume_m3",
+        "mass_kg",
+        "C_J_K",
+        "initial_temperature_K",
+        "radiation_is_exposed",
+        "radiation_radiating_area_m2",
+        "radiation_emissivity",
+        "radiation_G_rad_W_K",
+        "radiation_R_rad_K_W",
+        "occupancy_fraction",
+        "confidence",
+        _NODES_CSV_ROLE_COLUMN,
     ]
     with (folder / "nodes.csv").open("w", newline="", encoding="utf-8") as handle:
-        fields = [
-            "node_id",
-            "cell_id",
-            "component_name",
-            "material_name",
-            "level",
-            "volume_m3",
-            "mass_kg",
-            "C_J_K",
-            "initial_temperature_K",
-            "radiation_is_exposed",
-            "radiation_radiating_area_m2",
-            "radiation_emissivity",
-            "radiation_G_rad_W_K",
-            "radiation_R_rad_K_W",
-            "occupancy_fraction",
-            "confidence",
-        ]
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(node_rows)
+        # Stream row by row: a 3M-node list of dicts is gigabytes held at once.
+        for node_id in model.ordered_node_ids():
+            data = model.nodes[node_id].to_octree_node_dict()
+            row = _flatten_node_row(data)
+            if _node_dict_has_role(data):
+                row[_NODES_CSV_ROLE_COLUMN] = json.dumps(
+                    data, separators=(",", ":"), default=str
+                )
+            writer.writerow(row)
 
 
 def _save_octree_outputs(model: ThermalGraphModel, matrices: dict[str, np.ndarray], folder: Path) -> None:
