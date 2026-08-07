@@ -18,7 +18,11 @@ from graph_visualizer.simulation_parameters import SimulationParameters
 
 
 def test_regularize_floors_degenerate_capacities() -> None:
-    params = replace(SimulationParameters(), implicit_capacitance_floor_J_K=1.0e-3)
+    params = replace(
+        SimulationParameters(),
+        implicit_capacitance_floor_J_K=1.0e-3,
+        implicit_capacitance_condition_cap=0.0,  # test the fixed absolute floor alone
+    )
     C = np.array([1.0e-12, 5.0e-4, 1.0e-3, 0.04, 100.0], dtype=float)
     out = _regularize_capacitance(C, params)
     # Below the floor -> raised to it; at/above -> untouched.
@@ -32,8 +36,38 @@ def test_regularize_floors_degenerate_capacities() -> None:
 
 
 def test_regularize_is_noop_when_floor_disabled() -> None:
-    params = replace(SimulationParameters(), implicit_capacitance_floor_J_K=0.0)
+    params = replace(
+        SimulationParameters(),
+        implicit_capacitance_floor_J_K=0.0,
+        implicit_capacitance_condition_cap=0.0,
+    )
     C = np.array([1.0e-12, 0.04, 100.0], dtype=float)
+    out = _regularize_capacitance(C, params)
+    assert np.array_equal(out, C)
+
+
+def test_auto_floor_caps_the_capacitance_ratio() -> None:
+    # cond_cap scales to the graph: only the pathological spread is floored.
+    params = replace(
+        SimulationParameters(),
+        implicit_capacitance_floor_J_K=0.0,
+        implicit_capacitance_condition_cap=100.0,
+    )
+    C = np.array([1.0e-3, 0.5, 50.0], dtype=float)  # max 50 -> floor 0.5
+    out = _regularize_capacitance(C, params)
+    assert out[0] == 0.5  # tiny cell raised to max/100
+    assert out[1] == 0.5
+    assert out[2] == 50.0
+    assert out.max() / out.min() == 100.0
+
+
+def test_auto_floor_leaves_well_conditioned_graph_untouched() -> None:
+    params = replace(
+        SimulationParameters(),
+        implicit_capacitance_floor_J_K=0.0,
+        implicit_capacitance_condition_cap=100.0,
+    )
+    C = np.array([5.0, 8.0, 10.0], dtype=float)  # spread 2x < 100x -> nothing floored
     out = _regularize_capacitance(C, params)
     assert np.array_equal(out, C)
 

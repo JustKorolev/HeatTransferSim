@@ -501,6 +501,7 @@ def test_live_mode_hides_only_the_headless_extras():
         "implicit_sparse_adaptive_max_substeps",
         "implicit_sparse_residual_check_enabled",
         "implicit_capacitance_floor_J_K",
+        "implicit_capacitance_condition_cap",
         "implicit_temperature_floor_K",
         "implicit_temperature_ceiling_K",
         "gpu_solver_enabled",

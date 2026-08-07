@@ -2939,6 +2939,14 @@ def _regularize_capacitance(C: np.ndarray, params: SimulationParameters) -> np.n
     is <= 0."""
     C = np.asarray(C, dtype=float).reshape(-1)
     floor = float(getattr(params, "implicit_capacitance_floor_J_K", 0.0) or 0.0)
+    # Auto floor scaled to the graph: cap the capacitance ratio (condition-number
+    # proxy) so only a pathological spread is touched; well-conditioned graphs,
+    # where max(C)/cap is below every real C, are left unchanged.
+    cond_cap = float(getattr(params, "implicit_capacitance_condition_cap", 0.0) or 0.0)
+    if cond_cap > 0.0 and C.size:
+        c_max = float(np.max(C))
+        if np.isfinite(c_max) and c_max > 0.0:
+            floor = max(floor, c_max / cond_cap)
     if floor > 0.0:
         return np.maximum(C, floor)
     return C
