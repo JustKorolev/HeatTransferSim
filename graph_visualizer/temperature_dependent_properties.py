@@ -120,6 +120,18 @@ class TemperatureDependentOperator:
 
     def laplacian(self, temperatures_K: np.ndarray) -> csr_matrix:
         if self.edge_i.size == 0:
+            # An all-zero Laplacian means NO conduction anywhere: every node becomes
+            # thermally isolated and the run silently produces nonsense (heaters cook
+            # their own cells while the rest of the graph never moves). Only legitimate
+            # for a genuinely edgeless model, so refuse when the graph has nodes --
+            # prepare_simulation catches this and falls back to the prebuilt L.
+            if self.n > 1:
+                raise ValueError(
+                    f"temperature-dependent operator has no conduction edges for {self.n} nodes; "
+                    "rebuilding L(T) would yield an all-zero Laplacian (every node thermally "
+                    "isolated). The model was likely loaded without edges (low-memory nodes.csv "
+                    "path), which cannot support T-dependent properties."
+                )
             return csr_matrix((self.n, self.n))
         g = np.maximum(0.0, self.edge_conductance(temperatures_K))
         diag = np.zeros(self.n, dtype=float)

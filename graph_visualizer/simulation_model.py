@@ -2209,6 +2209,13 @@ def prepare_simulation(
             f"Contact-gap radiation: {len(gap_links)} suppressed inter-part interface(s) couple by direct "
             "A<->B radiation across the gap."
         )
+    else:
+        # The builder suppressed those interfaces on the promise that they would
+        # "couple by radiation instead". With radiation off entirely that promise
+        # silently evaporates and the parts couple by NOTHING -- which is how
+        # no_mli_high_res fractured into 39 components and stranded its heaters on
+        # thermally-floating islands. Say so instead of failing quietly.
+        _warn_if_gap_links_dropped(model, params, warnings)
     radiation_exchange_W, radiation_exchange_degree = _build_radiation_exchange(model, node_ids, gap_links)
     radiation_super_S, radiation_super_W, radiation_super_degree = _build_radiation_super(model, node_ids)
     environment_temperature_K = _environment_temperature_vector(model, node_ids, params)
@@ -2262,6 +2269,22 @@ def prepare_simulation(
     sparse_implicit_stepper = _build_implicit_stepper(A, C, L_sparse, params, warnings, backend="cpu")
     gpu_implicit_stepper = _build_implicit_stepper(A, C, L_sparse, params, warnings, backend="gpu")
     temperature_dependent_operator = None
+    if use_temperature_dependent_properties and not getattr(model, "edges", None):
+        # The temperature-dependent operator rebuilds L(T) from model.edges. The
+        # low-memory (nodes.csv) loader deliberately does NOT populate edges -- it
+        # assumes conduction always comes from the prebuilt L matrix, which is only
+        # true on the constant-property path. With no edges the rebuilt Laplacian is
+        # the ZERO matrix, so every node becomes thermally isolated: heaters cook
+        # their own deposition cells, sensors never move, and the controller winds up
+        # forever. That is silent and catastrophic, so keep the prebuilt L instead.
+        warnings.append(
+            "Temperature-dependent properties requested but this model carries no edges "
+            "(low-memory nodes.csv load). Rebuilding L(T) needs per-edge geometry and would "
+            "produce an all-zero Laplacian -- every node thermally isolated. Falling back to "
+            "CONSTANT properties using the prebuilt L. To get T-dependent properties, run with "
+            "low_memory_load disabled so graph.json's edges are available."
+        )
+        use_temperature_dependent_properties = False
     if use_temperature_dependent_properties:
         try:
             temperature_dependent_operator = build_temperature_dependent_operator(
@@ -2568,6 +2591,31 @@ def _node_emissivity(node) -> float:
     if value <= 0.0:
         return 0.9  # sensible default when a node carries no emissivity
     return min(value, 1.0)
+
+
+def _warn_if_gap_links_dropped(model, params, warnings: list[str]) -> None:
+    """Warn when contact-gap interfaces exist but no radiation is enabled to carry
+    them, so the suppressed conduction is replaced by nothing at all."""
+    if model is None:
+        return
+    if (
+        bool(getattr(params, "use_ambient_radiation", False))
+        or bool(getattr(params, "use_radiative_coupling", False))
+    ):
+        return
+    data = getattr(model, "octree_graph_data", None)
+    raw = data.get("gap_radiation_links") if isinstance(data, dict) else None
+    if not raw:
+        return
+    warnings.append(
+        f"Contact-gap interfaces UNCOUPLED: the graph build suppressed conduction across "
+        f"{len(raw)} inter-part interface(s) on the assumption they would couple by radiation, "
+        "but both use_ambient_radiation and use_radiative_coupling are off -- so those parts now "
+        "exchange no heat at all and the graph may be split into thermally isolated islands. "
+        "Enable radiation, or rebuild the graph with a larger --contact-gap-tolerance-mm. "
+        "(At cryogenic temperatures radiation is a poor substitute for contact: 4*sigma*T^3 is "
+        "~0.015 W/m2K at 40 K versus ~3000 W/m2K for a bolted joint.)"
+    )
 
 
 def _gap_radiation_links(

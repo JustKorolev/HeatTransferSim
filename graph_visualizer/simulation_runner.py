@@ -332,8 +332,8 @@ class SimulationRunner:
                     self._log_event("low_memory_load", warning)
                 self._log_event(
                     "low_memory_load",
-                    f"loaded {report.node_count} nodes without graph.json "
-                    f"(rss={_process_rss_gib():.1f} GiB)",
+                    f"loaded {report.node_count} nodes and {report.edge_count} conduction "
+                    f"edges without graph.json (rss={_process_rss_gib():.1f} GiB)",
                 )
                 return model, matrices
         except FileNotFoundError as exc:
@@ -435,9 +435,100 @@ class SimulationRunner:
         # silently use a different controller than the one requested.
         self._logged_warning_count = len(prepared.warnings)
         self._warn_if_disconnected()
+        self._check_actuator_connectivity(prepared, params)
         self._warn_if_unforced(prepared, params, has_controller, cryo_idx)
         self._resume_if_checkpoint(prepared)
         return prepared, params, C_diag, sensors, heaters, cryo_idx
+
+    def _check_actuator_connectivity(self, prepared, params) -> None:
+        """Verify each heater can actually conduct heat to the sensor it drives.
+
+        A heater deposits into its power_deposition_node_ids and a sensor reads its
+        readout_node_ids. If contact detection failed to bond the heater's part to
+        the assembly, those two node sets land in DIFFERENT connected components:
+        the heater's power heats a small thermally-floating island while the sensor
+        reads an inert body that never moves. The tracking error is then constant by
+        construction, the integrator winds up to saturation, and the island runs
+        away (this is the no_mli_high_res 10,200 K case -- 99.2% of that graph was
+        bit-for-bit unchanged after 600 s while 690 W went into ~23.6k stranded
+        nodes).
+
+        Cheap to detect here (one connected-components pass), ruinous to discover
+        from an overnight run's plots."""
+        try:
+            from scipy.sparse import issparse, csr_matrix
+            from scipy.sparse.csgraph import connected_components
+
+            model = getattr(prepared, "model", None)
+            A = getattr(prepared, "A", None)
+            if model is None or A is None:
+                return
+            adjacency = csr_matrix(A) if issparse(A) else csr_matrix(np.asarray(A))
+            n_components, labels = connected_components(adjacency, directed=False)
+            if n_components <= 1:
+                return
+            node_ids = np.asarray(prepared.node_ids)
+            node_index = getattr(prepared, "node_index_by_id", None) or {
+                int(v): i for i, v in enumerate(node_ids)
+            }
+
+            def _components_of(ids) -> set[int]:
+                return {
+                    int(labels[node_index[int(v)]])
+                    for v in (ids or [])
+                    if int(v) in node_index
+                }
+
+            enabled = simulation_model._enabled_node_id_set(
+                getattr(params, "enabled_heater_node_ids", None)
+            )
+            broken: list[int] = []
+            checked = 0
+            for heater_id in getattr(prepared, "heater_node_ids", []) or []:
+                heater_id = int(heater_id)
+                if not simulation_model._node_id_enabled(enabled, heater_id):
+                    continue
+                heater = model.nodes.get(heater_id)
+                sensor_id = getattr(heater, "assigned_sensor_id", None) if heater else None
+                if sensor_id is None:
+                    continue
+                sensor = model.nodes.get(int(sensor_id))
+                if sensor is None:
+                    continue
+                deposit = _components_of(getattr(heater, "power_deposition_node_ids", []))
+                readout = _components_of(
+                    getattr(sensor, "readout_node_ids", [])
+                    or getattr(sensor, "sensor_connected_node_ids", [])
+                )
+                if not deposit or not readout:
+                    continue
+                checked += 1
+                if deposit.isdisjoint(readout):
+                    broken.append(heater_id)
+            if not checked:
+                return
+            if broken:
+                self._log_event(
+                    "actuators_disconnected",
+                    f"{len(broken)}/{checked} controlled heater(s) cannot conduct heat to "
+                    f"their paired sensor -- deposition and readout nodes are in different "
+                    f"connected components (graph has {n_components}). Those heaters warm a "
+                    f"thermally-floating island while the sensor never moves, so the "
+                    f"tracking error cannot close and the integrator winds up. "
+                    f"Heater node ids (first 5): {broken[:5]}",
+                )
+            if broken and len(broken) == checked:
+                raise RuntimeError(
+                    f"No enabled heater ({checked} checked) shares a connected component "
+                    "with the sensor it drives, so no setpoint is reachable and the "
+                    "controller would wind up to saturation heating isolated cells. "
+                    "Fix the graph's contact detection (or disable the controller with "
+                    "allow_no_controller + input_mode='zero') before running."
+                )
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - diagnostic must never break a run
+            self._log_event("actuator_connectivity_check_failed", str(exc))
 
     def _warn_if_unforced(self, prepared, params, has_controller: bool, cryo_idx: list) -> None:
         """Flag a run with no heat source, no heat sink and no radiative gradient.
@@ -887,8 +978,15 @@ class SimulationRunner:
         # Per-heater commanded power, so the report can plot each heater's own
         # trajectory (not just the total power_in_W). One heater_<id>_W series per
         # heater, mirroring the per-sensor temperature series above.
+        #
+        # Read the ACTUATOR command, not the deposited source vector. A heater
+        # deposits its power onto its power_deposition_node_ids (the body cells it
+        # touches), not onto its own marker node, so indexing the source vector at
+        # the heater row reports 0 W for every heater that has deposition nodes --
+        # i.e. every real heater -- even while the controller is driving hundreds
+        # of watts into the model.
         try:
-            heater_power = prepared.heater_power_by_node()
+            heater_power = prepared.heater_actuator_power_by_node()
         except Exception:
             heater_power = None
         if heater_power is not None:

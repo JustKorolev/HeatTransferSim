@@ -5,11 +5,18 @@
 builds the model from it and *keeps* the parsed payload on
 ``model.octree_graph_data``. That is where a 3M-cell headless run's ~45 GB goes.
 
-A simulation does not need any of it. The engine reads only ``model.nodes``,
-``model.metadata`` and ``model.controller_gain``; conduction comes from the ``L``
-matrix, so the edge objects are dead weight too. This module rebuilds exactly that
-subset from the compact per-node ``nodes.csv`` plus the binary matrix files,
-streaming row by row so the full set of raw dicts never exists at once.
+A simulation does not need the raw parsed payload. This module rebuilds the model
+from the compact per-node ``nodes.csv`` plus the binary matrix files, streaming
+row by row so the full set of raw dicts never exists at once.
+
+It DOES need the edges. An earlier version of this module skipped them, reasoning
+that "conduction comes from the L matrix" -- true only for constant properties.
+With ``use_temperature_dependent_properties`` the engine rebuilds ``L(T)`` every
+step from ``model.edges``, so an edgeless model yielded an all-zero Laplacian and
+silently simulated 3M thermally isolated nodes. Edges are now restored losslessly
+from ``edges.npz`` (see ``fast_edge_io``), and ``can_load_fast`` requires that
+file, so a graph lacking it falls back to the full loader rather than simulating a
+subtly different model.
 
 Caveat: ``nodes.csv`` carries no per-node controller setpoint (the octree writer
 does not emit one), so setpoints must come from the run config. The loader
@@ -30,12 +37,14 @@ import numpy as np
 from scipy.sparse import csr_matrix, save_npz
 
 from .diagnostics import log_event
+from .fast_edge_io import EDGES_FILENAME
 from .models import GraphMetadata, NodeProperties, ThermalGraphModel
 
 
 @dataclass
 class LoadReport:
     node_count: int = 0
+    edge_count: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
@@ -191,7 +200,7 @@ def can_load_fast(folder: str | Path) -> tuple[bool, str]:
     drop those -- e.g. every cryocooler, leaving a run with no cooling at all -- so
     a graph.json newer than nodes.csv disqualifies the fast path."""
     folder = Path(folder)
-    required = ("nodes.csv", "node_ids.npy", "C.npy")
+    required = ("nodes.csv", "node_ids.npy", "C.npy", EDGES_FILENAME)
     for name in required:
         if not (folder / name).exists():
             return False, f"missing {name}"
@@ -207,13 +216,36 @@ def can_load_fast(folder: str | Path) -> tuple[bool, str]:
 REFRESH_LOG_FILENAME = "refresh_fast_load.log"
 
 
-def launch_refresh_subprocess(folder: str | Path) -> "subprocess.Popen":
+def edges_only_refresh_is_enough(folder: str | Path) -> bool:
+    """True when ``edges.npz`` is the ONLY missing fast-load artifact.
+
+    Then the cheap streaming rebuild suffices: graph.json is walked edge by edge
+    with bounded memory, instead of the full parse that needs ~45 GB on a 3M-cell
+    graph. Everything else on disk is already consistent."""
+    folder = Path(folder)
+    if (folder / EDGES_FILENAME).exists():
+        return False
+    if not (folder / "graph.json").is_file():
+        return False
+    others = ("nodes.csv", "node_ids.npy", "C.npy")
+    if not all((folder / name).exists() for name in others):
+        return False
+    return (folder / "L_sparse.npz").exists() or (folder / "L_sparse.json").exists()
+
+
+def launch_refresh_subprocess(
+    folder: str | Path, *, edges_only: bool = False
+) -> "subprocess.Popen":
     """Start ``refresh_fast_load.py`` on ``folder`` in a SEPARATE process.
 
     The refresh has to parse the (multi-GB) graph.json once, so it must never run
     in the GUI process -- that would reintroduce exactly the load this whole path
     exists to avoid. Output goes to ``<folder>/refresh_fast_load.log`` so a failure
     is diagnosable. The caller polls ``proc.poll()`` for completion.
+
+    ``edges_only`` streams graph.json to rebuild only ``edges.npz`` -- bounded
+    memory, for a graph built before that artifact existed whose full load would
+    not fit in RAM.
     """
     import subprocess
 
@@ -221,9 +253,12 @@ def launch_refresh_subprocess(folder: str | Path) -> "subprocess.Popen":
     script = Path(__file__).resolve().parent.parent / "refresh_fast_load.py"
     log_path = folder / REFRESH_LOG_FILENAME
     log_handle = log_path.open("w", encoding="utf-8")
+    command = [sys.executable, str(script), str(folder)]
+    if edges_only:
+        command.append("--edges-only")
     try:
         proc = subprocess.Popen(  # noqa: S603
-            [sys.executable, str(script), str(folder)],
+            command,
             cwd=str(script.parent),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
@@ -303,6 +338,15 @@ def load_graph_for_simulation(
         )
 
     model = ThermalGraphModel(metadata=_load_metadata(folder))
+    # Edges make this path LOSSLESS. Without them temperature-dependent properties
+    # rebuild L(T) from an empty edge set -> all-zero Laplacian -> every node
+    # thermally isolated (silent, and ruinous). can_load_fast requires the file, so
+    # a graph without it falls back to the full graph.json loader rather than
+    # simulating a subtly different model.
+    from .fast_edge_io import read_edges_npz
+
+    model.edges = read_edges_npz(folder)
+    report.edge_count = len(model.edges)
     # csv's field-size limit is small relative to the list-valued columns the octree
     # writer emits for role nodes.
     try:
@@ -334,6 +378,7 @@ def load_graph_for_simulation(
         "fast_graph_io load complete",
         folder=str(folder),
         nodes=report.node_count,
+        edges=report.edge_count,
         L_nnz=int(sparse_l.nnz),
     )
     return model, matrices, report

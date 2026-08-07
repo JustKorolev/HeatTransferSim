@@ -252,3 +252,29 @@ class RadiationCouplingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GapLinksDroppedWarningTest(unittest.TestCase):
+    """Suppressed contact gaps with radiation off must not vanish silently."""
+
+    def _model(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(octree_graph_data={"gap_radiation_links": [[1, 2, 1.0e-4]]})
+
+    def test_warns_when_radiation_is_entirely_off(self) -> None:
+        from graph_visualizer.simulation_model import _warn_if_gap_links_dropped
+
+        off = SimulationParameters(use_ambient_radiation=False, use_radiative_coupling=False)
+        warnings: list[str] = []
+        _warn_if_gap_links_dropped(self._model(), off, warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("UNCOUPLED", warnings[0])
+
+    def test_silent_when_radiation_carries_the_gaps(self) -> None:
+        from graph_visualizer.simulation_model import _warn_if_gap_links_dropped
+
+        on = SimulationParameters(use_radiative_coupling=True)
+        warnings: list[str] = []
+        _warn_if_gap_links_dropped(self._model(), on, warnings)
+        self.assertEqual(warnings, [])

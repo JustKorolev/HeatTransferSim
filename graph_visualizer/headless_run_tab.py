@@ -102,11 +102,14 @@ class HeadlessRunTab:
         self.graph_info = self.QtWidgets.QLabel("")
         self.graph_info.setWordWrap(True)
         form.addRow(self.graph_info)
-        self.update_graph_button = self.QtWidgets.QPushButton("Update graph (rebuild nodes.csv)")
+        self.update_graph_button = self.QtWidgets.QPushButton("Update graph (rebuild nodes.csv + edges.npz)")
         self.update_graph_button.setToolTip(
-            "Regenerate the fast-load nodes.csv from graph.json in a SEPARATE process "
-            "(the graph is never loaded into this window). Run this once after editing a "
-            "graph so later runs load fast and use less memory."
+            "Regenerate the fast-load artifacts (nodes.csv + edges.npz) from graph.json in "
+            "a SEPARATE process (the graph is never loaded into this window). Run this once "
+            "after editing a graph so later runs load fast and use less memory.\n\n"
+            "edges.npz carries the conduction edges. Without it, temperature-dependent "
+            "properties cannot rebuild L(T) and the run silently falls back to constant "
+            "properties, so this is required for an accurate cryogenic run."
         )
         self.update_graph_button.clicked.connect(self.update_graph)
         form.addRow(self.update_graph_button)
@@ -172,16 +175,26 @@ class HeadlessRunTab:
             self._status(f"No graph.json in {folder}.", True)
             return
         try:
-            from .fast_graph_io import launch_refresh_subprocess
+            from .fast_graph_io import edges_only_refresh_is_enough, launch_refresh_subprocess
 
-            self._refresh_process = launch_refresh_subprocess(folder)
+            # When edges.npz is the only thing missing (a graph built before that
+            # artifact existed), stream it out of graph.json instead of doing the
+            # full parse -- bounded memory, so it works on graphs whose full load
+            # would not fit in RAM.
+            edges_only = edges_only_refresh_is_enough(folder)
+            self._refresh_process = launch_refresh_subprocess(folder, edges_only=edges_only)
         except Exception as exc:  # noqa: BLE001
             self._status(f"Could not start the graph update: {exc}", True)
             return
         self._refresh_folder = folder
         self.update_graph_button.setEnabled(False)
+        detail = (
+            "streaming edges.npz out of graph.json (low memory)"
+            if edges_only
+            else "rebuilding nodes.csv + edges.npz from graph.json"
+        )
         self._status(
-            f"Updating {folder.name}: rebuilding nodes.csv from graph.json "
+            f"Updating {folder.name}: {detail} "
             "(separate process; this window stays responsive)…",
             False,
         )
@@ -316,10 +329,39 @@ class HeadlessRunTab:
         if artifacts:
             self.controller_scheme_combo.setCurrentIndex(1)
         self._load_parameters_for_graph(folder)
+        # Say plainly whether the run will take the fast path and whether the edge
+        # data is there. Without edges.npz, temperature-dependent properties would
+        # have to fall back to constant properties (L(T) is rebuilt from the edges),
+        # and the run silently models different physics -- so surface it up front
+        # rather than leaving it to be discovered in events.log.
         self.graph_info.setText(
             f"{node_count} nodes • {len(artifacts)} controller artifact(s) • {folder}\n"
-            f"parameters: {self._params_source}"
+            f"parameters: {self._params_source}\n"
+            f"{self._fast_load_status(folder)}"
         )
+
+    def _fast_load_status(self, folder: Path) -> str:
+        try:
+            from .fast_edge_io import EDGES_FILENAME
+            from .fast_graph_io import can_load_fast, edges_only_refresh_is_enough
+
+            if (folder / EDGES_FILENAME).exists():
+                usable, reason = can_load_fast(folder)
+                if usable:
+                    return (
+                        f"fast load: READY • {EDGES_FILENAME} present "
+                        "(temperature-dependent properties supported)"
+                    )
+                return f"fast load: unavailable — {reason} (runs use the full graph.json loader)"
+            if edges_only_refresh_is_enough(folder):
+                return (
+                    f"fast load: MISSING {EDGES_FILENAME} — press “Update graph”. Without it "
+                    "runs fall back to the full graph.json loader (very large RAM)."
+                )
+            usable, reason = can_load_fast(folder)
+            return f"fast load: unavailable — {reason} (press “Update graph”)"
+        except Exception as exc:  # noqa: BLE001 - status line must never break the tab
+            return f"fast load: unknown ({exc})"
 
     def _confirm_controller_ok(self, artifact: str) -> bool:
         """The runner enables the heater controller only when a controller artifact

@@ -21,6 +21,7 @@ from .matrix_builder import (
     refresh_geometry_edges,
     refresh_radiation_from_exposed_faces,
 )
+from .fast_edge_io import write_edges_npz
 from .models import EdgeMode, GraphMetadata, ThermalGraphModel
 from .validation import (
     raise_if_errors,
@@ -562,6 +563,7 @@ def _save_octree_graph_folder_lightweight(
         # deliberately NOT rewritten: if an edit actually changed the matrices,
         # fast_graph_io.validate_against_matrices catches the capacity/coverage
         # mismatch and safely falls back to the full loader.
+        write_edges_npz(model, folder)
         _write_nodes_csv(model, folder)
         return matrices
     if len(model.nodes) > _DENSE_OCTREE_MATRIX_NODE_LIMIT:
@@ -580,8 +582,14 @@ def write_fast_load_artifacts(
     model: ThermalGraphModel, matrices: dict[str, Any], folder: Path
 ) -> None:
     """Write exactly the files the low-memory loader (fast_graph_io) reads --
-    ``node_ids.npy``, ``C.npy``, ``L_sparse.npz`` and ``nodes.csv`` -- from one
-    consistent model + matrices, so the fast path stays valid after an edit.
+    ``node_ids.npy``, ``C.npy``, ``L_sparse.npz``, ``edges.npz`` and ``nodes.csv``
+    -- from one consistent model + matrices, so the fast path stays valid after an
+    edit.
+
+    ``edges.npz`` makes the fast path LOSSLESS. Without it the loaded model has no
+    edges, and temperature-dependent properties (which rebuild L(T) from
+    model.edges every step) silently produce an all-zero Laplacian -- every node
+    thermally isolated.
 
     ``nodes.csv`` is written LAST so its mtime beats ``graph.json``'s, satisfying
     ``can_load_fast``'s freshness check.
@@ -595,6 +603,7 @@ def write_fast_load_artifacts(
         L = matrices["L"]
         L_csr = L.tocsr() if issparse(L) else csr_matrix(np.asarray(L, dtype=float))
         save_npz(str(folder / "L_sparse.npz"), L_csr)
+    write_edges_npz(model, folder)
     _write_nodes_csv(model, folder)
 
 
@@ -668,6 +677,7 @@ def _write_nodes_csv(model: ThermalGraphModel, folder: Path) -> None:
 
 
 def _save_octree_outputs(model: ThermalGraphModel, matrices: dict[str, np.ndarray], folder: Path) -> None:
+    write_edges_npz(model, folder)
     _write_nodes_csv(model, folder)
     with (folder / "edges.csv").open("w", newline="", encoding="utf-8") as handle:
         fields = ["edge_id", "node_i", "node_j", "edge_type", "G_W_K", "shared_area_m2", "distance_m", "contact_confidence", "source"]
