@@ -123,6 +123,16 @@ class SimulationParameters:
     implicit_sparse_adaptive_target_delta_K: float = 1.0
     implicit_sparse_adaptive_max_substeps: int = 4
     implicit_sparse_residual_check_enabled: bool = True
+    # Regularization + positivity guard for stiff/ill-conditioned cryogenic graphs.
+    # Degenerate near-zero-capacitance cells (thin-shell / oversized-marker mesh
+    # artifacts, ~1e-12 J/K) blow up the stage-matrix condition number, so
+    # jacobi-CG meets its residual tolerance while returning a solution with large
+    # error that overshoots temperatures below zero. Flooring capacitance shrinks
+    # the spread so CG stays accurate; the temperature floor is a final safety net
+    # that keeps any residual solver error from producing a non-physical (negative)
+    # temperature. Set the capacitance floor to 0 to disable regularization.
+    implicit_capacitance_floor_J_K: float = 1.0e-3
+    implicit_temperature_floor_K: float = 1.0e-3
     use_temperature_dependent_properties: bool = False
     # Evaluate the lagged nonlinear terms (temperature-dependent C/L and
     # radiation) at a forward-Euler midpoint instead of the step-start

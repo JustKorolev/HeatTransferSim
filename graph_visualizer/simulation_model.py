@@ -610,6 +610,16 @@ class PreparedSimulation:
         if self.cryocooler_node_ids:
             self.dynamic_heater_inputs = True
 
+    def _live_capacitance(self) -> np.ndarray | None:
+        """Current per-node heat capacity C=1/inv_C [J/K] (reflects tdep cp(T) when
+        active), so the cryocooler over-cool cap uses the genuine cryogenic capacity
+        rather than re-deriving it per node."""
+        inv_C = getattr(self, "inv_C", None)
+        if inv_C is None:
+            return None
+        inv = np.asarray(inv_C, dtype=float).reshape(-1)
+        return np.where(inv > 0.0, 1.0 / np.where(inv > 0.0, inv, 1.0), 0.0)
+
     def snapshot_state(self) -> PreparedSimulationSnapshot:
         # The history list is copied by REFERENCE, not deep-copied. A
         # SimulationState is write-once: step_forward builds a fresh one per step
@@ -762,6 +772,7 @@ class PreparedSimulation:
                 cryocooler_devices=self.cryocooler_devices,
                 lift_curve=self.cryocooler_lift_curve,
                 diagnostics_out=self.last_cryocooler_diagnostics,
+                capacitance=self._live_capacitance(),
             )
         self._refresh_temperature_dependent_operator()
         self._advance_with_power_vector(powers)
@@ -819,6 +830,7 @@ class PreparedSimulation:
                 cryocooler_devices=self.cryocooler_devices,
                 cryocooler_lift_curve=self.cryocooler_lift_curve,
                 cryocooler_diagnostics=self.last_cryocooler_diagnostics,
+                capacitance=self._live_capacitance(),
             )
             _record_profile_ms(profile, "controller_heater_power_ms", controller_start)
         self._advance_with_power_vector(heater_power, profile)
@@ -845,6 +857,8 @@ class PreparedSimulation:
             else np.asarray(evaluation_temperatures, dtype=float).reshape(-1)
         )
         C, inv_C, L = operator.rebuild(temps)
+        C = _regularize_capacitance(np.asarray(C, dtype=float).reshape(-1), self.params)
+        inv_C = np.where(C > 0.0, 1.0 / np.where(C > 0.0, C, 1.0), 0.0)
         self.inv_C = inv_C
         L_sparse = csr_matrix(L)
         # Preserve the operator's density: small graphs use the dense expm path.
@@ -962,6 +976,7 @@ class PreparedSimulation:
         the stage matrix approaches the well-conditioned diag(C)) and retry with
         more substeps, up to _MAX_STEP_SUBDIVISIONS doublings."""
         mask = self._physical_step_check_mask()
+        temp_floor = float(getattr(self.params, "implicit_temperature_floor_K", 0.0) or 0.0)
         min_substeps = 1
         last_error: Exception | None = None
         best_finite: np.ndarray | None = None  # finest finite attempt, for best-effort fallback
@@ -987,6 +1002,14 @@ class PreparedSimulation:
                 except Exception as exc:  # noqa: BLE001 - subdivide and retry below
                     last_error = exc
                     result = None
+            # Positivity clamp: a residual solver error on the ill-conditioned stiff
+            # system can drive cells below zero (unphysical). Clamp up to the floor
+            # BEFORE the physical check so the common cryo over-cool overshoot is
+            # neutralized cheaply here, rather than doom-looping the substep retry
+            # (which cannot help a constant cooling source anyway). A genuine
+            # positive runaway (huge upward jump) still fails the check and subdivides.
+            if result is not None and temp_floor > 0.0:
+                result = np.maximum(np.asarray(result, dtype=float), temp_floor)
             if result is not None and bool(np.all(np.isfinite(np.asarray(result, dtype=float)))):
                 best_finite = np.asarray(result, dtype=float)
                 best_backend = (backend_stepper, backend_name) if backend_stepper is not None else None
@@ -1334,6 +1357,7 @@ class PreparedSimulation:
             node_index_by_id=node_index, heater_node_ids=self.heater_node_ids,
             cryocooler_node_ids=self.cryocooler_node_ids, cryocooler_devices=self.cryocooler_devices,
             cryocooler_lift_curve=self.cryocooler_lift_curve, cryocooler_diagnostics=self.last_cryocooler_diagnostics,
+            capacitance=self._live_capacitance(),
         )
         mc = self._load_modal_controller()
         if mc is None:
@@ -1522,6 +1546,7 @@ class PreparedSimulation:
             cryocooler_devices=self.cryocooler_devices,
             cryocooler_lift_curve=self.cryocooler_lift_curve,
             cryocooler_diagnostics=self.last_cryocooler_diagnostics,
+            capacitance=self._live_capacitance(),
         )
         enabled_heater_ids = _enabled_node_id_set(self.params.enabled_heater_node_ids)
         enabled_sensor_ids = _enabled_node_id_set(self.params.enabled_sensor_node_ids)
@@ -2121,6 +2146,7 @@ def prepare_simulation(
     )
     n = len(node_ids)
     C = np.asarray(matrices.get("C", [model.nodes[int(node_id)].C_J_K for node_id in node_ids]), dtype=float).reshape(-1)
+    C = _regularize_capacitance(C, params)
     cryocooler_lift_curve = PT60LiftCurve(
         max_power_w=float(params.cryocooler_max_power_W),
         capacity_scale=float(params.cryocooler_capacity_scale),
@@ -2745,6 +2771,7 @@ def _controlled_heater_power_vector(
     cryocooler_devices: Sequence[CryocoolerDevice] | None = None,
     cryocooler_lift_curve: PT60LiftCurve | None = None,
     cryocooler_diagnostics: list[dict[str, Any]] | None = None,
+    capacitance: np.ndarray | None = None,
 ) -> np.ndarray:
     powers = np.zeros(len(node_ids), dtype=float)
     skipped_modes = excluded_modes or set()
@@ -2760,6 +2787,7 @@ def _controlled_heater_power_vector(
             cryocooler_devices=cryocooler_devices,
             lift_curve=cryocooler_lift_curve,
             diagnostics_out=cryocooler_diagnostics,
+            capacitance=capacitance,
         )
     if not include_heater_inputs:
         return powers
@@ -2898,6 +2926,21 @@ def _normalized_power_weights(weights: list[float], count: int) -> list[float]:
     return [float(value) / total for value in values]
 
 
+def _regularize_capacitance(C: np.ndarray, params: SimulationParameters) -> np.ndarray:
+    """Floor per-node heat capacity at ``implicit_capacitance_floor_J_K``.
+
+    Degenerate near-zero-capacitance cells (thin-shell / oversized-marker mesh
+    artifacts, ~1e-12 J/K) blow up the implicit stage-matrix condition number, so
+    jacobi-CG returns an inaccurate solution that overshoots temperatures negative.
+    Flooring shrinks the spread so the solve stays accurate. No-op when the floor
+    is <= 0."""
+    C = np.asarray(C, dtype=float).reshape(-1)
+    floor = float(getattr(params, "implicit_capacitance_floor_J_K", 0.0) or 0.0)
+    if floor > 0.0:
+        return np.maximum(C, floor)
+    return C
+
+
 def _node_capacitance_at(node: Any, temperature_K: float, tdep: bool) -> float:
     """Heat capacity [J/K] of a node at a temperature. Uses the cp(T) curve when
     temperature-dependent properties are active (so the cryocooler cap reflects the
@@ -3029,6 +3072,32 @@ def _cryocooler_power_vector(
                 "warning": warning,
             }
         )
+    # Global per-node cap. The per-device cap above limits EACH device's cooling
+    # of a cell to the energy that brings it to the floor -- but a cell served by
+    # several devices gets that removed once PER device, so the SUM over-cools it
+    # far below the floor and negative. That is what detonated stiff shell graphs
+    # (a cell dropping 293 K -> -58 K in one step). Cap the TOTAL cooling at each
+    # cell to C_i*(T_i - floor)/dt so no cell is driven below the cooler floor,
+    # regardless of how many devices target it.
+    cooled_rows = np.nonzero(powers > 0.0)[0]
+    if cooled_rows.size and devices:
+        floor_K = float(curve.minimum_temperature_k)
+        dt_s = max(float(params.dt_s), 1.0e-12)
+        if capacitance_by_row is not None and capacitance_by_row.shape[0] == temperatures.shape[0]:
+            cap_rows = capacitance_by_row[cooled_rows]
+        else:
+            tdep_active = bool(getattr(params, "use_temperature_dependent_properties", False))
+            cap_rows = np.array(
+                [
+                    _node_capacitance_at(
+                        model.nodes[int(node_ids[int(r)])], float(temperatures[int(r)]), tdep_active
+                    )
+                    for r in cooled_rows
+                ],
+                dtype=float,
+            )
+        max_removable = np.maximum(0.0, cap_rows * (temperatures[cooled_rows] - floor_K) / dt_s)
+        powers[cooled_rows] = np.minimum(powers[cooled_rows], max_removable)
     if diagnostics_out is not None:
         diagnostics_out.clear()
         diagnostics_out.extend(diagnostics)
