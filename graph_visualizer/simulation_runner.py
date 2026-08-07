@@ -532,6 +532,13 @@ class SimulationRunner:
     def _simulate(self, prepared, params, C_diag, sensors, heaters, cryo_idx) -> None:
         thr = self.cfg.thresholds
         node_index = prepared.node_index_by_id
+        # The engine's own "real body cell" mask (excludes heater/marker nodes), so
+        # the runner's step-sanity check polices exactly the cells the engine does
+        # and never rejects a step over a marker node's meaningless overshoot.
+        try:
+            self._real_cell_mask = prepared._physical_step_check_mask()
+        except Exception:  # noqa: BLE001 - fall back to policing every cell
+            self._real_cell_mask = None
         # Build the row indices and setpoints TOGETHER. Filtering the indices while
         # taking setpoints from the unfiltered sensor list would shift every setpoint
         # onto the wrong sensor as soon as one sensor is missing from the matrices.
@@ -805,14 +812,29 @@ class SimulationRunner:
         # RATE is a divergence INDICATOR, not a solver failure -- halving dt only
         # raises rate = dT/dt, so it must NOT trigger the retry (it's a soft warning
         # in _collect instead). This is what doom-looped on stiff/artifact graphs.
+        #
+        # Police only REAL body cells -- the SAME mask the engine uses to decide a
+        # step is physical (SparseImplicitStepper._implicit_step_is_physical). Heater
+        # and other marker nodes carry artificial near-zero capacitance and
+        # physically meaningless temperatures (they deposit into real cells); their
+        # explicit-source overshoot regularly goes slightly negative and the engine
+        # deliberately ignores it. Policing them here made the runner reject a step
+        # the engine had already accepted, then halve dt -- which, for TR-BDF2, makes
+        # the overshoot WORSE -- so the run doom-looped on graphs with marker nodes.
         if not np.all(np.isfinite(temps)):
             return True, "non-finite temperatures (NaN/Inf)"
-        tmax = float(np.max(temps))
-        tmin = float(np.min(temps))
+        mask = getattr(self, "_real_cell_mask", None)
+        policed = temps
+        if mask is not None and np.asarray(mask).shape == np.asarray(temps).shape:
+            policed = temps[mask]
+        if policed.size == 0:
+            policed = temps
+        tmax = float(np.max(policed))
+        tmin = float(np.min(policed))
         if tmax > thr.max_temperature_K:
-            return True, f"max T {tmax:.3g}K > {thr.max_temperature_K:g}K"
+            return True, f"max real-cell T {tmax:.3g}K > {thr.max_temperature_K:g}K"
         if tmin < thr.min_temperature_K:
-            return True, f"min T {tmin:.3g}K < {thr.min_temperature_K:g}K"
+            return True, f"min real-cell T {tmin:.3g}K < {thr.min_temperature_K:g}K"
         return False, ""
 
     # -- readouts / logging ------------------------------------------------- #
