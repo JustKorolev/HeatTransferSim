@@ -653,6 +653,7 @@ class SimulationRunner:
         self._sensor_ids = sensor_ids
         self._sensor_rows = sensor_ix
         self._sensor_setpoints = setpoints
+        self._build_sensor_readout_operator(prepared, sensor_ids, sensor_ix)
         self._write_sensor_manifest(prepared, sensor_ids, setpoints)
         prev_temps = np.asarray(prepared.initial_temperatures_K, dtype=float).copy()
         last_snapshot_t = -1.0e18
@@ -804,9 +805,12 @@ class SimulationRunner:
         temps = np.asarray(temps, dtype=float)
         rows = list(getattr(self, "_sensor_manifest_rows", []) or [])
         if rows:
+            # Same readout the controller regulates -- NOT the marker node, which is
+            # thermally isolated and would report the initial temperature forever.
+            readouts = self._sensor_readout_temperatures(temps, self._sensor_rows)
             for index, row in enumerate(rows):
                 try:
-                    value = float(temps[self._sensor_rows[index]])
+                    value = float(readouts[index])
                 except (IndexError, ValueError):
                     continue
                 row["final_K"] = f"{value:.6g}"
@@ -929,6 +933,70 @@ class SimulationRunner:
         return False, ""
 
     # -- readouts / logging ------------------------------------------------- #
+    def _build_sensor_readout_operator(self, prepared, sensor_ids, sensor_ix) -> None:
+        """Precompute the sensor readout as a sparse (n_sensors x n_nodes) matrix.
+
+        A sensor's temperature is the weighted mean over its readout body cells, the
+        same quantity ``sensor_readout_temperature_K`` gives the controller. Building
+        it once keeps per-step reporting to a single sparse mat-vec instead of a
+        Python loop over ~91 sensors x up to ~500 cells each. Sensors with no readout
+        cells fall back to their own row so their series stays populated."""
+        self._sensor_readout_matrix = None
+        try:
+            from scipy.sparse import csr_matrix
+
+            model = getattr(prepared, "model", None)
+            if model is None:
+                return
+            node_index = getattr(prepared, "node_index_by_id", None) or {
+                int(v): i for i, v in enumerate(prepared.node_ids)
+            }
+            n_nodes = int(np.asarray(prepared.node_ids).size)
+            rows: list[int] = []
+            cols: list[int] = []
+            data: list[float] = []
+            fallback = 0
+            for j, sensor_id in enumerate(sensor_ids):
+                node = model.nodes.get(int(sensor_id))
+                ids = [
+                    int(v)
+                    for v in (
+                        getattr(node, "readout_node_ids", None)
+                        or getattr(node, "sensor_connected_node_ids", None)
+                        or []
+                    )
+                    if int(v) in node_index
+                ]
+                raw = [float(w) for w in (getattr(node, "readout_weights", None) or [])]
+                if not ids:
+                    rows.append(j); cols.append(int(sensor_ix[j])); data.append(1.0)
+                    fallback += 1
+                    continue
+                weights = raw[: len(ids)]
+                if len(weights) != len(ids) or not (sum(weights) > 0.0):
+                    weights = [1.0 / len(ids)] * len(ids)
+                total = float(sum(weights))
+                for node_id, weight in zip(ids, weights):
+                    rows.append(j); cols.append(node_index[node_id]); data.append(weight / total)
+            self._sensor_readout_matrix = csr_matrix(
+                (data, (rows, cols)), shape=(len(sensor_ids), n_nodes)
+            )
+            if fallback:
+                self._log_event(
+                    "sensor_readout",
+                    f"{fallback} sensor(s) have no body readout cells; reporting their own "
+                    "node temperature (a marker node exchanges no heat, so it will not move).",
+                )
+        except Exception as exc:  # noqa: BLE001 - reporting must never break a run
+            self._log_event("sensor_readout_unavailable", str(exc))
+            self._sensor_readout_matrix = None
+
+    def _sensor_readout_temperatures(self, temps, sensor_ix) -> np.ndarray:
+        matrix = getattr(self, "_sensor_readout_matrix", None)
+        if matrix is None:
+            return np.asarray(temps)[sensor_ix]
+        return np.asarray(matrix @ np.asarray(temps, dtype=float)).reshape(-1)
+
     def _collect(self, prepared, state, temps, prev, dt, C_diag, sensor_ix,
                  setpoints, heaters, cryo_idx, thr) -> None:
         s = self._series
@@ -944,17 +1012,24 @@ class SimulationRunner:
                 self._log_event("high_temp_rate", f"t={state.time_s:.1f}s max|dT/dt|={rate:.3g}K/s (soft)")
         # sensor temps + tracking error
         if sensor_ix:
-            sens = temps[sensor_ix]
+            # Report the READOUT temperature -- the weighted mean over the sensor's
+            # body cells -- which is what the controller regulates. Indexing temps at
+            # the sensor's own marker row reports the marker instead, and a marker is
+            # a thermally isolated single-node component (its role edges carry
+            # G = 0 W/K), so it sits at the initial temperature for the whole run.
+            # That made every sensor read exactly 40.15 K and pinned the tracking
+            # error at its start value while the real readouts had already moved
+            # +12.9 K and closed the RMS error from 9.04 to 7.96 K.
+            sens = self._sensor_readout_temperatures(temps, sensor_ix)
             # Each per-sensor series is a Python list held for the whole run; with
             # many sensors x an overnight step count that adds up, so log individual
             # sensors up to a cap (the aggregate RMS below always covers them all).
             logged = min(len(sensor_ix), max(0, int(self.cfg.max_logged_sensors)))
             for j in range(logged):
-                ix = sensor_ix[j]
-                s.setdefault(f"sensor_{j}_K", []).append(float(temps[ix]))
+                s.setdefault(f"sensor_{j}_K", []).append(float(sens[j]))
                 if np.isfinite(setpoints[j]):
-                    s.setdefault(f"sensor_{j}_err_K", []).append(float(temps[ix] - setpoints[j]))
-            valid = np.isfinite(setpoints)
+                    s.setdefault(f"sensor_{j}_err_K", []).append(float(sens[j] - setpoints[j]))
+            valid = np.isfinite(setpoints) & np.isfinite(sens)
             if valid.any():
                 err = sens[valid] - setpoints[valid]
                 s.setdefault("rms_tracking_error_K", []).append(float(np.sqrt(np.mean(err**2))))
