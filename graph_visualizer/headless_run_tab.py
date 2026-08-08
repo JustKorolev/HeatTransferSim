@@ -23,6 +23,7 @@ in place of the 3D viewer, the progress / status / log view on the right.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import random
@@ -164,7 +165,42 @@ class HeadlessRunTab:
         # side-panel stack, exactly as it does for the simulation tab. The tab body
         # holds only what sits beside the viewer there -- the "Parameters" editor
         # and, in place of the 3D viewer, the run's progress / status / log.
-        outer.addWidget(self.readout_editor_box, 0, self.QtCore.Qt.AlignTop)
+        # Per-sensor setpoints, beside the shared "Parameters" editor. The
+        # simulation tab edits these through its readout tables, which need a loaded
+        # graph; here the sensor list comes from the manifest a previous run wrote,
+        # so the graph still never enters this process. Blank = use the global
+        # setpoint above, so the common "one target for everything" case is
+        # unchanged and only edited rows become overrides.
+        setpoint_box = self.QtWidgets.QGroupBox("Per-sensor setpoints")
+        setpoint_layout = self.QtWidgets.QVBoxLayout(setpoint_box)
+        setpoint_help = self.QtWidgets.QLabel(
+            "Blank uses the global setpoint. Fill a row to give that sensor its own "
+            "target. The list comes from the last run's sensors.csv."
+        )
+        setpoint_help.setWordWrap(True)
+        setpoint_layout.addWidget(setpoint_help)
+        self.setpoint_table = self.QtWidgets.QTableWidget(0, 2)
+        self.setpoint_table.setHorizontalHeaderLabels(["sensor", "setpoint K"])
+        self.setpoint_table.horizontalHeader().setStretchLastSection(True)
+        self.setpoint_table.setMinimumHeight(200)
+        setpoint_layout.addWidget(self.setpoint_table, 1)
+        setpoint_buttons = self.QtWidgets.QHBoxLayout()
+        for label, slot in (
+            ("Load sensors", self.load_sensor_setpoints),
+            ("Set all", self.apply_setpoint_to_all_sensors),
+            ("Clear", self.clear_setpoint_overrides),
+        ):
+            button = self.QtWidgets.QPushButton(label)
+            button.clicked.connect(slot)
+            setpoint_buttons.addWidget(button)
+        setpoint_layout.addLayout(setpoint_buttons)
+
+        editor_column = self.QtWidgets.QWidget()
+        editor_layout = self.QtWidgets.QVBoxLayout(editor_column)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.addWidget(self.readout_editor_box)
+        editor_layout.addWidget(setpoint_box, 1)
+        outer.addWidget(editor_column, 0, self.QtCore.Qt.AlignTop)
 
         # In place of the 3D viewer: what the launched run is doing.
         right = self.QtWidgets.QWidget()
@@ -350,6 +386,7 @@ class HeadlessRunTab:
             self.controller_scheme_combo.setCurrentIndex(1)
         self._load_parameters_for_graph(folder)
         self.refresh_resume_runs()
+        self.load_sensor_setpoints()
         # Say plainly whether the run will take the fast path and whether the edge
         # data is there. Without edges.npz, temperature-dependent properties would
         # have to fall back to constant properties (L(T) is rebuilt from the edges),
@@ -360,6 +397,91 @@ class HeadlessRunTab:
             f"parameters: {self._params_source}\n"
             f"{self._fast_load_status(folder)}"
         )
+
+    # -- per-sensor setpoints ------------------------------------------------ #
+    def sensor_manifest(self, graph_name: str) -> list[dict[str, str]]:
+        """Sensor rows (node_id, component, setpoint, ...) for ``graph_name``.
+
+        This tab never loads the graph, so the sensor list comes from the manifest
+        the runner writes at prepare time (``sensors.csv``) in that graph's most
+        recent run that has one. Scanning the graph's own multi-hundred-MB
+        nodes.csv in the GUI process would stall the window for the same data.
+        """
+        root = self.simulations_root() / graph_name
+        if not root.is_dir():
+            return []
+        for run_dir in sorted(root.iterdir(), reverse=True):
+            manifest = run_dir / "sensors.csv"
+            if not manifest.is_file():
+                continue
+            try:
+                with manifest.open("r", newline="", encoding="utf-8") as handle:
+                    rows = [row for row in csv.DictReader(handle) if row.get("node_id")]
+            except OSError:
+                continue
+            if rows:
+                return rows
+        return []
+
+    def load_sensor_setpoints(self) -> None:
+        """Fill the table from the newest run's sensor manifest."""
+        folder = self._selected_folder()
+        table = getattr(self, "setpoint_table", None)
+        if table is None:
+            return
+        rows = self.sensor_manifest(folder.name) if folder is not None else []
+        table.setRowCount(len(rows))
+        self._sensor_rows_manifest = rows
+        for index, row in enumerate(rows):
+            node_id = str(row.get("node_id", ""))
+            name = str(row.get("component_name", ""))
+            monitor = str(row.get("monitor_only", "")).lower() == "true"
+            label = f"{node_id}  {name}" + ("  (monitor-only)" if monitor else "")
+            item = self.QtWidgets.QTableWidgetItem(label)
+            item.setFlags(self.QtCore.Qt.ItemIsEnabled)
+            table.setItem(index, 0, item)
+            # Blank means "use the global setpoint"; only edited rows override.
+            table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(""))
+        if not rows and folder is not None:
+            self._status(
+                f"No sensor manifest found for {folder.name}. Run once (any duration) so "
+                "the run writes sensors.csv, then load again.",
+                True,
+            )
+
+    def collect_setpoint_overrides(self) -> dict[int, float]:
+        """{node_id: setpoint_K} for rows the user actually filled in."""
+        table = getattr(self, "setpoint_table", None)
+        rows = getattr(self, "_sensor_rows_manifest", None) or []
+        overrides: dict[int, float] = {}
+        if table is None:
+            return overrides
+        for index, row in enumerate(rows):
+            cell = table.item(index, 1)
+            text = (cell.text() if cell is not None else "").strip()
+            if not text:
+                continue
+            try:
+                overrides[int(row["node_id"])] = float(text)
+            except (TypeError, ValueError):
+                continue
+        return overrides
+
+    def apply_setpoint_to_all_sensors(self) -> None:
+        """Write the global setpoint into every row, as a starting point to edit."""
+        table = getattr(self, "setpoint_table", None)
+        if table is None:
+            return
+        value = f"{self.setpoint_spin.value():g}"
+        for index in range(table.rowCount()):
+            table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(value))
+
+    def clear_setpoint_overrides(self) -> None:
+        table = getattr(self, "setpoint_table", None)
+        if table is None:
+            return
+        for index in range(table.rowCount()):
+            table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(""))
 
     # -- resume (continue a previous run from its last checkpoint) ----------- #
     def simulations_root(self) -> Path:
@@ -528,6 +650,21 @@ class HeadlessRunTab:
             command += ["--controller", artifact]
         if self.use_setpoint.isChecked():
             command += ["--setpoint", f"{self.setpoint_spin.value():g}"]
+        # Per-sensor targets layer on top of the global one, so only edited rows are
+        # written. Saved beside the run so the file records what was actually asked
+        # for, the same way simulation_parameters.json does.
+        overrides = self.collect_setpoint_overrides()
+        if overrides:
+            overrides_path = run_dir / "setpoints.json"
+            try:
+                overrides_path.write_text(
+                    json.dumps({str(k): v for k, v in sorted(overrides.items())}, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                self._status(f"Could not write per-sensor setpoints: {exc}", True)
+                return
+            command += ["--setpoints-json", str(overrides_path)]
         if self.use_initial.isChecked() and resume_dir is None:
             command += ["--initial-temp", f"{self.initial_spin.value():g}"]
         elif self.use_initial.isChecked():

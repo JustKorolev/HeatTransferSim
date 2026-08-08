@@ -7,6 +7,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from graph_visualizer.simulation_parameters import load_simulation_parameters
@@ -20,6 +21,10 @@ def main() -> None:
     p.add_argument("--controller", default=None, help="modal_controller.npz (default: <graph>/modal_controller.npz)")
     p.add_argument("--allow-no-controller", action="store_true", help="run open-loop if no controller is present")
     p.add_argument("--setpoint", type=float, default=None, help="constant setpoint [K] applied to every sensor")
+    p.add_argument("--setpoints-json", default=None,
+                   help="JSON {sensor_node_id: setpoint_K} of PER-SENSOR targets. Applied on top "
+                        "of --setpoint, so --setpoint sets the baseline and this overrides "
+                        "individual sensors.")
     p.add_argument("--initial-temp", type=float, default=None,
                    help="uniform initial temperature [K] for every node (overrides the graph's saved temps)")
     p.add_argument("--dt", type=float, default=1.0)
@@ -43,6 +48,24 @@ def main() -> None:
         sim_params, _extras = load_simulation_parameters(params_path)
         print(f"Using simulation parameters from {params_path}")
 
+    # Per-sensor targets are a plain {node_id: K} map. They layer on top of
+    # --setpoint, which stays the baseline for every sensor not named here.
+    per_sensor_setpoints: dict[int, float] = {}
+    if args.setpoints_json:
+        setpoints_path = Path(args.setpoints_json)
+        if not setpoints_path.is_file():
+            raise SystemExit(f"--setpoints-json not found: {setpoints_path}")
+        with setpoints_path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if not isinstance(raw, dict):
+            raise SystemExit("--setpoints-json must contain a JSON object {node_id: setpoint_K}.")
+        for node_id, target in raw.items():
+            try:
+                per_sensor_setpoints[int(node_id)] = float(target)
+            except (TypeError, ValueError):
+                raise SystemExit(f"--setpoints-json has a bad entry: {node_id!r}: {target!r}")
+        print(f"Per-sensor setpoints: {len(per_sensor_setpoints)} sensor(s) from {setpoints_path}")
+
     cfg = RunConfig(
         graph_folder=str(Path(args.graph)),
         output_root=args.output_root,
@@ -50,6 +73,7 @@ def main() -> None:
         controller_path=args.controller,
         allow_no_controller=bool(args.allow_no_controller),
         global_setpoint_K=args.setpoint,
+        setpoints_K=per_sensor_setpoints,
         initial_temperature_uniform_K=args.initial_temp,
         dt_s=args.dt,
         t_final_s=args.duration,

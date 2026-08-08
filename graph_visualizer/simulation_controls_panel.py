@@ -946,7 +946,16 @@ class SimulationControlsPanel:
         )
         widget.valueChanged.connect(self._readout_slot("readout_sensor_change", "controller_setpoint_K"))
         self.readout_editor_inputs["controller_setpoint_K"] = widget
-        sensor_form.addRow("setpoint K", widget)
+        # Named "default" because this is the value applied to the SELECTED/new role,
+        # not the target the run tracks. Reading it as the run's setpoint is an easy
+        # mistake: it shows 293.15 while a cryogenic run is tracking ~50 K from the
+        # "use setpoint" row above.
+        widget.setToolTip(
+            "Default setpoint for a sensor edited here. This is NOT the run's target: "
+            "the headless run uses the 'use setpoint' value above, plus any per-sensor "
+            "overrides in the 'Per-sensor setpoints' table."
+        )
+        sensor_form.addRow("default setpoint K", widget)
         layout.addWidget(self.readout_sensor_editor)
 
         self.readout_heater_editor = self.QtWidgets.QWidget()

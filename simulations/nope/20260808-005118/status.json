@@ -1,0 +1,11 @@
+{
+  "status": "error: FileNotFoundError: Graph folder is incomplete/corrupted. Missing: graph3d.json",
+  "step": 0,
+  "sim_time_s": 0.0,
+  "t_final_s": 3600.0,
+  "progress": 0.0,
+  "wall_elapsed_s": 0.40454983711242676,
+  "eta_s": NaN,
+  "rss_gib": 0.1,
+  "updated": "2026-08-08T00:51:19"
+}
