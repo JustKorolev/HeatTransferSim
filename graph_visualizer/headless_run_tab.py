@@ -61,6 +61,7 @@ class HeadlessRunTab:
         self._refresh_folder: Path | None = None
         self._log_size = 0
         self._params_source = "defaults"
+        self._pending_log_note = ""
         self.widget = self.QtWidgets.QWidget(parent)
         self._build_layout()
         self.refresh_graphs()
@@ -113,6 +114,25 @@ class HeadlessRunTab:
         )
         self.update_graph_button.clicked.connect(self.update_graph)
         form.addRow(self.update_graph_button)
+        # Resume: a run that died (or was stopped) keeps checkpoints, so it can be
+        # continued instead of restarting from t=0. Picking a run here reuses its
+        # directory; the runner then resumes from that directory's newest
+        # checkpoint. Defaults to a fresh run so the normal path is unchanged.
+        resume_row = self.QtWidgets.QHBoxLayout()
+        self.resume_combo = self.QtWidgets.QComboBox()
+        self.resume_combo.setToolTip(
+            "Continue a previous run from its last checkpoint instead of starting over.\n"
+            "The run keeps its original output directory, so its plots, events.log and "
+            "timeseries continue in place.\n\n"
+            "Settings below still apply, so this is also how to resume with something "
+            "changed -- e.g. turn the GPU solver off after a crash, or extend the duration."
+        )
+        resume_refresh = self.QtWidgets.QPushButton("Refresh")
+        resume_refresh.setMaximumWidth(80)
+        resume_refresh.clicked.connect(self.refresh_resume_runs)
+        resume_row.addWidget(self.resume_combo, 1)
+        resume_row.addWidget(resume_refresh)
+        form.addRow("resume", resume_row)
         self.notes_edit = self.QtWidgets.QLineEdit()
         self.notes_edit.setPlaceholderText("optional note stored with the run")
         form.addRow("notes", self.notes_edit)
@@ -329,6 +349,7 @@ class HeadlessRunTab:
         if artifacts:
             self.controller_scheme_combo.setCurrentIndex(1)
         self._load_parameters_for_graph(folder)
+        self.refresh_resume_runs()
         # Say plainly whether the run will take the fast path and whether the edge
         # data is there. Without edges.npz, temperature-dependent properties would
         # have to fall back to constant properties (L(T) is rebuilt from the edges),
@@ -339,6 +360,65 @@ class HeadlessRunTab:
             f"parameters: {self._params_source}\n"
             f"{self._fast_load_status(folder)}"
         )
+
+    # -- resume (continue a previous run from its last checkpoint) ----------- #
+    def simulations_root(self) -> Path:
+        """Where runs are written. Mirrors start_run's ``simulations/<graph>``."""
+        return Path("simulations").resolve()
+
+    @staticmethod
+    def describe_checkpoint(run_dir: Path) -> tuple[int, float] | None:
+        """(step, sim_time_s) of a run's newest checkpoint, or None if it has none.
+
+        Reads only the two scalar arrays, so listing many runs stays cheap even
+        though each checkpoint holds a full multi-million-node temperature field.
+        """
+        checkpoints = sorted((run_dir / "checkpoints").glob("ckpt_*.npz"))
+        if not checkpoints:
+            return None
+        try:
+            import numpy as np
+
+            with np.load(checkpoints[-1], allow_pickle=False) as data:
+                return int(data["step"]), float(data["time_s"])
+        except Exception:  # noqa: BLE001 - a truncated checkpoint just is not offered
+            return None
+
+    def resumable_runs(self, graph_name: str) -> list[tuple[Path, int, float]]:
+        """Runs of ``graph_name`` that have a checkpoint, newest first."""
+        root = self.simulations_root() / graph_name
+        if not root.is_dir():
+            return []
+        found: list[tuple[Path, int, float]] = []
+        for run_dir in sorted(root.iterdir(), reverse=True):
+            if not run_dir.is_dir():
+                continue
+            described = self.describe_checkpoint(run_dir)
+            if described is not None:
+                found.append((run_dir, described[0], described[1]))
+        return found
+
+    def refresh_resume_runs(self) -> None:
+        combo = getattr(self, "resume_combo", None)
+        if combo is None:
+            return
+        previous = combo.currentData()
+        combo.clear()
+        combo.addItem("(start a new run)", None)
+        folder = self._selected_folder()
+        if folder is None:
+            return
+        for run_dir, step, time_s in self.resumable_runs(folder.name):
+            combo.addItem(f"{run_dir.name} - resume at step {step}, t={time_s:g}s", str(run_dir))
+        if previous:
+            index = combo.findData(previous)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+
+    def selected_resume_dir(self) -> Path | None:
+        combo = getattr(self, "resume_combo", None)
+        value = combo.currentData() if combo is not None else None
+        return Path(value) if value else None
 
     def _fast_load_status(self, folder: Path) -> str:
         try:
@@ -398,9 +478,26 @@ class HeadlessRunTab:
         if not self._confirm_controller_ok(artifact):
             return
         open_loop = not (artifact and Path(artifact).exists())
+        # Resuming reuses the previous run's directory: run_simulation.py's
+        # _resume_if_checkpoint picks up that directory's newest checkpoint, and the
+        # run's plots / events.log / timeseries continue in place rather than
+        # restarting at t=0. The parameters below are still written, so a resume is
+        # also the way to continue with something changed (GPU off, longer duration).
+        resume_dir = self.selected_resume_dir()
+        if resume_dir is not None and not resume_dir.is_dir():
+            self._status(f"Resume target no longer exists: {resume_dir}", True)
+            return
+        resume_at = self.describe_checkpoint(resume_dir) if resume_dir is not None else None
+        if resume_dir is not None and resume_at is None:
+            self._status(
+                f"{resume_dir.name} has no usable checkpoint to resume from.", True
+            )
+            return
         run_dir = (
-            Path("simulations") / folder.name / datetime.now().strftime("%Y%m%d-%H%M%S")
-        ).resolve()
+            resume_dir.resolve()
+            if resume_dir is not None
+            else (Path("simulations") / folder.name / datetime.now().strftime("%Y%m%d-%H%M%S")).resolve()
+        )
         # Persist the full parameter set beside the run and hand it to the process,
         # so the headless run uses exactly the physics shown in this tab (and the
         # file doubles as a record of what was run).
@@ -431,8 +528,13 @@ class HeadlessRunTab:
             command += ["--controller", artifact]
         if self.use_setpoint.isChecked():
             command += ["--setpoint", f"{self.setpoint_spin.value():g}"]
-        if self.use_initial.isChecked():
+        if self.use_initial.isChecked() and resume_dir is None:
             command += ["--initial-temp", f"{self.initial_spin.value():g}"]
+        elif self.use_initial.isChecked():
+            self._pending_log_note = (
+                "resume: ignoring the initial-temperature override; the checkpoint "
+                "supplies the starting state."
+            )
         if not bool(getattr(params, "gpu_solver_enabled", True)):
             command.append("--no-gpu")
         if self.notes_edit.text().strip():
@@ -441,8 +543,19 @@ class HeadlessRunTab:
         run_dir.mkdir(parents=True, exist_ok=True)
         self.run_dir = run_dir
         self._stop_requested = False
-        self._log_size = 0
+        # On a resume the run appends to the SAME events.log, so start reading from
+        # the end of what is already there rather than replaying the whole history.
+        events = run_dir / "events.log"
+        self._log_size = events.stat().st_size if (resume_dir is not None and events.exists()) else 0
         self.log_view.clear()
+        if resume_dir is not None and resume_at is not None:
+            self.log_view.appendPlainText(
+                f"--- resuming {run_dir.name} from step {resume_at[0]} (t={resume_at[1]:g}s) ---"
+            )
+        note = getattr(self, "_pending_log_note", "")
+        if note:
+            self.log_view.appendPlainText(note)
+            self._pending_log_note = ""
         self.progress.setValue(0)
         try:
             # Detached: the run must outlive this window, and must not inherit the
@@ -467,8 +580,14 @@ class HeadlessRunTab:
         self.run_headless_button.setEnabled(False)
         self.stop_headless_button.setEnabled(True)
         self.open_output_button.setEnabled(True)
-        self.summary_label.setText(f"Started (pid {self.process.pid}) -> {run_dir}")
-        self._status(f"Headless run started (pid {self.process.pid}) -> {run_dir}", False)
+        verb = (
+            f"Resumed from step {resume_at[0]} (t={resume_at[1]:g}s)"
+            if resume_dir is not None and resume_at is not None
+            else "Started"
+        )
+        self.summary_label.setText(f"{verb} (pid {self.process.pid}) -> {run_dir}")
+        self._status(f"Headless run {verb.lower()} (pid {self.process.pid}) -> {run_dir}", False)
+        self.refresh_resume_runs()
 
     def stop_run(self) -> None:
         if self.process is None or self.process.poll() is not None:
