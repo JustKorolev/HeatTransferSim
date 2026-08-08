@@ -65,6 +65,8 @@ class FailureThresholds:
 # uncatchable kill that skips _finalize (plots, report, timeseries). Dropping this
 # file in the run directory asks the loop to stop at the next step boundary and
 # exit through _finalize normally.
+# NodeProperties.controller_setpoint_K's default; see the guard in _write_sensor_manifest.
+_DEFAULT_SETPOINT_K = 293.15
 STOP_REQUEST_FILENAME = "stop.request"
 
 
@@ -80,6 +82,9 @@ class RunConfig:
     allow_no_controller: bool = False  # must be True to run without a controller
     setpoints_K: dict[int, float] = field(default_factory=dict)  # sensor node id -> target
     global_setpoint_K: float | None = None  # applied to every sensor if set
+    # Guard against silently running at NodeProperties' 293.15 K default; set True
+    # only when room temperature really is the intended target.
+    allow_default_setpoint: bool = False
     dt_s: float = 1.0
     t_final_s: float = 3600.0
     gpu_solver_enabled: bool = True
@@ -653,6 +658,18 @@ class SimulationRunner:
         self._sensor_ids = sensor_ids
         self._sensor_rows = sensor_ix
         self._sensor_setpoints = setpoints
+        # A monitor-only sensor has NO heater assigned, so the controller never acts
+        # on it; it only warms by conduction from the regulated regions. Averaging it
+        # into the tracking error hides how the loop is actually doing: on
+        # no_mli_high_res the 27 controlled sensors reached 0.42 K RMS while the
+        # reported figure -- diluted by 64 monitor-only sensors -- still read 4.57 K.
+        self._sensor_controlled = np.array(
+            [
+                not bool(getattr(prepared.model.nodes.get(int(sid)), "sensor_monitor_only", False))
+                for sid in sensor_ids
+            ],
+            dtype=bool,
+        )
         self._build_sensor_readout_operator(prepared, sensor_ids, sensor_ix)
         self._write_sensor_manifest(prepared, sensor_ids, setpoints)
         prev_temps = np.asarray(prepared.initial_temperatures_K, dtype=float).copy()
@@ -786,6 +803,26 @@ class SimulationRunner:
             writer.writerows(rows)
         finite = np.asarray(setpoints, dtype=float)
         finite = finite[np.isfinite(finite)]
+        # A run that was never given a setpoint silently targets NodeProperties'
+        # 293.15 K default -- room temperature. On the low-memory path nodes.csv
+        # carries no per-node setpoint, so nothing overrides it, and a cryogenic run
+        # then commands every heater flat-out toward 293 K for its whole duration
+        # (observed: a full 3600 s run whose tracking error started at -253 K).
+        # It is never what a 40 K cryostat run wants, so refuse rather than log it.
+        if (
+            finite.size
+            and self.cfg.global_setpoint_K is None
+            and not (self.cfg.setpoints_K or {})
+            and bool(np.all(finite == _DEFAULT_SETPOINT_K))
+            and not bool(getattr(self.cfg, "allow_default_setpoint", False))
+        ):
+            raise _HardFailure(
+                f"No setpoint was given, so all {finite.size} sensors kept the built-in "
+                f"default of {_DEFAULT_SETPOINT_K} K (room temperature). This graph loaded "
+                "without per-node setpoints, so nothing overrode it. Pass --setpoint (or "
+                "tick 'use setpoint' in the headless tab), or supply --setpoints-json. "
+                "Set allow_default_setpoint=True if you really do want 293.15 K."
+            )
         if finite.size:
             self._log_event(
                 "setpoints",
@@ -1033,6 +1070,18 @@ class SimulationRunner:
             if valid.any():
                 err = sens[valid] - setpoints[valid]
                 s.setdefault("rms_tracking_error_K", []).append(float(np.sqrt(np.mean(err**2))))
+                # Split out the sensors the controller actually regulates. Keeping the
+                # all-sensor figure as well, since a monitor-only sensor far from
+                # setpoint is still worth seeing -- it just is not a control failure.
+                controlled = getattr(self, "_sensor_controlled", None)
+                if controlled is not None and controlled.shape == valid.shape:
+                    for label, mask in (
+                        ("rms_tracking_error_controlled_K", valid & controlled),
+                        ("rms_tracking_error_monitor_K", valid & ~controlled),
+                    ):
+                        if mask.any():
+                            e = sens[mask] - setpoints[mask]
+                            s.setdefault(label, []).append(float(np.sqrt(np.mean(e**2))))
         # cold tip (coldest cryocooler node) / global coldest
         if cryo_idx:
             s.setdefault("cryo_tip_K", []).append(float(np.min(temps[cryo_idx])))
