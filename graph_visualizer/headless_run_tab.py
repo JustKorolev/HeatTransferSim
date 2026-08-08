@@ -349,17 +349,17 @@ class HeadlessRunTab:
                 usable, reason = can_load_fast(folder)
                 if usable:
                     return (
-                        f"fast load: READY • {EDGES_FILENAME} present "
+                        f"fast load: READY - {EDGES_FILENAME} present "
                         "(temperature-dependent properties supported)"
                     )
-                return f"fast load: unavailable — {reason} (runs use the full graph.json loader)"
+                return f"fast load: unavailable - {reason} (runs use the full graph.json loader)"
             if edges_only_refresh_is_enough(folder):
                 return (
-                    f"fast load: MISSING {EDGES_FILENAME} — press “Update graph”. Without it "
+                    f"fast load: MISSING {EDGES_FILENAME} - press 'Update graph'. Without it "
                     "runs fall back to the full graph.json loader (very large RAM)."
                 )
             usable, reason = can_load_fast(folder)
-            return f"fast load: unavailable — {reason} (press “Update graph”)"
+            return f"fast load: unavailable - {reason} (press 'Update graph')"
         except Exception as exc:  # noqa: BLE001 - status line must never break the tab
             return f"fast load: unknown ({exc})"
 
