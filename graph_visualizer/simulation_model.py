@@ -2651,13 +2651,16 @@ def _warn_if_gap_links_dropped(model, params, warnings: list[str]) -> None:
     if not raw:
         return
     warnings.append(
-        f"Contact-gap interfaces UNCOUPLED: the graph build suppressed conduction across "
-        f"{len(raw)} inter-part interface(s) on the assumption they would couple by radiation, "
-        "but both use_ambient_radiation and use_radiative_coupling are off -- so those parts now "
-        "exchange no heat at all and the graph may be split into thermally isolated islands. "
-        "Enable radiation, or rebuild the graph with a larger --contact-gap-tolerance-mm. "
-        "(At cryogenic temperatures radiation is a poor substitute for contact: 4*sigma*T^3 is "
-        "~0.015 W/m2K at 40 K versus ~3000 W/m2K for a bolted joint.)"
+        f"Contact-gap radiation inactive: the build recorded {len(raw)} interface(s) whose "
+        "conduction was suppressed in favour of radiation, but both use_ambient_radiation and "
+        "use_radiative_coupling are off, so those radiation links carry nothing. This is often "
+        "harmless -- when the builder ran with --contact-detection-distance-mm > 0 the "
+        "near-contact pass re-adds a conduction edge across the same interfaces (it does not "
+        "re-apply the gap test), so the parts still conduct. Confirm with "
+        "analyze_graph_connectivity.py rather than assuming either way; only act if the heaters "
+        "and sensors are genuinely in different connected components. (Radiation is a poor "
+        "substitute for contact at cryogenic temperatures anyway: 4*sigma*T^3 is ~0.015 W/m2K "
+        "at 40 K versus ~3000 W/m2K for a bolted joint.)"
     )
 
 
