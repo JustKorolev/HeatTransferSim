@@ -666,8 +666,11 @@ class NodeProperties:
         return max(0.0, float(self.side_length_m) ** 3)
 
 
-@dataclass
+@dataclass(slots=True)
 class EdgeProperties:
+    # slots: a 3M-cell graph carries ~8.7M edges, so dropping the per-instance
+    # __dict__ saves ~0.4 GiB. No code sets attributes outside these fields
+    # (_edge_geometry only ever getattr()s optional ones with a default).
     source: int
     target: int
     Gij_W_K: float

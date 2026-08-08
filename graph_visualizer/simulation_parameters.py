@@ -123,15 +123,17 @@ class SimulationParameters:
     implicit_sparse_adaptive_target_delta_K: float = 1.0
     implicit_sparse_adaptive_max_substeps: int = 4
     implicit_sparse_residual_check_enabled: bool = True
-    # Regularization + positivity guard for stiff/ill-conditioned cryogenic graphs.
-    # Degenerate near-zero-capacitance cells (thin-shell / oversized-marker mesh
-    # artifacts, ~1e-12 J/K) blow up the stage-matrix condition number, so
-    # jacobi-CG meets its residual tolerance while returning a solution with large
-    # error that overshoots temperatures below zero. Flooring capacitance shrinks
-    # the spread so CG stays accurate; the temperature floor is a final safety net
-    # that keeps any residual solver error from producing a non-physical (negative)
-    # temperature. Set the capacitance floor to 0 to disable regularization.
-    implicit_capacitance_floor_J_K: float = 1.0e-3
+    # Capacitance regularization: floor every cell's C so a degenerate near-zero
+    # capacitance cannot blow up the stage-matrix condition number.
+    #
+    # OFF by default. It was introduced to stop tiny-C cells running away, but that
+    # was a SYMPTOM of the zero-Laplacian bug: with temperature-dependent properties
+    # the engine rebuilt L(T) from model.edges, and the low-memory loader supplied
+    # none, so every cell was thermally isolated and any deposited power diverged.
+    # With conduction restored those cells are coupled and the implicit solver
+    # handles the stiffness, so a floor only adds heat capacity that does not exist.
+    # Still available as an explicit knob for a genuinely pathological graph.
+    implicit_capacitance_floor_J_K: float = 0.0
     # Auto floor: also floor capacitance at max(C)/this, i.e. cap the capacitance
     # ratio (a proxy for the stage-matrix condition number) at this value. Scales
     # to the graph, so it only bites on pathological spreads (5 mm cryo cells,
@@ -140,12 +142,11 @@ class SimulationParameters:
     # max(C)/implicit_capacitance_condition_cap).
     implicit_capacitance_condition_cap: float = 0.0
     implicit_temperature_floor_K: float = 1.0e-3
-    # Optional upper clamp (0 = disabled). Isolated / tiny-capacitance artifact
-    # cells (thin 5 mm shells, stranded nodes with no conduction path) can absorb
-    # heater/conducted energy they cannot shed and run away to thousands of K,
-    # aborting the run -- while the connected body is fine. A ceiling pins those
-    # artifacts without affecting real cells (set it well above the operating
-    # regime, e.g. a few hundred K for a cryostat).
+    # Optional upper clamp (0 = disabled). KEEP IT DISABLED unless you know why you
+    # are enabling it: the runaway "artifact cells" it was written for were cells
+    # made isolated by the zero-Laplacian bug, not real geometry. It discards energy
+    # wherever it binds, so on a correctly-conducting graph it hides physics instead
+    # of fixing it. The step loop now reports how many cells each clamp touches.
     implicit_temperature_ceiling_K: float = 0.0
     use_temperature_dependent_properties: bool = False
     # Evaluate the lagged nonlinear terms (temperature-dependent C/L and

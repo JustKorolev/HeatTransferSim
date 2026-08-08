@@ -72,10 +72,24 @@ def test_auto_floor_leaves_well_conditioned_graph_untouched() -> None:
     assert np.array_equal(out, C)
 
 
-def test_defaults_enable_regularization_and_positivity_floor() -> None:
+def test_capacitance_floor_is_off_by_default() -> None:
+    """The capacitance floor existed to stop tiny-C cells exploding -- a symptom of
+    the zero-Laplacian bug (temperature-dependent properties rebuilt L(T) from an
+    empty edge set, so every cell was thermally isolated and any deposited power
+    ran away). With conduction restored those cells are coupled and the implicit
+    solver handles the stiffness, so the floor only adds heat capacity that does
+    not exist. Off by default; still available as an explicit knob."""
     p = SimulationParameters()
-    assert p.implicit_capacitance_floor_J_K > 0.0
+    assert p.implicit_capacitance_floor_J_K == 0.0
+    assert p.implicit_capacitance_condition_cap == 0.0
+
+
+def test_temperature_floor_stays_on_as_a_positivity_guard() -> None:
+    p = SimulationParameters()
     assert p.implicit_temperature_floor_K > 0.0
     # The temperature floor must sit BELOW any legitimate cryogenic temperature
     # (interior can reach ~4 K) so it only ever catches unphysical negatives.
     assert p.implicit_temperature_floor_K < 4.0
+    # The ceiling was added for "hot spots" that were artifacts of the same bug;
+    # enabling it now would silently discard real energy.
+    assert p.implicit_temperature_ceiling_K == 0.0

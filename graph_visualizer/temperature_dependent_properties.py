@@ -206,35 +206,69 @@ def build_temperature_dependent_operator(
     cp_groups = _groups("cp")
     k_groups = _groups("k")
 
+    # Edge geometry is computed VECTORIZED. The per-edge Python path below
+    # (_edge_geometry / _edge_interface_conductance) allocates several small numpy
+    # arrays per edge, which costs minutes on a multi-million-edge graph -- paid on
+    # every run's startup. One cheap attribute pass to gather flat arrays, then all
+    # of the geometry at once, is equivalent and orders of magnitude faster.
     edge_i: list[int] = []
     edge_j: list[int] = []
-    edge_area: list[float] = []
-    edge_len_i: list[float] = []
-    edge_len_j: list[float] = []
-    edge_h_ref: list[float] = []
+    saved_area_list: list[float] = []
+    distance_list: list[float] = []
+    scalar_rows: list[int] = []  # edges that must use the exact per-edge fallback
     for edge in model.edges.values():
         if _is_visual_role_contact_edge(edge):
             continue
         if edge.source not in index or edge.target not in index:
             continue
-        conductance = max(0.0, float(edge.Gij_W_K))
-        if conductance <= 0.0:
+        if max(0.0, float(edge.Gij_W_K)) <= 0.0:
             continue
         i = index[edge.source]
         j = index[edge.target]
-        node_a = node_by_row[i]
-        node_b = node_by_row[j]
-        area, len_a, len_b = _edge_geometry(node_a, node_b, edge)
-        h_ref = _edge_interface_conductance(node_a, node_b, edge, default_bolted_conductance_W_m2K)
         edge_i.append(i)
         edge_j.append(j)
-        edge_area.append(area)
-        edge_len_i.append(len_a)
-        edge_len_j.append(len_b)
-        edge_h_ref.append(h_ref)
+        saved_area_list.append(float(getattr(edge, "shared_area_m2", 0.0) or 0.0))
+        distance_list.append(float(getattr(edge, "distance_m", 0.0) or 0.0))
+        # Builder-saved conduction lengths / interface conductance are not fields on
+        # EdgeProperties, but a future graph could carry them; such edges fall back
+        # to the exact scalar helpers so behaviour never silently changes.
+        if (
+            getattr(edge, "conduction_length_a_m", None) is not None
+            or getattr(edge, "conduction_length_b_m", None) is not None
+            or getattr(edge, "interface_conductance_W_m2K", None) is not None
+        ):
+            scalar_rows.append(len(edge_i) - 1)
 
     edge_i_arr = np.asarray(edge_i, dtype=int)
     edge_j_arr = np.asarray(edge_j, dtype=int)
+    edge_area, edge_len_i, edge_len_j, edge_h_ref = _vectorized_edge_geometry(
+        node_by_row,
+        edge_i_arr,
+        edge_j_arr,
+        np.asarray(saved_area_list, dtype=float),
+        np.asarray(distance_list, dtype=float),
+        float(default_bolted_conductance_W_m2K),
+    )
+    if scalar_rows:
+        edge_list = [
+            edge
+            for edge in model.edges.values()
+            if not _is_visual_role_contact_edge(edge)
+            and edge.source in index
+            and edge.target in index
+            and max(0.0, float(edge.Gij_W_K)) > 0.0
+        ]
+        for row in scalar_rows:
+            edge = edge_list[row]
+            node_a = node_by_row[edge_i_arr[row]]
+            node_b = node_by_row[edge_j_arr[row]]
+            area, len_a, len_b = _edge_geometry(node_a, node_b, edge)
+            edge_area[row] = area
+            edge_len_i[row] = len_a
+            edge_len_j[row] = len_b
+            edge_h_ref[row] = _edge_interface_conductance(
+                node_a, node_b, edge, default_bolted_conductance_W_m2K
+            )
     diag_index = np.arange(n, dtype=int)
     rows = np.concatenate([edge_i_arr, edge_j_arr, diag_index])
     cols = np.concatenate([edge_j_arr, edge_i_arr, diag_index])
@@ -260,6 +294,85 @@ def build_temperature_dependent_operator(
         _rows=rows,
         _cols=cols,
     )
+
+
+def _vectorized_edge_geometry(
+    node_by_row: list[Any],
+    edge_i: np.ndarray,
+    edge_j: np.ndarray,
+    saved_area_m2: np.ndarray,
+    distance_m: np.ndarray,
+    default_bolted: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """(area, half_length_i, half_length_j, h_ref) for every edge, all at once.
+
+    Exactly mirrors ``_edge_geometry`` + ``_edge_interface_conductance`` for edges
+    whose endpoints both carry ``center_mm``/``size_mm`` (every octree cell), and
+    reproduces their fallbacks elementwise for any that do not.
+    """
+    count = int(edge_i.size)
+    if count == 0:
+        empty = np.zeros(0, dtype=float)
+        return empty, empty.copy(), empty.copy(), empty.copy()
+
+    n = len(node_by_row)
+    centers = np.zeros((n, 3), dtype=float)
+    sizes = np.zeros((n, 3), dtype=float)
+    side = np.zeros(n, dtype=float)
+    has_geometry = np.zeros(n, dtype=bool)
+    components: list[str] = [""] * n
+    for row, node in enumerate(node_by_row):
+        center = getattr(node, "center_mm", None)
+        size = getattr(node, "size_mm", None)
+        if center is not None and size is not None:
+            centers[row] = np.asarray(center, dtype=float)
+            sizes[row] = np.asarray(size, dtype=float)
+            has_geometry[row] = True
+        side[row] = float(getattr(node, "side_length_m", 0.0) or 0.0)
+        components[row] = str(getattr(node, "component_name", "") or "")
+    component_code = np.unique(np.asarray(components, dtype=object).astype(str), return_inverse=True)[1]
+
+    size_i = sizes[edge_i]
+    size_j = sizes[edge_j]
+    # Contact axis: the one with the largest centre separation (ties -> lowest axis,
+    # matching np.argmax in the scalar helper).
+    axis = np.argmax(np.abs(centers[edge_i] - centers[edge_j]), axis=1)
+    rows = np.arange(count)
+    len_i = size_i[rows, axis] * 0.5e-3
+    len_j = size_j[rows, axis] * 0.5e-3
+
+    # Face area on that axis is the product of the OTHER two extents.
+    def face_area(size: np.ndarray) -> np.ndarray:
+        total = size[:, 0] * size[:, 1] * size[:, 2]
+        return total / np.where(size[rows, axis] > 0.0, size[rows, axis], 1.0) * 1.0e-6
+
+    area = np.where(
+        saved_area_m2 > 0.0,
+        saved_area_m2,
+        np.minimum(face_area(size_i), face_area(size_j)),
+    )
+
+    # Endpoints lacking geometry use the legacy distance/2 model.
+    geometric = has_geometry[edge_i] & has_geometry[edge_j]
+    half = 0.5 * distance_m
+    len_i = np.where(geometric, len_i, half)
+    len_j = np.where(geometric, len_j, half)
+    area = np.where(geometric, area, saved_area_m2)
+
+    # Same final fallbacks as the scalar helper, keyed on node_a's side length.
+    side_i = side[edge_i]
+    bad_area = ~(area > 0.0)
+    if bad_area.any():
+        area = np.where(bad_area, np.where(side_i > 0.0, side_i * side_i, 1.0e-9), area)
+    bad_len = ~((len_i > 0.0) & (len_j > 0.0))
+    if bad_len.any():
+        replacement = np.maximum(0.5 * side_i, 1.0e-9)
+        len_i = np.where(bad_len, replacement, len_i)
+        len_j = np.where(bad_len, replacement, len_j)
+
+    # Bonded (same component) => no interface resistance; otherwise bolted.
+    h_ref = np.where(component_code[edge_i] == component_code[edge_j], 0.0, float(default_bolted))
+    return area, len_i, len_j, h_ref
 
 
 def _edge_geometry(node_a: Any, node_b: Any, edge: Any) -> tuple[float, float, float]:

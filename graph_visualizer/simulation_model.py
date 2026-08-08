@@ -917,6 +917,24 @@ class PreparedSimulation:
     # 2**N x the adaptive count (N=8 -> up to 256x) before giving up.
     _MAX_STEP_SUBDIVISIONS = 8
 
+    def _warn_once(self, message: str) -> None:
+        """Append a warning at most once per distinct prefix.
+
+        Step-loop warnings fire every step; appending each one would grow the list
+        without bound over an overnight run. Keyed on the text before the first
+        digit so "clamped 12 cell(s)" and "clamped 3 cell(s)" collapse together.
+        """
+        seen = getattr(self, "_warn_once_keys", None)
+        if seen is None:
+            seen = set()
+            self._warn_once_keys = seen
+        key = message.split(" ")[0:3]
+        key_text = " ".join(key)
+        if key_text in seen:
+            return
+        seen.add(key_text)
+        self.warnings.append(message)
+
     def _physical_step_check_mask(self) -> np.ndarray | None:
         """Boolean mask (over node_ids) of REAL body cells for the step-sanity check.
         Heater/marker nodes are excluded: they carry artificial tiny capacitance and
@@ -1009,10 +1027,35 @@ class PreparedSimulation:
             # neutralized cheaply here, rather than doom-looping the substep retry
             # (which cannot help a constant cooling source anyway). A genuine
             # positive runaway (huge upward jump) still fails the check and subdivides.
+            #
+            # Both clamps DESTROY ENERGY where they bind, so they must never act
+            # silently: a run whose temperatures are being quietly rewritten looks
+            # healthy (energy drift stays small) while modelling something else
+            # entirely. Count the cells each clamp touches and surface it.
             if result is not None and temp_floor > 0.0:
-                result = np.maximum(np.asarray(result, dtype=float), temp_floor)
+                values = np.asarray(result, dtype=float)
+                clamped = int(np.count_nonzero(values < temp_floor))
+                if clamped:
+                    self.clamped_below_floor_cells = (
+                        getattr(self, "clamped_below_floor_cells", 0) + clamped
+                    )
+                    self._warn_once(
+                        f"Temperature floor clamped {clamped} cell(s) up to {temp_floor:g} K; "
+                        "energy is not conserved where this binds."
+                    )
+                result = np.maximum(values, temp_floor)
             if result is not None and temp_ceiling > 0.0:
-                result = np.minimum(np.asarray(result, dtype=float), temp_ceiling)
+                values = np.asarray(result, dtype=float)
+                clamped = int(np.count_nonzero(values > temp_ceiling))
+                if clamped:
+                    self.clamped_above_ceiling_cells = (
+                        getattr(self, "clamped_above_ceiling_cells", 0) + clamped
+                    )
+                    self._warn_once(
+                        f"Temperature ceiling clamped {clamped} cell(s) down to {temp_ceiling:g} K; "
+                        "energy is being discarded where this binds."
+                    )
+                result = np.minimum(values, temp_ceiling)
             if result is not None and bool(np.all(np.isfinite(np.asarray(result, dtype=float)))):
                 best_finite = np.asarray(result, dtype=float)
                 best_backend = (backend_stepper, backend_name) if backend_stepper is not None else None
@@ -3060,6 +3103,7 @@ def _cryocooler_power_vector(
         temperature_weights = np.asarray(device.temperature_weights, dtype=float)
         distribution_weights = np.asarray(device.distribution_weights, dtype=float)
         warning = ""
+        capped_cells = 0  # set by the over-cool cap below when it actually bites
         if len(rows) != len(device.receiving_node_ids) or len(rows) == 0:
             tip_temperature = float("nan")
             base_capacity_w = 0.0
@@ -3108,12 +3152,17 @@ def _cryocooler_power_vector(
             floor_K = float(curve.minimum_temperature_k)
             dt_s = max(float(params.dt_s), 1.0e-12)
             max_removable_w = np.maximum(0.0, capacity_rows * (temperatures[rows_arr] - floor_K) / dt_s)
-            distributed = np.minimum(np.asarray(distributed, dtype=float), max_removable_w)
+            requested = np.asarray(distributed, dtype=float)
+            distributed = np.minimum(requested, max_removable_w)
+            # Report where the cap bit: it discards requested cooling, so a run that
+            # leans on it is not delivering the lift the curve advertises.
+            capped_cells = int(np.count_nonzero(distributed < requested - 1.0e-12))
             for row, cooling_w in zip(rows, distributed):
                 powers[int(row)] += float(cooling_w)
         enabled = bool(params.cryocooler_enabled) and bool(device.enabled)
         diagnostics.append(
             {
+                "cooling_capped_cells": int(capped_cells),
                 "cryocooler_id": str(device.identifier),
                 "source_node_ids": [int(value) for value in device.source_node_ids],
                 "receiving_node_ids": [int(value) for value in device.receiving_node_ids],

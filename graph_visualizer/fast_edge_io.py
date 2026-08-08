@@ -130,9 +130,10 @@ def iter_octree_edges(graph_json_path: str | Path, chunk_bytes: int = 1 << 24):
         in_string = False
         escaped = False
         obj_start = -1
+        index = 0  # cursor into buffer; NEVER re-slice per object (that is O(n^2))
         while True:
-            index = 0
-            while index < len(buffer):
+            size = len(buffer)
+            while index < size:
                 byte = buffer[index]
                 if in_string:
                     if escaped:
@@ -151,15 +152,17 @@ def iter_octree_edges(graph_json_path: str | Path, chunk_bytes: int = 1 << 24):
                     depth -= 1
                     if depth == 0 and obj_start >= 0:
                         yield json.loads(buffer[obj_start:index + 1].decode("utf-8"))
-                        buffer = buffer[index + 1:]
                         obj_start = -1
-                        index = -1  # restart scan on the trimmed buffer
                 elif byte == 0x5D and depth == 0:  # ] closing graph_edges
                     return
                 index += 1
-            if obj_start > 0:
-                buffer = buffer[obj_start:]
+            # Buffer exhausted: drop everything already consumed, keeping only a
+            # partially-read object, then refill. One copy per chunk, not per edge.
+            keep_from = obj_start if obj_start >= 0 else index
+            buffer = buffer[keep_from:]
+            if obj_start >= 0:
                 obj_start = 0
+            index = len(buffer)
             chunk = handle.read(chunk_bytes)
             if not chunk:
                 return

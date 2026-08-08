@@ -111,3 +111,41 @@ def test_tdep_operator_builds_a_real_laplacian_from_restored_edges() -> None:
     off.eliminate_zeros()
     assert off.data.max() < 0.0, "off-diagonals must be -G (negative)"
     assert abs(np.asarray(L.sum(axis=1)).ravel()).max() < 1e-9, "must be conservative"
+
+
+def test_streaming_parser_handles_chunk_boundaries_and_tricky_strings(tmp_path) -> None:
+    """The streaming edge reader must not depend on where read() boundaries fall.
+
+    It also has to survive braces/brackets INSIDE strings (edge warnings are free
+    text) and must stay linear -- an earlier version re-sliced the buffer after
+    every object, which made a 8.7M-edge graph quadratic and effectively hang.
+    """
+    import json as _json
+
+    from graph_visualizer.fast_edge_io import iter_octree_edges
+
+    edges = [
+        {
+            "edge_id": f"edge_{k}",
+            "node_i": k,
+            "node_j": k + 1,
+            "edge_type": "internal_conduction",
+            "G_W_K": 1.0 + k,
+            "shared_area_m2": 1e-4,
+            "distance_m": 5e-3,
+            "contact_confidence": "high",
+            "source": "geometry",
+            # Braces, brackets and an escaped quote inside a string.
+            "warnings": ["{not an object} [not a list] \" quote"] if k % 3 == 0 else [],
+        }
+        for k in range(50)
+    ]
+    path = tmp_path / "graph.json"
+    path.write_text(
+        _json.dumps({"graph_nodes": [{"node_id": 0}], "graph_edges": edges, "after": 1}, indent=2),
+        encoding="utf-8",
+    )
+    # Tiny chunks force object boundaries to straddle reads.
+    for chunk in (16, 64, 4096):
+        got = list(iter_octree_edges(path, chunk_bytes=chunk))
+        assert got == edges, f"chunk_bytes={chunk}"
