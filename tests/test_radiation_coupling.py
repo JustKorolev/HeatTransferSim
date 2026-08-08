@@ -269,7 +269,12 @@ class GapLinksDroppedWarningTest(unittest.TestCase):
         warnings: list[str] = []
         _warn_if_gap_links_dropped(self._model(), off, warnings)
         self.assertEqual(len(warnings), 1)
-        self.assertIn("UNCOUPLED", warnings[0])
+        # The warning must flag that the radiation links carry nothing, WITHOUT
+        # asserting the parts are uncoupled: the near-contact pass usually re-adds
+        # conduction across the same interfaces (measured 162,693/162,693 on
+        # no_mli_high_res), so claiming isolation sends users chasing a non-issue.
+        self.assertIn("carry nothing", warnings[0])
+        self.assertNotIn("exchange no heat at all", warnings[0])
 
     def test_silent_when_radiation_carries_the_gaps(self) -> None:
         from graph_visualizer.simulation_model import _warn_if_gap_links_dropped
