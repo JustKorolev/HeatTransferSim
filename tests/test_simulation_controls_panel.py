@@ -828,6 +828,34 @@ def test_headless_tab_builds_and_uses_the_shared_panel(tmp_path):
         assert getattr(tab, name) is getattr(tab.panel, name), name
 
 
+def test_headless_tab_survives_a_host_whose_status_bar_is_not_built_yet(tmp_path):
+    """The tab is constructed DURING the main window's own _build_layout, so a
+    status raised from __init__ can reach a host whose status widget does not exist
+    yet. That took the whole app down before it opened:
+
+        AttributeError: 'GraphVisualizerApp' object has no attribute 'status_label'
+
+    Showing a status must never be able to do that.
+    """
+    from graph_visualizer.headless_run_tab import HeadlessRunTab
+
+    graph = tmp_path / "graphs" / "demo"
+    graph.mkdir(parents=True)
+    # refresh_graphs only lists folders holding node_ids.npy, and the crash needs a
+    # SELECTED graph (a graph with no sensor manifest is what raised the status).
+    (graph / "node_ids.npy").write_bytes(b"")
+
+    def exploding_status(_message, _is_error):
+        raise AttributeError("'GraphVisualizerApp' object has no attribute 'status_label'")
+
+    tab = HeadlessRunTab(
+        _QtStub, None, on_status=exploding_status, graphs_root=lambda: tmp_path / "graphs"
+    )
+    assert tab.widget is not None
+    # An explicit click still reports, and still must not propagate.
+    tab.load_sensor_setpoints(announce=True)
+
+
 def test_headless_tab_lists_graphs_without_loading_them(tmp_path):
     root = tmp_path / "graphs"
     (root / "assembly").mkdir(parents=True)

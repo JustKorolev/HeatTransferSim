@@ -186,7 +186,7 @@ class HeadlessRunTab:
         setpoint_layout.addWidget(self.setpoint_table, 1)
         setpoint_buttons = self.QtWidgets.QHBoxLayout()
         for label, slot in (
-            ("Load sensors", self.load_sensor_setpoints),
+            ("Load sensors", lambda: self.load_sensor_setpoints(announce=True)),
             ("Set all", self.apply_setpoint_to_all_sensors),
             ("Clear", self.clear_setpoint_overrides),
         ):
@@ -423,8 +423,14 @@ class HeadlessRunTab:
                 return rows
         return []
 
-    def load_sensor_setpoints(self) -> None:
-        """Fill the table from the newest run's sensor manifest."""
+    def load_sensor_setpoints(self, announce: bool = False) -> None:
+        """Fill the table from the newest run's sensor manifest.
+
+        ``announce`` reports an empty result to the status bar. It stays False for
+        the automatic refresh on graph change, which happens while this tab is being
+        constructed inside the main window's own layout pass -- the host's status
+        widget may not exist yet, and "no manifest" is not news the user asked for.
+        """
         folder = self._selected_folder()
         table = getattr(self, "setpoint_table", None)
         if table is None:
@@ -442,7 +448,7 @@ class HeadlessRunTab:
             table.setItem(index, 0, item)
             # Blank means "use the global setpoint"; only edited rows override.
             table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(""))
-        if not rows and folder is not None:
+        if announce and not rows and folder is not None:
             self._status(
                 f"No sensor manifest found for {folder.name}. Run once (any duration) so "
                 "the run writes sensors.csv, then load again.",
@@ -826,5 +832,14 @@ class HeadlessRunTab:
                 self.log_view.appendPlainText(line.rstrip())
 
     def _status(self, message: str, is_error: bool) -> None:
-        if self.on_status is not None:
+        if self.on_status is None:
+            return
+        try:
             self.on_status(message, is_error)
+        except Exception as exc:  # noqa: BLE001
+            # This tab is constructed DURING the main window's _build_layout, so a
+            # status raised from __init__ can reach a host whose status widget does
+            # not exist yet (AttributeError: no attribute 'status_label') and take
+            # the whole app down before it opens. Showing a status must never be
+            # able to do that.
+            log_event("headless tab status unavailable", error=repr(exc), status_text=message)
