@@ -441,6 +441,7 @@ class _QtWidgets:
     QComboBox = QComboBox
     QSlider = QSlider
     QTableWidget = QTableWidget
+    QTableWidgetItem = QTableWidgetItem
     QTreeWidget = QTreeWidget
     QGroupBox = QGroupBox
     QFormLayout = QFormLayout
@@ -465,6 +466,10 @@ class _Qt:
     Horizontal = "horizontal"
     AlignTop = 1
     AlignLeft = 2
+    # Item flags: the headless tab makes the sensor-name column read-only.
+    ItemIsEnabled = 32
+    ItemIsSelectable = 1
+    ItemIsEditable = 2
 
 
 class _QtCore:

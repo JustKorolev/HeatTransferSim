@@ -291,19 +291,44 @@ class HeadlessRunTab:
         self._status(f"Run will start every cell at {value:g} K.", False)
 
     def _randomize_setpoints(self) -> None:
-        """The sim tab assigns each sensor a random setpoint on the loaded model.
-        The headless subprocess only takes one constant ``--setpoint`` for all
-        sensors, so this draws one value from center +/- spread and applies it to
-        the whole run. Per-sensor randomization needs the graph loaded (which this
-        tab deliberately never does)."""
+        """Give every sensor its own target drawn from center +/- spread.
+
+        This matches the simulation tab, which randomizes per sensor on the loaded
+        model. Here the draw fills the per-sensor table, so each sensor gets an
+        INDEPENDENT value rather than the whole run sharing one -- the point of
+        randomizing is the spread between sensors, and a single shared value has
+        none. The global setpoint is set to the centre so any sensor missing from
+        the table still has a sensible baseline.
+
+        With no sensor manifest loaded there is nothing to spread across, so it
+        falls back to one drawn value for the run and says so.
+        """
         center = float(self.sensor_random_center_spin.value())
         spread_K = float(self.sensor_random_spread_mK_spin.value()) * 1.0e-3
+        table = getattr(self, "setpoint_table", None)
+        rows = getattr(self, "_sensor_rows_manifest", None) or []
+        if table is not None and rows:
+            drawn: list[float] = []
+            for index in range(len(rows)):
+                value = center + random.uniform(-spread_K, spread_K)
+                drawn.append(value)
+                table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(f"{value:.6g}"))
+            self.setpoint_spin.setValue(center)
+            self.use_setpoint.setChecked(True)
+            self._status(
+                f"Randomized {len(drawn)} sensor setpoints around {center:g} K "
+                f"+/- {spread_K * 1.0e3:g} mK "
+                f"(actual span {min(drawn):g} to {max(drawn):g} K).",
+                False,
+            )
+            return
         value = center + random.uniform(-spread_K, spread_K)
         self.setpoint_spin.setValue(value)
         self.use_setpoint.setChecked(True)
         self._status(
-            f"Run setpoint randomized to {value:g} K "
-            f"(one value for all sensors; per-sensor needs the graph loaded).",
+            f"Run setpoint randomized to {value:g} K -- one value for the whole run, "
+            "because no sensor list is loaded. Press 'Load sensors' to randomize each "
+            "sensor separately.",
             False,
         )
 

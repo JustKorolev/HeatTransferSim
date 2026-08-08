@@ -16,6 +16,8 @@ import json
 import subprocess
 import sys
 import types
+
+import pytest
 from pathlib import Path
 
 for _name in ("PySide6", "PySide6.QtCore", "PySide6.QtWidgets", "PySide6.QtGui"):
@@ -107,3 +109,64 @@ def test_cli_rejects_a_malformed_setpoints_file(tmp_path) -> None:
     )
     assert result.returncode != 0
     assert "must contain a JSON object" in (result.stdout + result.stderr)
+
+
+def _tab_with_sensors(tmp_path, monkeypatch, count: int):
+    """A tab whose per-sensor table is populated, built on the panel's Qt stubs."""
+    import test_simulation_controls_panel as panel_stubs
+
+    graph = tmp_path / "graphs" / "g"
+    graph.mkdir(parents=True)
+    (graph / "node_ids.npy").write_bytes(b"")
+    _manifest(tmp_path, "g", "20260807-000000",
+              [(1000 + i, f"COO_{i}", i % 3 == 0) for i in range(count)])
+    monkeypatch.setattr(
+        HeadlessRunTab, "simulations_root", lambda self: tmp_path / "simulations"
+    )
+    tab = HeadlessRunTab(panel_stubs._QtStub, None, graphs_root=lambda: tmp_path / "graphs")
+    tab.load_sensor_setpoints()
+    return tab
+
+
+def test_randomize_gives_every_sensor_its_own_target(tmp_path, monkeypatch) -> None:
+    """The point of randomizing is the spread BETWEEN sensors; one shared value has
+    none. Each row must get an independent draw from centre +/- spread."""
+    tab = _tab_with_sensors(tmp_path, monkeypatch, 40)
+    tab.sensor_random_center_spin.setValue(50.0)
+    tab.sensor_random_spread_mK_spin.setValue(1000.0)  # +/- 1 K
+    tab._randomize_setpoints()
+
+    overrides = tab.collect_setpoint_overrides()
+    assert len(overrides) == 40, "every sensor must get a value"
+    values = list(overrides.values())
+    assert len(set(values)) > 1, "values must differ between sensors"
+    assert all(49.0 <= v <= 51.0 for v in values), f"outside centre +/- spread: {values}"
+    # The global setpoint becomes the centre, the baseline for anything unlisted.
+    assert tab.setpoint_spin.value() == pytest.approx(50.0)
+    assert tab.use_setpoint.isChecked() is True
+
+
+def test_zero_spread_makes_every_sensor_identical(tmp_path, monkeypatch) -> None:
+    tab = _tab_with_sensors(tmp_path, monkeypatch, 12)
+    tab.sensor_random_center_spin.setValue(50.0)
+    tab.sensor_random_spread_mK_spin.setValue(0.0)
+    tab._randomize_setpoints()
+    assert set(tab.collect_setpoint_overrides().values()) == {50.0}
+
+
+def test_randomize_without_a_sensor_list_falls_back_to_one_value(tmp_path, monkeypatch) -> None:
+    """No manifest means nothing to spread across, so the run gets a single value."""
+    import test_simulation_controls_panel as panel_stubs
+
+    graph = tmp_path / "graphs" / "g"
+    graph.mkdir(parents=True)
+    (graph / "node_ids.npy").write_bytes(b"")
+    monkeypatch.setattr(
+        HeadlessRunTab, "simulations_root", lambda self: tmp_path / "simulations"
+    )
+    tab = HeadlessRunTab(panel_stubs._QtStub, None, graphs_root=lambda: tmp_path / "graphs")
+    tab.sensor_random_center_spin.setValue(50.0)
+    tab.sensor_random_spread_mK_spin.setValue(0.0)
+    tab._randomize_setpoints()
+    assert tab.collect_setpoint_overrides() == {}
+    assert tab.setpoint_spin.value() == pytest.approx(50.0)
