@@ -138,7 +138,37 @@ class TemperatureDependentOperator:
         np.add.at(diag, self.edge_i, g)
         np.add.at(diag, self.edge_j, g)
         data = np.concatenate([-g, -g, diag])
-        return coo_matrix((data, (self._rows, self._cols)), shape=(self.n, self.n)).tocsr()
+        # The sparsity pattern is FIXED -- only the values change with temperature.
+        # Rebuilding the COO and converting it every step allocated ~0.5 GB of
+        # transient index/data arrays per step (int64 row/col pairs plus a fresh
+        # CSR) and ran coo_tocsr over 20M entries, on top of an 18.5 GiB resident
+        # model. Build the structure once, then reorder the values into it.
+        order = getattr(self, "_csr_order", None)
+        if order is None:
+            positions = coo_matrix(
+                (np.arange(1, data.size + 1, dtype=float), (self._rows, self._cols)),
+                shape=(self.n, self.n),
+            ).tocsr()
+            if positions.nnz == data.size:
+                # 1:1 COO->CSR (no coincident entries), so the permutation is exact.
+                self._csr_order = positions.data.astype(np.intp) - 1
+                self._csr_indices = positions.indices
+                self._csr_indptr = positions.indptr
+            else:
+                # Coincident entries would have to be summed; keep the exact path.
+                self._csr_order = False
+            order = self._csr_order
+        if order is False:
+            return coo_matrix((data, (self._rows, self._cols)), shape=(self.n, self.n)).tocsr()
+        # A FRESH data array every call: callers legitimately hold two Laplacians at
+        # once (e.g. comparing cold vs warm conductance), so returning a reused
+        # buffer would silently make them the same matrix. The index arrays are
+        # immutable here and shared, so only the values are allocated.
+        return csr_matrix(
+            (np.take(data, order), self._csr_indices, self._csr_indptr),
+            shape=(self.n, self.n),
+            copy=False,
+        )
 
     def rebuild(self, temperatures_K: np.ndarray) -> tuple[np.ndarray, np.ndarray, csr_matrix]:
         C = self.capacitance(temperatures_K)

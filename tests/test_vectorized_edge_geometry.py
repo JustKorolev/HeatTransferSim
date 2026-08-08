@@ -99,3 +99,71 @@ def test_operator_still_conducts_and_conserves() -> None:
     L = operator.laplacian(np.full(node_ids.size, 40.0))
     assert L.nnz > 0
     assert abs(np.asarray(L.sum(axis=1)).ravel()).max() < 1e-9
+
+
+def _chain_operator(n: int):
+    """Minimal operator with the same fixed-pattern structure the real one has."""
+    from graph_visualizer.temperature_dependent_properties import (
+        TemperatureDependentOperator,
+    )
+
+    m = n - 1
+    op = TemperatureDependentOperator.__new__(TemperatureDependentOperator)
+    op.n = n
+    op.copper_rrr = 100
+    op.contact_temp_exponent = 1.0
+    op.contact_reference_temperature_K = 293.15
+    op.edge_i = np.arange(m)
+    op.edge_j = np.arange(1, n)
+    op.edge_area_m2 = np.full(m, 2.5e-5)
+    op.edge_len_i_m = np.full(m, 2.5e-3)
+    op.edge_len_j_m = np.full(m, 2.5e-3)
+    op.edge_h_ref = np.where(np.arange(m) % 3 == 0, 3000.0, 0.0)
+    op.k_groups = {}
+    op.k0 = np.full(n, 400.0)
+    op._rows = np.concatenate([op.edge_i, op.edge_j, np.arange(n)])
+    op._cols = np.concatenate([op.edge_j, op.edge_i, np.arange(n)])
+    return op
+
+
+def _exact_laplacian(op, temperatures):
+    from scipy.sparse import coo_matrix
+
+    g = np.maximum(0.0, op.edge_conductance(temperatures))
+    diag = np.zeros(op.n)
+    np.add.at(diag, op.edge_i, g)
+    np.add.at(diag, op.edge_j, g)
+    return coo_matrix(
+        (np.concatenate([-g, -g, diag]), (op._rows, op._cols)), shape=(op.n, op.n)
+    ).tocsr()
+
+
+def test_cached_csr_structure_matches_the_exact_rebuild() -> None:
+    """L(T)'s sparsity is fixed, so the structure is built once and only the values
+    are reordered into it. That must stay bit-identical to rebuilding the COO --
+    including at the ~4900 K hot spots this graph produces."""
+    op = _chain_operator(5000)
+    for value in (5.0, 40.15, 120.0, 4914.0):
+        temperatures = np.full(op.n, value)
+        got = op.laplacian(temperatures)
+        want = _exact_laplacian(op, temperatures)
+        assert got.nnz == want.nnz
+        difference = got - want
+        assert (difference.nnz == 0) or abs(difference).max() == 0.0, f"T={value}"
+
+
+def test_two_laplacians_held_at_once_stay_distinct() -> None:
+    """Callers legitimately hold two results and compare them (cold vs warm
+    conductance). Sharing one reused buffer would silently make them equal, so each
+    call must own its values even though the index arrays are shared."""
+    op = _chain_operator(2000)
+    cold = op.laplacian(np.full(op.n, 40.0))
+    hot = op.laplacian(np.full(op.n, 400.0))
+    assert abs(cold - hot).max() > 0.0, "second rebuild overwrote the first"
+    assert abs(op.laplacian(np.full(op.n, 40.0)) - cold).max() == 0.0
+
+
+def test_rebuilt_laplacian_stays_conservative() -> None:
+    op = _chain_operator(3000)
+    L = op.laplacian(np.full(op.n, 40.15))
+    assert abs(np.asarray(L.sum(axis=1)).ravel()).max() < 1e-9
