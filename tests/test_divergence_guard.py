@@ -73,3 +73,41 @@ def test_abort_threshold_is_enabled_by_default() -> None:
     thr = runner.cfg.thresholds
     assert thr.energy_drift_abort_steps > 0
     assert thr.energy_drift_abort_rel >= 0.5  # only genuine, gross divergence
+
+
+class _RampPrepared:
+    """Reports a net power that CHANGES every step, like a live controller."""
+
+    def __init__(self, powers):
+        self._powers = list(powers)
+        self._i = 0
+
+    def power_balance_W(self) -> dict:
+        value = self._powers[min(self._i, len(self._powers) - 1)]
+        self._i += 1
+        return {"heater_W": value, "cryocooler_W": 0.0, "radiation_W": 0.0, "net_W": value}
+
+    def heater_actuator_power_by_node(self) -> dict:
+        return {}
+
+
+def test_drift_compares_against_the_power_that_drove_the_step() -> None:
+    """_collect runs AFTER the step, so power_balance_W() reflects the new state --
+    the power for the NEXT step. Comparing it to the ΔT just taken manufactured a
+    steady ~0.13 "drift" on a run that conserved energy fine."""
+    runner = _runner()
+    thr = runner.cfg.thresholds
+    # Each step's ΔT is produced by the PREVIOUS sample's power (C=1, dt=1).
+    powers = [100.0, 150.0, 90.0, 140.0, 95.0, 145.0]
+    prepared = _RampPrepared(powers)
+    temps = np.zeros(2)
+    for step, driving in enumerate([None] + powers[:-1]):
+        prev = temps.copy()
+        if driving is not None:
+            temps = prev + np.array([driving / 2.0, driving / 2.0])  # dU/dt == driving
+        runner._collect(prepared, _State(float(step), temps), temps, prev, 1.0,
+                        np.ones(2), [], np.array([]), [], [], thr)
+    drift = runner._series.get("energy_drift_rel", [])
+    assert drift, "drift series must be populated"
+    # Every recorded step conserved energy exactly -> drift ~0, not ~0.13.
+    assert max(drift) < 1e-9, f"off-by-one reintroduced: {drift}"

@@ -1089,15 +1089,26 @@ class SimulationRunner:
             C_eff = np.where(inv_C > 0.0, 1.0 / np.where(inv_C > 0.0, inv_C, 1.0), C_diag)
         else:
             C_eff = C_diag
+        # Compare dU/dt against the power that DROVE this step, i.e. the balance
+        # sampled at the previous call. _collect runs after the step, so
+        # power_balance_W() above reflects the new state -- the power that will
+        # drive the NEXT step. Comparing it to the ΔT just taken is an off-by-one:
+        # with a controller whose command moves ~20 W between steps it manufactured
+        # a steady "drift" of ~0.1-0.28 on a run that conserved energy fine. Keep
+        # the current sample for the next call.
+        driving_net_W = getattr(self, "_prev_net_W", net_W)
+        self._prev_net_W = net_W
         if dt > 0 and prev.shape == temps.shape and C_eff.shape == temps.shape and len(s["time_s"]) > 2:
             dU_dt = float(np.dot(C_eff, temps - prev) / dt)
-            scale = max(abs(net_W), abs(dU_dt), 1.0)
-            drift = abs(net_W - dU_dt) / scale if np.isfinite(net_W) else float("nan")
+            scale = max(abs(driving_net_W), abs(dU_dt), 1.0)
+            drift = (
+                abs(driving_net_W - dU_dt) / scale if np.isfinite(driving_net_W) else float("nan")
+            )
             s.setdefault("energy_drift_rel", []).append(float(drift))
             if np.isfinite(drift) and drift > thr.energy_drift_rel_tol:
                 self._log_event(
                     "energy_drift",
-                    f"t={state.time_s:.1f}s drift={drift:.3f} (net={net_W:.3g}W dU/dt={dU_dt:.3g}W)",
+                    f"t={state.time_s:.1f}s drift={drift:.3f} (driving net={driving_net_W:.3g}W dU/dt={dU_dt:.3g}W)",
                 )
             # Sustained gross drift = the solve is diverging (energy created/lost from
             # nowhere); track a run of it so the loop can abort fast.
