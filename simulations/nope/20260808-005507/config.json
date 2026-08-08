@@ -1,0 +1,37 @@
+{
+  "graph_folder": "C:\\Users\\andre\\AppData\\Local\\Temp\\pytest-of-andre\\pytest-65\\test_cli_applies_per_sensor_se0\\nope",
+  "output_root": "simulations",
+  "run_dir": null,
+  "controller_path": null,
+  "allow_no_controller": false,
+  "setpoints_K": {
+    "11": 42.5,
+    "12": 61.0
+  },
+  "global_setpoint_K": 50.0,
+  "dt_s": 1.0,
+  "t_final_s": 3600.0,
+  "gpu_solver_enabled": true,
+  "params": null,
+  "initial_temperature_uniform_K": null,
+  "log_interval_steps": 1,
+  "snapshot_interval_s": 300.0,
+  "checkpoint_interval_s": 600.0,
+  "status_interval_steps": 20,
+  "low_memory_load": true,
+  "history_limit": 1,
+  "max_logged_sensors": 32,
+  "seed": 0,
+  "notes": "",
+  "thresholds": {
+    "max_temperature_K": 10000.0,
+    "min_temperature_K": 0.0,
+    "max_temperature_rate_K_per_s": 500.0,
+    "energy_drift_rel_tol": 0.1,
+    "energy_drift_abort_rel": 0.9,
+    "energy_drift_abort_steps": 20,
+    "forbid_negative_heater_power": true,
+    "max_dt_retries": 6,
+    "step_wall_timeout_s": 0.0
+  }
+}

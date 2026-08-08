@@ -73,6 +73,9 @@ class _Widget:
     def setMaximumHeight(self, _value) -> None:
         pass
 
+    def setMinimumHeight(self, _value) -> None:
+        pass
+
     def setSizePolicy(self, *_args) -> None:
         pass
 
@@ -256,11 +259,47 @@ class QTableWidget(_Widget):
     def verticalHeader(self):
         return _Widget()
 
+    def horizontalHeader(self):
+        return _Header()
+
     def setEditTriggers(self, _value) -> None:
         pass
 
     def setSelectionBehavior(self, _value) -> None:
         pass
+
+    # Enough of the cell model for the headless tab's per-sensor setpoint table.
+    def setRowCount(self, count: int) -> None:
+        self._cells = {}
+        self._rows = int(count)
+
+    def rowCount(self) -> int:
+        return int(getattr(self, "_rows", 0))
+
+    def setItem(self, row: int, column: int, item) -> None:
+        if not hasattr(self, "_cells"):
+            self._cells = {}
+        self._cells[(int(row), int(column))] = item
+
+    def item(self, row: int, column: int):
+        return getattr(self, "_cells", {}).get((int(row), int(column)))
+
+
+class _Header(_Widget):
+    def setStretchLastSection(self, _value) -> None:
+        pass
+
+
+class QTableWidgetItem:
+    def __init__(self, text: str = "") -> None:
+        self._text = str(text)
+        self._flags = 0
+
+    def text(self) -> str:
+        return self._text
+
+    def setFlags(self, flags) -> None:
+        self._flags = flags
 
 
 class QTreeWidget(_Widget):
@@ -311,6 +350,11 @@ class QHBoxLayout:
 
     def addWidget(self, widget, *_args) -> None:
         self.widgets.append(widget)
+
+    def addLayout(self, layout, *_args) -> None:
+        # Nested layouts contribute their widgets, so assertions that walk
+        # ``widgets`` still see buttons placed in a sub-row.
+        self.widgets.extend(getattr(layout, "widgets", []))
 
     def addStretch(self, *_args) -> None:
         pass
