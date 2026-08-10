@@ -32,11 +32,47 @@ from scipy.sparse.linalg import eigsh, splu
 
 
 # Grounding conductance (W/K) applied at cryocooler cells when forming the DC-gain
-# operator: large enough to pin them near their operating temperature (a fixed-T /
-# "the cryocooler holds the cold tip" assumption), so the DC gain becomes the pure
-# conduction resistance from each heater to the cold sink. Far above any graph
-# edge conductance (~<=15 W/K), so it dominates without ill-conditioning splu.
-CRYOCOOLER_DC_GROUND_W_K = 1.0e3
+# operator, so the otherwise-singular pure-conduction Laplacian has a sink.
+#
+# This used to be 1.0e3 W/K -- an "infinitely stiff cold tip" idealization. That is
+# ~1000x stiffer than a real PT60, whose lift curve slope dQ/dT is only ~1.07 W/K at
+# 50 K, and it has a specific, damaging consequence: a heater mounted ON the
+# cryocooler block gets a DC gain of ~27/1e3 = 0.027 K/W instead of the ~5 K/W a
+# normal heater sees. The controller then believes heat dumped there is nearly free
+# and parks power into it. On no_mli_high_res two such heaters (2988217, 2988222)
+# held 73% of the terminal command and absorbed 53% of all energy injected, which
+# was almost exactly the run's net heat imbalance. They also accounted for the
+# entire dc_gain condition number (779; ~62 without them).
+#
+# The default is now derived from the cooler's ACTUAL stiffness at the operating
+# point (see cryocooler_ground_conductance_W_K). Setting it explicitly overrides
+# that; 1.0e3 restores the old fixed-tip behaviour.
+CRYOCOOLER_DC_GROUND_W_K = 1.0e3  # legacy fixed-tip value, kept for explicit opt-in
+
+
+def cryocooler_ground_conductance_W_K(
+    operating_temperature_K: float,
+    *,
+    max_power_w: float = 150.0,
+    capacity_scale: float = 1.0,
+    delta_K: float = 1.0,
+) -> float:
+    """Total DC grounding conductance from the cooler's own lift curve.
+
+    The physically meaningful stiffness of the sink is dQ/dT at the operating
+    point: warm the cold end by 1 K and the cooler removes this many more watts.
+    For a PT60 at 50 K that is ~1.07 W/K, not 1000. Returned as a TOTAL for the
+    device; the caller spreads it across the cryocooler cells.
+    """
+    from .cryocooler import PT60LiftCurve
+
+    curve = PT60LiftCurve(max_power_w=float(max_power_w), capacity_scale=float(capacity_scale))
+    T = float(operating_temperature_K)
+    half = max(1.0e-6, 0.5 * float(delta_K))
+    slope = (curve.cooling_capacity_w(T + half) - curve.cooling_capacity_w(T - half)) / (2.0 * half)
+    # Below the curve's floor the cooler has no authority; fall back to a small
+    # positive value so the DC operator stays non-singular.
+    return float(max(slope, 1.0e-3))
 
 
 # ------------------------------------------------------------------ reduction primitives
@@ -424,13 +460,27 @@ def design_modal_controller(
     # controller's integral. Fall back to radiation grounding only if the graph has
     # no cryocooler cells (otherwise pure conduction L is singular).
     main_node_ids = np.asarray(node_ids, dtype=int)[main_rows]
-    cryo_ground = np.array(
-        [
-            CRYOCOOLER_DC_GROUND_W_K if bool(getattr(model.nodes.get(int(v)), "has_cryocooler", False)) else 0.0
-            for v in main_node_ids
-        ],
-        dtype=float,
+    is_cryo = np.array(
+        [bool(getattr(model.nodes.get(int(v)), "has_cryocooler", False)) for v in main_node_ids],
+        dtype=bool,
     )
+    # Ground with the cooler's OWN stiffness (dQ/dT at T_op), spread across its
+    # cells, rather than a 1000 W/K fixed-tip idealization. The idealization gave a
+    # heater mounted on the cold block a DC gain ~170x smaller than a normal
+    # heater's, so the controller treated dumping power there as free. Spreading the
+    # total keeps the whole-device stiffness physical regardless of cell count.
+    cryo_cell_count = int(is_cryo.sum())
+    if cryo_cell_count:
+        total_ground = cryocooler_ground_conductance_W_K(float(T_op_K))
+        per_cell = total_ground / float(cryo_cell_count)
+        _report(
+            progress,
+            f"DC grounding: {total_ground:.4g} W/K total over {cryo_cell_count} cryocooler cells "
+            f"({per_cell:.4g} W/K each) from the lift-curve slope at T_op={float(T_op_K):g} K.",
+        )
+    else:
+        per_cell = 0.0
+    cryo_ground = np.where(is_cryo, per_cell, 0.0)
     if float(cryo_ground.sum()) > 0.0:
         L_dc = (csr_matrix(Lm) + diags(cryo_ground)).tocsr()
         dc_ground = "cryocooler"

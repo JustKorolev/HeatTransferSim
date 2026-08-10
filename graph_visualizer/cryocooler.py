@@ -7,6 +7,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from .matrix_builder import _is_visual_role_contact_edge
 from .models import ThermalGraphModel
 
 
@@ -257,6 +258,23 @@ def _receiving_nodes_for_device(
         if other_id not in simulation_ids or other_id not in model.nodes:
             continue
         edge = model.edges[key]
+        # A CAD role marker is a VISUAL annotation: its edges carry G = 0 W/K and
+        # exchange no heat. They must never count as a cooling interface. They used
+        # to, because source_metadata is "cad_role_node_contact" and the check below
+        # is a substring test for "contact" -- so markers were promoted to explicit
+        # interfaces, took the majority of the contact-area weight, dragged the tip
+        # temperature the lift curve is evaluated at far below the real cold tip,
+        # and then had their share of the cooling applied to nodes that conduct
+        # nowhere. On no_mli_high_res that delivered 2.9 W of an available 30.2 W.
+        if _is_visual_role_contact_edge(edge):
+            continue
+        # Likewise a genuinely non-conducting edge: cooling routed through it is
+        # discarded, so it is not an interface no matter what it is called.
+        try:
+            if not (float(getattr(edge, "Gij_W_K", 0.0)) > 0.0):
+                continue
+        except (TypeError, ValueError):
+            continue
         edge_text = f"{getattr(edge, 'edge_type', '')} {getattr(edge, 'source_metadata', '')}".lower()
         other_component = str(getattr(model.nodes[other_id], "component_name", "") or "").strip()
         is_explicit_interface = "contact" in edge_text or "interface" in edge_text
