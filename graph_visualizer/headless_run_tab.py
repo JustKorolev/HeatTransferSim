@@ -60,6 +60,8 @@ class HeadlessRunTab:
         self._stop_requested = False
         self._refresh_process: subprocess.Popen | None = None
         self._refresh_folder: Path | None = None
+        self._modal_build_process: subprocess.Popen | None = None
+        self._modal_build_folder: Path | None = None
         self._log_size = 0
         self._params_source = "defaults"
         self._pending_log_note = ""
@@ -134,6 +136,22 @@ class HeadlessRunTab:
         resume_row.addWidget(self.resume_combo, 1)
         resume_row.addWidget(resume_refresh)
         form.addRow("resume", resume_row)
+        # Building a controller from the simulation tab needs the graph loaded into
+        # the GUI (~45 GB for a 3M-cell graph, plus an splu of the 3M x 3M DC
+        # operator on top). This runs the same design off the fast-load artifacts in
+        # a separate process at ~20 GB, so it fits and survives a dropped remote
+        # session. The controller list refreshes when it finishes.
+        self.build_controller_button = self.QtWidgets.QPushButton("Build modal controller")
+        self.build_controller_button.setToolTip(
+            "Design a modal-LQR controller for the selected graph in a SEPARATE process, "
+            "WITHOUT loading graph.json into this window.\n\n"
+            "Uses the fast-load artifacts, so 'Update graph' must have been run first. "
+            "An existing artifact with the same descriptors is backed up rather than "
+            "silently overwritten.\n\n"
+            "Progress goes to build_modal_controller.log in the graph folder."
+        )
+        self.build_controller_button.clicked.connect(self.build_modal_controller)
+        form.addRow(self.build_controller_button)
         self.notes_edit = self.QtWidgets.QLineEdit()
         self.notes_edit.setPlaceholderText("optional note stored with the run")
         form.addRow("notes", self.notes_edit)
@@ -422,6 +440,61 @@ class HeadlessRunTab:
             f"parameters: {self._params_source}\n"
             f"{self._fast_load_status(folder)}"
         )
+
+    # -- modal controller build (separate process, no graph in this window) --- #
+    def build_modal_controller(self) -> None:
+        if self._modal_build_process is not None and self._modal_build_process.poll() is None:
+            self._status("A modal controller build is already running.", True)
+            return
+        folder = self._selected_folder()
+        if folder is None:
+            self._status("Select a graph first.", True)
+            return
+        from .fast_graph_io import can_load_fast, launch_modal_build_subprocess
+
+        usable, reason = can_load_fast(folder)
+        if not usable:
+            self._status(
+                f"Cannot build without the fast-load artifacts ({reason}). Press "
+                "'Update graph' first -- the alternative is the graph.json loader, which "
+                "needs roughly 45 GB on a graph this size.",
+                True,
+            )
+            return
+        # The design runs at the panel's operating point, so the artifact matches the
+        # regime the run will use rather than a stale default.
+        setpoint = float(self.setpoint_spin.value()) if self.use_setpoint.isChecked() else 50.0
+        try:
+            self._modal_build_process = launch_modal_build_subprocess(folder, t_op_K=setpoint)
+        except Exception as exc:  # noqa: BLE001
+            self._status(f"Could not start the controller build: {exc}", True)
+            return
+        self._modal_build_folder = folder
+        self.build_controller_button.setEnabled(False)
+        self._status(
+            f"Building a modal controller for {folder.name} at T_op={setpoint:g} K "
+            "(separate process; this window stays responsive). Progress: "
+            "build_modal_controller.log in the graph folder.",
+            False,
+        )
+
+    def _poll_modal_build(self) -> None:
+        proc = getattr(self, "_modal_build_process", None)
+        if proc is None or proc.poll() is None:
+            return
+        code = proc.returncode
+        folder = self._modal_build_folder
+        self._modal_build_process = None
+        self.build_controller_button.setEnabled(True)
+        from .fast_graph_io import MODAL_BUILD_LOG_FILENAME
+
+        log = (folder / MODAL_BUILD_LOG_FILENAME) if folder is not None else "the graph folder"
+        if code == 0 and folder is not None:
+            # Repopulate the controller list so the new artifact is selectable.
+            self._handle_graph_changed()
+            self._status(f"Modal controller built; see {log}.", False)
+        else:
+            self._status(f"Modal controller build failed (exit {code}); see {log}.", True)
 
     # -- per-sensor setpoints ------------------------------------------------ #
     def sensor_manifest(self, graph_name: str) -> list[dict[str, str]]:
@@ -797,6 +870,7 @@ class HeadlessRunTab:
     # -- monitoring (reads the run's own artifacts) ------------------------- #
     def _poll(self) -> None:
         self._poll_refresh()
+        self._poll_modal_build()
         if self.run_dir is None:
             return
         self._tail_log()

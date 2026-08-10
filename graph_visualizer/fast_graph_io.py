@@ -233,6 +233,55 @@ def edges_only_refresh_is_enough(folder: str | Path) -> bool:
     return (folder / "L_sparse.npz").exists() or (folder / "L_sparse.json").exists()
 
 
+MODAL_BUILD_LOG_FILENAME = "build_modal_controller.log"
+
+
+def launch_modal_build_subprocess(
+    folder: str | Path,
+    *,
+    t_op_K: float = 50.0,
+    n_modes: int = 140,
+    order: int = 50,
+    effort: float = 0.2,
+    integral_gain: float = 0.06,
+) -> "subprocess.Popen":
+    """Start ``build_modal_controller.py`` on ``folder`` in a SEPARATE process.
+
+    The simulation tab designs controllers from a graph held in the GUI process,
+    which for a 3M-cell graph means ~45 GB for graph.json plus an splu of the
+    3M x 3M DC operator on top. This runs the same design off the fast-load
+    artifacts at ~20 GB, detached, so it survives losing a remote session. Output
+    goes to ``<folder>/build_modal_controller.log``.
+    """
+    import subprocess
+
+    folder = Path(folder)
+    script = Path(__file__).resolve().parent.parent / "build_modal_controller.py"
+    log_path = folder / MODAL_BUILD_LOG_FILENAME
+    log_handle = log_path.open("w", encoding="utf-8")
+    command = [
+        sys.executable,
+        str(script),
+        str(folder),
+        "--t-op", f"{float(t_op_K):g}",
+        "--modes", str(int(n_modes)),
+        "--order", str(int(order)),
+        "--effort", f"{float(effort):g}",
+        "--integral", f"{float(integral_gain):g}",
+    ]
+    try:
+        proc = subprocess.Popen(  # noqa: S603
+            command,
+            cwd=str(script.parent),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    finally:
+        log_handle.close()
+    return proc
+
+
 def launch_refresh_subprocess(
     folder: str | Path, *, edges_only: bool = False
 ) -> "subprocess.Popen":
