@@ -126,3 +126,75 @@ def test_tab_refuses_to_build_without_fast_load_artifacts(tmp_path, monkeypatch)
     tab.build_modal_controller()
     assert tab._modal_build_process is None, "must not have launched anything"
     assert any(error and "Update graph" in message for message, error in messages), messages
+
+
+def _tab_with_graph(tmp_path, monkeypatch, *, fast_loadable: bool):
+    import test_simulation_controls_panel as panel_stubs
+    from graph_visualizer.headless_run_tab import HeadlessRunTab
+
+    graph = tmp_path / "graphs" / "g"
+    graph.mkdir(parents=True)
+    (graph / "node_ids.npy").write_bytes(b"")
+    if fast_loadable:
+        monkeypatch.setattr(
+            "graph_visualizer.fast_graph_io.can_load_fast", lambda folder: (True, "ok")
+        )
+    return HeadlessRunTab(
+        panel_stubs._QtStub, None, graphs_root=lambda: tmp_path / "graphs"
+    ), graph
+
+
+def test_headless_exposes_every_modal_design_control(tmp_path, monkeypatch) -> None:
+    """The tab offers a build button, so it must also offer the knobs that decide
+    what gets built -- these rows used to be hidden in headless mode."""
+    tab, _graph = _tab_with_graph(tmp_path, monkeypatch, fast_loadable=False)
+    for name in (
+        "modal_temp_spin", "modal_modes_spin", "modal_order_spin",
+        "modal_effort_spin", "modal_integral_spin", "modal_design_button",
+        "modal_design_status_label",
+    ):
+        assert getattr(tab, name, None) is not None, name
+    from graph_visualizer.simulation_controls_panel import _HEADLESS_HIDDEN_ROWS
+
+    for row in ("modal_operating_temperature", "modal_modes", "modal_order",
+                "modal_effort", "modal_build", "modal_status"):
+        assert row not in _HEADLESS_HIDDEN_ROWS, row
+
+
+def test_build_uses_the_panel_values_not_hardcoded_defaults(tmp_path, monkeypatch) -> None:
+    tab, _graph = _tab_with_graph(tmp_path, monkeypatch, fast_loadable=True)
+    tab.modal_temp_spin.setValue(42.0)
+    tab.modal_modes_spin.setValue(64)
+    tab.modal_order_spin.setValue(12)
+    tab.modal_effort_spin.setValue(0.35)
+    tab.modal_integral_spin.setValue(0.02)
+
+    captured: dict = {}
+
+    def fake_launch(folder, **kwargs):
+        captured.update(kwargs)
+        class _P:
+            def poll(self): return None
+        return _P()
+
+    monkeypatch.setattr(
+        "graph_visualizer.fast_graph_io.launch_modal_build_subprocess", fake_launch
+    )
+    tab.build_modal_controller()
+    assert captured == {
+        "t_op_K": 42.0, "n_modes": 64, "order": 12,
+        "effort": 0.35, "integral_gain": 0.02,
+    }, captured
+
+
+def test_reduced_order_above_the_mode_count_is_rejected(tmp_path, monkeypatch) -> None:
+    """r is truncated FROM the modes, so r > modes is not a thing to discover an
+    hour into a reduction."""
+    tab, _graph = _tab_with_graph(tmp_path, monkeypatch, fast_loadable=True)
+    tab.modal_modes_spin.setValue(20)
+    tab.modal_order_spin.setValue(50)
+    messages: list[tuple[str, bool]] = []
+    tab.on_status = lambda m, e: messages.append((m, e))
+    tab.build_modal_controller()
+    assert tab._modal_build_process is None
+    assert any(error and "cannot exceed" in message for message, error in messages), messages

@@ -136,22 +136,6 @@ class HeadlessRunTab:
         resume_row.addWidget(self.resume_combo, 1)
         resume_row.addWidget(resume_refresh)
         form.addRow("resume", resume_row)
-        # Building a controller from the simulation tab needs the graph loaded into
-        # the GUI (~45 GB for a 3M-cell graph, plus an splu of the 3M x 3M DC
-        # operator on top). This runs the same design off the fast-load artifacts in
-        # a separate process at ~20 GB, so it fits and survives a dropped remote
-        # session. The controller list refreshes when it finishes.
-        self.build_controller_button = self.QtWidgets.QPushButton("Build modal controller")
-        self.build_controller_button.setToolTip(
-            "Design a modal-LQR controller for the selected graph in a SEPARATE process, "
-            "WITHOUT loading graph.json into this window.\n\n"
-            "Uses the fast-load artifacts, so 'Update graph' must have been run first. "
-            "An existing artifact with the same descriptors is backed up rather than "
-            "silently overwritten.\n\n"
-            "Progress goes to build_modal_controller.log in the graph folder."
-        )
-        self.build_controller_button.clicked.connect(self.build_modal_controller)
-        form.addRow(self.build_controller_button)
         self.notes_edit = self.QtWidgets.QLineEdit()
         self.notes_edit.setPlaceholderText("optional note stored with the run")
         form.addRow("notes", self.notes_edit)
@@ -171,6 +155,10 @@ class HeadlessRunTab:
                 # temperature / setpoint that get passed to the subprocess instead.
                 "set_all_initial_temperatures": self._set_all_initial_temperatures,
                 "randomize_setpoints": self._randomize_setpoints,
+                # The panel's Modal LQR Design section is shown in headless mode
+                # too: its spins set what gets built, and this runs the same
+                # reduction in a separate process instead of in this window.
+                "build_modal_controller": self.build_modal_controller,
             },
         )
         self.panel.build(form)
@@ -461,19 +449,38 @@ class HeadlessRunTab:
                 True,
             )
             return
-        # The design runs at the panel's operating point, so the artifact matches the
-        # regime the run will use rather than a stale default.
-        setpoint = float(self.setpoint_spin.value()) if self.use_setpoint.isChecked() else 50.0
+        # Every design parameter comes from the panel's Modal LQR Design section --
+        # the same spins the simulation tab uses -- so the two tabs build the same
+        # controller from the same numbers.
+        t_op = float(self.modal_temp_spin.value())
+        modes = int(self.modal_modes_spin.value())
+        order = int(self.modal_order_spin.value())
+        effort = float(self.modal_effort_spin.value())
+        integral = float(self.modal_integral_spin.value())
+        if order > modes:
+            self._status(
+                f"Reduced order r={order} cannot exceed the {modes} slow modes it is "
+                "truncated from.",
+                True,
+            )
+            return
         try:
-            self._modal_build_process = launch_modal_build_subprocess(folder, t_op_K=setpoint)
+            self._modal_build_process = launch_modal_build_subprocess(
+                folder, t_op_K=t_op, n_modes=modes, order=order,
+                effort=effort, integral_gain=integral,
+            )
         except Exception as exc:  # noqa: BLE001
             self._status(f"Could not start the controller build: {exc}", True)
             return
         self._modal_build_folder = folder
-        self.build_controller_button.setEnabled(False)
+        self.modal_design_button.setEnabled(False)
+        message = (
+            f"Building r={order} from {modes} modes at T_op={t_op:g} K "
+            f"(effort {effort:g}, integral {integral:g}) for {folder.name}."
+        )
+        self.modal_design_status_label.setText(message)
         self._status(
-            f"Building a modal controller for {folder.name} at T_op={setpoint:g} K "
-            "(separate process; this window stays responsive). Progress: "
+            f"{message} Separate process; this window stays responsive. Progress: "
             "build_modal_controller.log in the graph folder.",
             False,
         )
@@ -485,15 +492,17 @@ class HeadlessRunTab:
         code = proc.returncode
         folder = self._modal_build_folder
         self._modal_build_process = None
-        self.build_controller_button.setEnabled(True)
+        self.modal_design_button.setEnabled(True)
         from .fast_graph_io import MODAL_BUILD_LOG_FILENAME
 
         log = (folder / MODAL_BUILD_LOG_FILENAME) if folder is not None else "the graph folder"
         if code == 0 and folder is not None:
             # Repopulate the controller list so the new artifact is selectable.
             self._handle_graph_changed()
+            self.modal_design_status_label.setText("Built. Select it in the controller row.")
             self._status(f"Modal controller built; see {log}.", False)
         else:
+            self.modal_design_status_label.setText(f"Failed (exit {code}).")
             self._status(f"Modal controller build failed (exit {code}); see {log}.", True)
 
     # -- per-sensor setpoints ------------------------------------------------ #
