@@ -154,6 +154,104 @@ def validate_reduced(A_mod, B_mod, C_out, Ar, Br, Cr):
     return dc, step_err
 
 
+def exact_dc_gain(
+    C: np.ndarray,
+    L: csr_matrix,
+    Grad: np.ndarray,
+    node_ids: np.ndarray,
+    model: Any,
+    *,
+    T_op_K: float,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """The plant's steady-state gain G (K/W), solved exactly from the operator.
+
+    G is the ONLY model object a static-decoupling MIMO PI needs, and in
+    simulation there is no reason to identify it by step tests: we have L, so
+    L T = P gives the answer directly from one sparse factorization.
+
+    Identifying it empirically instead would be far worse here. DC contribution
+    scales as 1/lambda, so the SLOW modes dominate the gain -- on no_mli_high_res
+    74.3% of G lives in modes slower than 10,000 s, against a slowest mode of
+    86,756 s. A 300 s step test (the sys-ID default) sees 3.4% of the response and
+    understates G by ~97%; fitting and extrapolating the asymptote roughly halves
+    that error and occasionally diverges outright. Step tests are for HARDWARE,
+    where L is not available.
+
+    Returns the gain plus the ids and diagnostics needed to store and check it.
+    """
+    C = np.asarray(C, dtype=float).reshape(-1)
+    Grad = np.asarray(Grad, dtype=float).reshape(-1) if Grad is not None else np.zeros_like(C)
+    node_ids = np.asarray(node_ids, dtype=int).reshape(-1)
+    L = csr_matrix(L)
+
+    _report(progress, "Selecting largest connected component…")
+    Lm, Cm, Gradm, main_node_ids, main_rows, info = largest_connected_component(L, C, Grad, node_ids)
+
+    _report(progress, "Building heater/sensor maps…")
+    issues: list[str] = []
+    F, S, monitor, heater_ids, sensor_ids = heater_sensor_maps_from_model(
+        model, node_ids, main_rows, issues
+    )
+    if F.shape[1] == 0:
+        raise ValueError("No valid heaters found in the graph (need at least one).")
+    if int((~monitor).sum()) == 0:
+        raise ValueError("No CONTROLLED sensors found (every sensor is monitor-only).")
+
+    # Same cryocooler grounding as the modal design, from the cooler's own lift
+    # curve rather than a fixed-tip idealization, so a heater mounted on the cold
+    # block does not appear to have ~170x more authority than it has.
+    is_cryo = np.array(
+        [bool(getattr(model.nodes.get(int(v)), "has_cryocooler", False)) for v in main_node_ids],
+        dtype=bool,
+    )
+    cryo_cells = int(is_cryo.sum())
+    if cryo_cells:
+        total_ground = cryocooler_ground_conductance_W_K(float(T_op_K))
+        _report(
+            progress,
+            f"DC grounding: {total_ground:.4g} W/K over {cryo_cells} cryocooler cells "
+            f"from the lift-curve slope at T_op={float(T_op_K):g} K.",
+        )
+        L_dc = (csr_matrix(Lm) + diags(np.where(is_cryo, total_ground / cryo_cells, 0.0))).tocsr()
+        ground = "cryocooler"
+    else:
+        L_dc = (csr_matrix(Lm) + diags(Gradm)).tocsr()
+        ground = "radiation"
+
+    _report(progress, f"Factorizing the {L_dc.shape[0]:,}-node DC operator (splu)…")
+    G, RGA = dc_gain_and_rga(L_dc, F, S, monitor)
+    controlled_ids = np.asarray(sensor_ids)[~monitor]
+
+    # The RGA diagonal only means "how good is pairing i with i" when there is one
+    # heater per controlled sensor. With unequal counts (CRYOSTAT_V2 is 28 sensors
+    # x 33 heaters) the diagonal is not a pairing statement, and reporting it as
+    # one would be misleading -- so report nothing rather than a number that reads
+    # like an answer. Non-finite entries are dropped for the same reason.
+    square = G.shape[0] == G.shape[1] and RGA.shape[0] == RGA.shape[1]
+    diag = np.diag(RGA) if square else np.array([])
+    diag = diag[np.isfinite(diag)] if diag.size else diag
+    return {
+        "G": np.asarray(G, dtype=float),
+        "controlled_sensor_ids": [int(v) for v in controlled_ids],
+        "heater_ids": [int(v) for v in heater_ids],
+        "all_sensor_ids": [int(v) for v in sensor_ids],
+        "monitor": monitor,
+        "dc_ground": ground,
+        "cond": float(np.linalg.cond(G)),
+        # RGA is the standard test for whether per-pair SISO control is viable.
+        # A negative diagonal entry means that pairing's gain CHANGES SIGN once the
+        # other loops close, so a PID tuned open-loop drives the wrong way.
+        "rga_square": bool(square),
+        "rga_diag_min": float(diag.min()) if diag.size else None,
+        "rga_diag_negative": int((diag < 0).sum()) if diag.size else None,
+        "components": int(info["components"]),
+        "main_nodes": int(info["main_nodes"]),
+        "total_nodes": int(info["total_nodes"]),
+        "issues": issues,
+    }
+
+
 def dc_gain_and_rga(Leff, F, S, monitor):
     """Exact steady-state gain G = S_ctrl L_eff^{-1} F and its RGA."""
     lu = splu(Leff.tocsc())

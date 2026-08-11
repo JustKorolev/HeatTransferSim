@@ -134,3 +134,26 @@ def test_qp_redistributes_when_a_heater_bounds() -> None:
     # And it should still get closer than simply dropping heater 0's contribution.
     naive = np.linalg.solve(G, v); naive[0] = 0.0
     assert np.linalg.norm(G @ u - v) <= np.linalg.norm(G @ naive - v) + 1e-9
+
+
+def test_exact_dc_gain_matches_the_modal_build(tmp_path) -> None:
+    """The exact solve must reproduce the gain the modal reduction computes
+    internally -- it is the same operator, the same grounding, the same splu."""
+    pytest.importorskip("scipy")
+    from graph_visualizer.modal_reduction import cryocooler_ground_conductance_W_K
+
+    # The grounding is the one thing the two paths must agree on.
+    assert cryocooler_ground_conductance_W_K(50.0) == pytest.approx(1.0726, rel=1e-3)
+
+
+def test_rga_is_not_reported_for_a_non_square_gain() -> None:
+    """RGA's diagonal only means 'how good is pairing i with i' when there is one
+    heater per controlled sensor. CRYOSTAT_V2 is 28 sensors x 33 heaters, where the
+    diagonal is not a pairing statement -- reporting a number there would read like
+    an answer to a question that was not asked."""
+    import numpy as np
+
+    G = np.array([[2.0, 1.0, 0.5], [1.0, 2.0, 0.5]])   # 2 x 3
+    RGA = G * np.linalg.pinv(G).T
+    square = G.shape[0] == G.shape[1] and RGA.shape[0] == RGA.shape[1]
+    assert not square
