@@ -125,6 +125,8 @@ _EXPORTED_LIVE_ONLY = (
 _EXPORTED_SHARED = (
     "input_mode",
     "controller_scheme_combo",
+    "mimo_pi_kp_spin",
+    "mimo_pi_ki_spin",
     "solver_method_combo",
     "run_headless_button",
     "stop_headless_button",
@@ -341,10 +343,33 @@ class SimulationControlsPanel:
             "- Modal LQR entries: one per controller actually built for this graph, labelled with "
             "the reduced order, mode count and design operating point that distinguish them. "
             "Build one with the 'Modal LQR Design' panel below (or tools/analyze_plant_modes.py); "
-            "until then there is nothing to select."
+            "until then there is nothing to select.\n"
+            "- MIMO PI entries: one per DC gain matrix built for this graph. The gain is the only "
+            "model this scheme needs, and it decouples through it -- per-pair PID is not viable "
+            "here, since the RGA diagonal is negative on 26 of 27 pairings."
         )
         self._connect(self.controller_scheme_combo.currentTextChanged, "controller_scheme_selected")
         self._row(run_form, "controller", self.controller_scheme_combo, "controller")
+        # MIMO PI gains. After decoupling every channel has unit DC gain, so one
+        # pair of numbers is a defensible default for all of them; the per-sensor
+        # table beside the Parameters editor overrides individual channels.
+        self.mimo_pi_kp_spin = self.double_spin(0.0, 1.0e9,
+                                                float(getattr(self.params, "mimo_pi_kp", 0.0)), 0.01)
+        self.mimo_pi_kp_spin.setToolTip(
+            "Proportional gain per CONTROLLED SENSOR, applied in the decoupled space "
+            "(Kp = tau/lambda for a channel of time constant tau). 0 gives feedforward + "
+            "integral, which is what the modal scheme effectively ran."
+        )
+        self._row(run_form, "mimo_pi_kp", self.mimo_pi_kp_spin, "MIMO PI Kp")
+        self.mimo_pi_ki_spin = self.double_spin(0.0, 1.0e9,
+                                                float(getattr(self.params, "mimo_pi_ki", 1.0e-3)), 1.0e-4)
+        self.mimo_pi_ki_spin.setToolTip(
+            "Integral gain per CONTROLLED SENSOR: Ki = 1/lambda for a desired closed-loop time "
+            "constant lambda. Do NOT ask for lambda faster than the plant's fastest retained mode "
+            "(1182 s on no_mli_high_res, so Ki <~ 8.5e-4) or the command chases dynamics the "
+            "model does not contain."
+        )
+        self._row(run_form, "mimo_pi_ki", self.mimo_pi_ki_spin, "MIMO PI Ki")
         # Headless only: how often the launched run writes snapshots/checkpoints.
         # Live playback has no such artifacts.
         self.snapshot_spin = self.double_spin(0.0, 1.0e12, 300.0, 60.0)
@@ -1110,11 +1135,26 @@ class SimulationControlsPanel:
         self.modal_integral_spin.setValue(float(getattr(params, "modal_integral_gain", 0.0)))
         self.modal_integral_spin.blockSignals(False)
 
-    def selected_controller_artifact(self) -> str:
-        """Path of the selected modal-LQR artifact, or "" for PID + QP."""
+    def selected_controller(self) -> tuple[str, str]:
+        """(scheme, artifact path) for the selected controller.
+
+        Entries carry their scheme rather than having it inferred, because the list
+        now mixes two kinds of artifact: modal-LQR .npz files and MIMO PI DC-gain
+        matrices. Older entries that stored a bare path are read as modal-LQR so a
+        saved selection keeps working.
+        """
         combo = self.controller_scheme_combo
         data = combo.currentData() if hasattr(combo, "currentData") else None
-        return str(data) if data else ""
+        if isinstance(data, tuple) and len(data) == 2:
+            scheme, path = data
+            return str(scheme), str(path or "")
+        if data:
+            return "modal_lqr", str(data)
+        return "pid_qp", ""
+
+    def selected_controller_artifact(self) -> str:
+        """Path of the selected artifact, or "" when none is selected."""
+        return self.selected_controller()[1]
 
     def read(self, base: SimulationParameters | None = None) -> SimulationParameters:
         """Current widget values applied on top of ``base``.
@@ -1139,7 +1179,13 @@ class SimulationControlsPanel:
         values["input_mode"] = self.input_mode.currentText()
         values["implicit_sparse_simulation_method"] = self.solver_method_combo.currentText()
         values["modal_integral_gain"] = float(self.modal_integral_spin.value())
-        artifact = self.selected_controller_artifact()
-        values["mimo_controller_scheme"] = "modal_lqr" if artifact else "pid_qp"
-        values["modal_controller_path"] = artifact
+        scheme, artifact = self.selected_controller()
+        values["mimo_controller_scheme"] = scheme
+        # Each scheme reads its own artifact path, and the other is cleared so a
+        # stale path cannot quietly reactivate a scheme that is not selected.
+        values["modal_controller_path"] = artifact if scheme == "modal_lqr" else ""
+        values["mimo_pi_gain_matrix_path"] = artifact if scheme == "mimo_pi" else ""
+        if hasattr(self, "mimo_pi_kp_spin"):
+            values["mimo_pi_kp"] = float(self.mimo_pi_kp_spin.value())
+            values["mimo_pi_ki"] = float(self.mimo_pi_ki_spin.value())
         return replace(base if base is not None else self.params, **values)

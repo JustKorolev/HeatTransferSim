@@ -62,6 +62,8 @@ class HeadlessRunTab:
         self._refresh_folder: Path | None = None
         self._modal_build_process: subprocess.Popen | None = None
         self._modal_build_folder: Path | None = None
+        self._gain_build_process: subprocess.Popen | None = None
+        self._gain_build_folder: Path | None = None
         self._log_size = 0
         self._params_source = "defaults"
         self._pending_log_note = ""
@@ -136,6 +138,22 @@ class HeadlessRunTab:
         resume_row.addWidget(self.resume_combo, 1)
         resume_row.addWidget(resume_refresh)
         form.addRow("resume", resume_row)
+        # MIMO PI needs one object: the plant's DC gain. In simulation that is an
+        # exact solve of L T = P, not a step-test campaign -- 74.3% of G lives in
+        # modes slower than 10,000 s here, so a short identification understates it
+        # badly (-96.6% at the sys-ID default of 300 s).
+        self.build_gain_button = self.QtWidgets.QPushButton("Generate G matrix (MIMO PI)")
+        self.build_gain_button.setToolTip(
+            "Solve the plant's DC gain exactly from the operator, in a SEPARATE process, "
+            "WITHOUT loading graph.json.\n\n"
+            "G is a LINEARIZATION, so it is computed at the operating temperature below - "
+            "conductance depends on temperature through k(T) and h(T), and a gain taken at the "
+            "wrong background is systematically wrong.\n\n"
+            "The result appears in the controller list as a MIMO PI entry. Progress goes to "
+            "build_g_matrix.log in the graph folder."
+        )
+        self.build_gain_button.clicked.connect(self.build_gain_matrix)
+        form.addRow(self.build_gain_button)
         self.notes_edit = self.QtWidgets.QLineEdit()
         self.notes_edit.setPlaceholderText("optional note stored with the run")
         form.addRow("notes", self.notes_edit)
@@ -409,11 +427,18 @@ class HeadlessRunTab:
             pass
         # Same list, from the same helper, as the simulation tab's controller row:
         # a controller artifact validated by its contents, not its filename.
+        # The list mixes both schemes, so each entry carries its own scheme rather
+        # than having it inferred from "is a path selected".
+        from .sys_id_artifacts import list_sys_id_gain_matrices
+
         artifacts = list_modal_artifacts(folder)
-        self.controller_scheme_combo.addItem(PID_QP_LABEL, None)
+        gains = list_sys_id_gain_matrices(folder)
+        self.controller_scheme_combo.addItem(PID_QP_LABEL, ("pid_qp", ""))
+        for info in gains:
+            self.controller_scheme_combo.addItem(f"MIMO PI - {info.name}", ("mimo_pi", str(info.path)))
         for info in artifacts:
-            self.controller_scheme_combo.addItem(info.label, str(info.path))
-        if artifacts:
+            self.controller_scheme_combo.addItem(info.label, ("modal_lqr", str(info.path)))
+        if gains or artifacts:
             self.controller_scheme_combo.setCurrentIndex(1)
         self._load_parameters_for_graph(folder)
         self.refresh_resume_runs()
@@ -509,6 +534,59 @@ class HeadlessRunTab:
         else:
             self.modal_design_status_label.setText(f"Failed (exit {code}).")
             self._status(f"Modal controller build failed (exit {code}); see {log}.", True)
+
+    # -- DC gain generation (separate process, no graph in this window) ------- #
+    def build_gain_matrix(self) -> None:
+        if self._gain_build_process is not None and self._gain_build_process.poll() is None:
+            self._status("A G matrix build is already running.", True)
+            return
+        folder = self._selected_folder()
+        if folder is None:
+            self._status("Select a graph first.", True)
+            return
+        from .fast_graph_io import can_load_fast, launch_gain_build_subprocess
+
+        usable, reason = can_load_fast(folder)
+        if not usable:
+            self._status(
+                f"Cannot build without the fast-load artifacts ({reason}). Press "
+                "'Update graph' first.",
+                True,
+            )
+            return
+        # Same operating point the modal design uses, so the two artifacts describe
+        # the same linearization and can be compared directly.
+        t_op = float(self.modal_temp_spin.value())
+        try:
+            self._gain_build_process = launch_gain_build_subprocess(folder, t_op_K=t_op)
+        except Exception as exc:  # noqa: BLE001
+            self._status(f"Could not start the G matrix build: {exc}", True)
+            return
+        self._gain_build_folder = folder
+        self.build_gain_button.setEnabled(False)
+        self._status(
+            f"Solving the exact DC gain for {folder.name} at T_op={t_op:g} K "
+            "(separate process; this window stays responsive). Progress: "
+            "build_g_matrix.log in the graph folder.",
+            False,
+        )
+
+    def _poll_gain_build(self) -> None:
+        proc = getattr(self, "_gain_build_process", None)
+        if proc is None or proc.poll() is None:
+            return
+        code = proc.returncode
+        folder = self._gain_build_folder
+        self._gain_build_process = None
+        self.build_gain_button.setEnabled(True)
+        from .fast_graph_io import GAIN_BUILD_LOG_FILENAME
+
+        log = (folder / GAIN_BUILD_LOG_FILENAME) if folder is not None else "the graph folder"
+        if code == 0 and folder is not None:
+            self._handle_graph_changed()   # the new matrix joins the controller list
+            self._status(f"G matrix built; select it in the controller row. See {log}.", False)
+        else:
+            self._status(f"G matrix build failed (exit {code}); see {log}.", True)
 
     # -- per-sensor setpoints ------------------------------------------------ #
     def sensor_manifest(self, graph_name: str) -> list[dict[str, str]]:
@@ -885,6 +963,7 @@ class HeadlessRunTab:
     def _poll(self) -> None:
         self._poll_refresh()
         self._poll_modal_build()
+        self._poll_gain_build()
         if self.run_dir is None:
             return
         self._tail_log()

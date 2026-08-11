@@ -234,6 +234,38 @@ def edges_only_refresh_is_enough(folder: str | Path) -> bool:
 
 
 MODAL_BUILD_LOG_FILENAME = "build_modal_controller.log"
+GAIN_BUILD_LOG_FILENAME = "build_g_matrix.log"
+
+
+def launch_gain_build_subprocess(
+    folder: str | Path, *, t_op_K: float = 50.0, name: str | None = None
+) -> "subprocess.Popen":
+    """Start ``build_g_matrix.py`` on ``folder`` in a SEPARATE process.
+
+    Solves the plant's DC gain exactly from the operator off the fast-load
+    artifacts. Detached, so it survives losing a remote session, with progress in
+    ``<folder>/build_g_matrix.log``.
+    """
+    import subprocess
+
+    folder = Path(folder)
+    script = Path(__file__).resolve().parent.parent / "build_g_matrix.py"
+    log_path = folder / GAIN_BUILD_LOG_FILENAME
+    log_handle = log_path.open("w", encoding="utf-8")
+    command = [sys.executable, str(script), str(folder), "--t-op", f"{float(t_op_K):g}"]
+    if name:
+        command += ["--name", str(name)]
+    try:
+        proc = subprocess.Popen(  # noqa: S603
+            command,
+            cwd=str(script.parent),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    finally:
+        log_handle.close()
+    return proc
 
 
 def launch_modal_build_subprocess(

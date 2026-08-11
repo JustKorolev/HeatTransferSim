@@ -157,3 +157,78 @@ def test_rga_is_not_reported_for_a_non_square_gain() -> None:
     RGA = G * np.linalg.pinv(G).T
     square = G.shape[0] == G.shape[1] and RGA.shape[0] == RGA.shape[1]
     assert not square
+
+
+def _tab(tmp_path, monkeypatch, *, fast_loadable=True):
+    import sys as _sys, types as _types
+    for name in ("PySide6", "PySide6.QtCore", "PySide6.QtWidgets", "PySide6.QtGui"):
+        _sys.modules.setdefault(name, _types.ModuleType(name))
+    import test_simulation_controls_panel as panel_stubs
+    from graph_visualizer.headless_run_tab import HeadlessRunTab
+
+    graph = tmp_path / "graphs" / "g"
+    graph.mkdir(parents=True)
+    (graph / "node_ids.npy").write_bytes(b"")
+    if fast_loadable:
+        monkeypatch.setattr(
+            "graph_visualizer.fast_graph_io.can_load_fast", lambda folder: (True, "ok")
+        )
+    tab = HeadlessRunTab(panel_stubs._QtStub, None, graphs_root=lambda: tmp_path / "graphs")
+    return tab, graph
+
+
+def test_controller_entries_carry_their_own_scheme(tmp_path, monkeypatch) -> None:
+    """The list mixes modal-LQR artifacts and MIMO PI gain matrices, so a scheme
+    cannot be inferred from 'is a path selected' any more."""
+    tab, graph = _tab(tmp_path, monkeypatch)
+    save_sys_id_gain_matrix(graph, "G_exact", [1, 2], [3, 4], np.eye(2))
+    tab._handle_graph_changed()
+    entries = dict(tab.controller_scheme_combo.items)
+    assert any(label.startswith("MIMO PI - ") for label in entries), entries
+    for label, data in entries.items():
+        assert isinstance(data, tuple) and len(data) == 2, (label, data)
+    schemes = {data[0] for data in entries.values()}
+    assert "mimo_pi" in schemes and "pid_qp" in schemes
+
+
+def test_selecting_a_gain_matrix_selects_the_mimo_pi_scheme(tmp_path, monkeypatch) -> None:
+    tab, graph = _tab(tmp_path, monkeypatch)
+    folder = save_sys_id_gain_matrix(graph, "G_exact", [1, 2], [3, 4], np.eye(2))
+    tab._handle_graph_changed()
+    index = next(i for i, (label, _d) in enumerate(tab.controller_scheme_combo.items)
+                 if label.startswith("MIMO PI - "))
+    tab.controller_scheme_combo.setCurrentIndex(index)
+    params = tab.panel.read()
+    assert params.mimo_controller_scheme == "mimo_pi"
+    assert Path(params.mimo_pi_gain_matrix_path) == folder
+    # The other scheme's path must be cleared, or a stale artifact could quietly
+    # reactivate a controller nobody selected.
+    assert params.modal_controller_path == ""
+
+
+def test_gain_build_refuses_without_fast_load_artifacts(tmp_path, monkeypatch) -> None:
+    tab, _graph = _tab(tmp_path, monkeypatch, fast_loadable=False)
+    messages: list[tuple[str, bool]] = []
+    tab.on_status = lambda m, e: messages.append((m, e))
+    tab.build_gain_matrix()
+    assert tab._gain_build_process is None
+    assert any(err and "Update graph" in msg for msg, err in messages), messages
+
+
+def test_gain_build_uses_the_panel_operating_temperature(tmp_path, monkeypatch) -> None:
+    """G is a linearization, so it must be built at the temperature the run uses."""
+    tab, _graph = _tab(tmp_path, monkeypatch)
+    tab.modal_temp_spin.setValue(50.0)
+    captured: dict = {}
+
+    def fake_launch(folder, **kwargs):
+        captured.update(kwargs)
+        class _P:
+            def poll(self): return None
+        return _P()
+
+    monkeypatch.setattr(
+        "graph_visualizer.fast_graph_io.launch_gain_build_subprocess", fake_launch
+    )
+    tab.build_gain_matrix()
+    assert captured == {"t_op_K": 50.0}, captured
