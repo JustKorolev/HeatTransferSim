@@ -85,20 +85,47 @@ info?" — no; balanced truncation preserves exactly the input-output map, which
 
 ---
 
-## 4. LQR feedback gain `K`
+## 4. LQR feedback gain `K` — designed in DISCRETE time
 
 Minimize `∫(y_ctrlᵀy_ctrl + ρ·uᵀu) dt` over the 28 controlled outputs:
 
 - `C_ctrl = C_r[ctrl_idx]` (28×50)
 - `Q = C_ctrlᵀC_ctrl (+ tiny ridge)` (50×50), `R = ρI` (33×33)
-- Solve the algebraic Riccati equation `A_rᵀP + P A_r − P B_r R⁻¹B_rᵀP + Q = 0`
 
-$$\mathbf{K} = R^{-1}B_r^\top P\quad (33{\times}50)$$
+The controller is **sampled**, not continuous: it computes once per `dt_s` and
+holds. So the gain is solved against the zero-order-hold discretization
+`(A_d, B_d) = ZOH(A_r, B_r, dt)` and the **discrete** Riccati equation, with the
+weights scaled by `dt` so `ρ` keeps its meaning across sample rates:
+
+$$\mathbf{K} = (R\,dt + B_d^\top P B_d)^{-1}B_d^\top P A_d\quad (33{\times}50)$$
+
+**Why not the continuous ARE.** A continuous-time gain assumes the loop is closed
+continuously, which is only safe while `dt` is short against every mode the gain
+acts on. This plant spans τ = 0.0018 s to ~2800 s, so at `dt = 4 s` the local
+heater→sensor path settles ~2000× faster than one control step and presents its
+full DC gain within a single sample. Measured on the `no_mli_high_res` run of
+2026-08-10: 11 eigenvalues of the per-step loop gain `G·K·E_ctrl` exceeded 2
+(peak 5557), i.e. closed-loop poles below −1, and every heater command flipped
+sign on every single sample (sign-flip-per-sample of exactly 1.00). It stayed
+bounded only because the heaters clipped at 0 W. Designing at the actual `dt`
+fixes this by construction — the gain shrinks automatically as `dt` coarsens:
+
+| dt | ‖K‖ | max closed-loop pole | …if you used the continuous `K` |
+|---|---|---|---|
+| 0.1 s | 2247 | 0.999 | **2.10** |
+| 1.0 s | 463 | 0.987 | **82** |
+| 4.0 s | 681 | 0.947 | **499** |
+| 8.0 s | 932 | 0.897 | **1136** |
 
 `K` is **full MIMO** — every heater's command uses the full 50-state estimate,
 coordinating all heaters against the cross-coupling. `ρ` (the effort weight) trades
 power vs speed (larger ρ = gentler/slower, smaller ρ = more aggressive/faster).
 Feedback: `u = −K x_r`.
+
+The artifact stores `design_dt_s` alongside `A_r, B_r, Q, R`, so running at a
+different `dt_s` re-solves the discrete Riccati equation at load (~4 ms) instead
+of silently applying a gain that does not belong to that sample rate. The MCU
+keeps the baked `K`, since it runs at a fixed rate.
 
 ---
 
@@ -137,7 +164,12 @@ large `|G|` = weak sink = small feedforward.)
 
 `modal_controller.npz` stores exactly what the runtime needs:
 `K, E_reg, Nx, Nu, dc_gain_pinv, dc_gain(G), heater_ids, sensor_ids, monitor,
-T_op_K, integral_gain, r`.
+T_op_K, integral_gain, r`, plus `design_dt_s, A_r, B_r, Q_lqr, R_lqr` so the gain
+can be re-derived at another sample rate.
+
+`integral_gain` here is **metadata only** — the runtime reads
+`params.modal_integral_gain` fresh every step and never consults the artifact. So
+`ki` is fully decoupled from the LQR build and retunable live, without a rebuild.
 
 ---
 

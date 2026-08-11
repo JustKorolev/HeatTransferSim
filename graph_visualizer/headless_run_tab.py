@@ -457,6 +457,9 @@ class HeadlessRunTab:
         order = int(self.modal_order_spin.value())
         effort = float(self.modal_effort_spin.value())
         integral = float(self.modal_integral_spin.value())
+        # Design the gain at the dt this tab will actually run at: an LQR gain is
+        # only valid at the sample rate it was solved for.
+        design_dt = float(getattr(self._collect_parameters(), "dt_s", 1.0) or 1.0)
         if order > modes:
             self._status(
                 f"Reduced order r={order} cannot exceed the {modes} slow modes it is "
@@ -465,9 +468,11 @@ class HeadlessRunTab:
             )
             return
         try:
+            # Design at the dt this tab will actually run, so the sampled gain is
+            # correct out of the box instead of needing a runtime re-solve.
             self._modal_build_process = launch_modal_build_subprocess(
                 folder, t_op_K=t_op, n_modes=modes, order=order,
-                effort=effort, integral_gain=integral,
+                effort=effort, integral_gain=integral, design_dt_s=design_dt,
             )
         except Exception as exc:  # noqa: BLE001
             self._status(f"Could not start the controller build: {exc}", True)
@@ -476,7 +481,7 @@ class HeadlessRunTab:
         self.modal_design_button.setEnabled(False)
         message = (
             f"Building r={order} from {modes} modes at T_op={t_op:g} K "
-            f"(effort {effort:g}, integral {integral:g}) for {folder.name}."
+            f"(effort {effort:g}, integral {integral:g}, dt {design_dt:g} s) for {folder.name}."
         )
         self.modal_design_status_label.setText(message)
         self._status(

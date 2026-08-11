@@ -551,16 +551,21 @@ class SimulationControlsPanel:
             "aggressive heating; smaller = faster, higher-power response."
         )
         self._row(design_form, "modal_effort", self.modal_effort_spin, "LQR effort weight")
-        # Deliberately NOT in self.inputs: the live tab writes modal_integral_gain
-        # only when a controller is built, and wiring it as a live parameter would
-        # mark the controller stale on every keystroke.
+        # A LIVE parameter, unlike the order/effort design knobs beside it: the
+        # runtime reads params.modal_integral_gain fresh every step and never reads
+        # the artifact's stored integral_gain, so retuning it is decoupled from the
+        # LQR build and does not need a rebuild.
         self.modal_integral_spin = self.double_spin(
             0.0, 1.0e9, float(getattr(self.params, "modal_integral_gain", 0.0)), 0.01
         )
         self.modal_integral_spin.setToolTip(
             "Offset-free integral gain the modal controller uses to supply the operating holding "
-            "power the linearized model omits."
+            "power the linearized model omits. Applies immediately during a run -- no controller "
+            "rebuild needed. Roughly 1/tau_dominant is a sane scale; far above that the integrator "
+            "commands most of the steady-state correction within a single step and overshoots."
         )
+        self.modal_integral_spin.valueChanged.connect(self._changed("modal_integral_gain"))
+        self.inputs["modal_integral_gain"] = self.modal_integral_spin
         self._row(design_form, "modal_integral_gain", self.modal_integral_spin, "integral gain")
         # Adaptive (learning) feedforward: online RLS correction of the exact-DC-gain
         # feedforward from the integral's steady-state holding power. Off by default;

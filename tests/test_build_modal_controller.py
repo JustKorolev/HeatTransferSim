@@ -168,6 +168,9 @@ def test_build_uses_the_panel_values_not_hardcoded_defaults(tmp_path, monkeypatc
     tab.modal_order_spin.setValue(12)
     tab.modal_effort_spin.setValue(0.35)
     tab.modal_integral_spin.setValue(0.02)
+    # The LQR gain is only valid at the sample rate it was solved for, so the
+    # build has to inherit the run's dt rather than a design-time default.
+    tab.panel.inputs["dt_s"].setValue(2.5)
 
     captured: dict = {}
 
@@ -183,7 +186,7 @@ def test_build_uses_the_panel_values_not_hardcoded_defaults(tmp_path, monkeypatc
     tab.build_modal_controller()
     assert captured == {
         "t_op_K": 42.0, "n_modes": 64, "order": 12,
-        "effort": 0.35, "integral_gain": 0.02,
+        "effort": 0.35, "integral_gain": 0.02, "design_dt_s": 2.5,
     }, captured
 
 

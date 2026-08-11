@@ -64,6 +64,19 @@ class SimulationParameters:
     #                  tools/analyze_plant_modes.py). Falls back to pid_qp if the
     #                  artifact is missing or mismatched.
     mimo_controller_scheme: str = "pid_qp"
+    # Quarantine cells that can absorb heat but have no conduction path to a
+    # cryocooler. Such a cell is a thermal dead end: deposited power can only
+    # raise its temperature, forever. Quarantined cells receive no power and are
+    # excluded from whole-graph metrics (see cell_quarantine.py for why this
+    # matters far more than the cell count suggests).
+    quarantine_inert_cells: bool = True
+    # Opt-in per-cell conductance floor for the quarantine, in W/K. 0.0 (the
+    # default) quarantines only cells with literally no conduction edges. A
+    # nonzero floor is NOT safe as a default -- cell conductance scales with both
+    # material and cell size, so a floor generous for a 1 mm copper cell would
+    # wrongly quarantine a legitimate 1 mm G10 cell. Set it only for a graph you
+    # know.
+    quarantine_min_conductance_W_per_K: float = 0.0
     # Path to the modal controller artifact; blank => look for
     # "<graph_folder>/modal_controller.npz".
     modal_controller_path: str = ""

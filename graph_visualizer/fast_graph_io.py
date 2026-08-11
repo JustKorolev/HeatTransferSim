@@ -244,6 +244,7 @@ def launch_modal_build_subprocess(
     order: int = 50,
     effort: float = 0.2,
     integral_gain: float = 0.06,
+    design_dt_s: float = 1.0,
 ) -> "subprocess.Popen":
     """Start ``build_modal_controller.py`` on ``folder`` in a SEPARATE process.
 
@@ -268,6 +269,7 @@ def launch_modal_build_subprocess(
         "--order", str(int(order)),
         "--effort", f"{float(effort):g}",
         "--integral", f"{float(integral_gain):g}",
+        "--dt", f"{float(design_dt_s):g}",
     ]
     try:
         proc = subprocess.Popen(  # noqa: S603

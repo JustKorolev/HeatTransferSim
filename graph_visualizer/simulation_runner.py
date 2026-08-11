@@ -440,10 +440,51 @@ class SimulationRunner:
         # silently use a different controller than the one requested.
         self._logged_warning_count = len(prepared.warnings)
         self._warn_if_disconnected()
+        self._report_quarantine(prepared)
         self._check_actuator_connectivity(prepared, params)
         self._warn_if_unforced(prepared, params, has_controller, cryo_idx)
         self._resume_if_checkpoint(prepared)
         return prepared, params, C_diag, sensors, heaters, cryo_idx
+
+    def _report_quarantine(self, prepared) -> None:
+        """Log which cells were quarantined and which heaters it cost.
+
+        The count alone understates this. A detached solid can be 0.001% of the
+        graph and still absorb most of the run's heater power, so the number that
+        matters is how much actuator authority now lands on nothing."""
+        result = getattr(prepared, "quarantine_result", None)
+        if result is None:
+            return
+        self._quarantine_summary = {
+            "quarantined_cells": int(getattr(result, "count", 0)),
+            "quarantined_components": int(getattr(result, "quarantined_component_count", 0)),
+            "conduction_components": int(getattr(result, "component_count", 0)),
+            "orphaned_heaters": [int(v) for v in getattr(prepared, "orphaned_heater_ids", ()) or ()],
+            "heaters_with_lost_targets": len(getattr(prepared, "heaters_missing_deposition", {}) or {}),
+        }
+        if not getattr(result, "any_quarantined", False):
+            return
+        self._log_event("cell_quarantine", result.summary(getattr(prepared, "node_ids", None)))
+        lost = getattr(prepared, "heaters_missing_deposition", {}) or {}
+        if lost:
+            detail = ", ".join(
+                f"{heater_id}->{len(targets)} cell(s)" for heater_id, targets in list(lost.items())[:8]
+            )
+            self._log_event(
+                "cell_quarantine_heaters",
+                f"{len(lost)} heater(s) lost deposition targets ({detail}"
+                + (", ..." if len(lost) > 8 else "")
+                + "). Their commanded power is excluded from power_in_W.",
+            )
+        orphans = [int(v) for v in getattr(prepared, "orphaned_heater_ids", ()) or ()]
+        if orphans:
+            self._log_event(
+                "cell_quarantine_orphans",
+                f"{len(orphans)} heater(s) now deposit into nothing at all (node ids {orphans[:8]}"
+                + (", ..." if len(orphans) > 8 else "")
+                + "). They remain in the controller by design; rebuild the modal controller so "
+                "its DC gain stops assigning them effort.",
+            )
 
     def _check_actuator_connectivity(self, prepared, params) -> None:
         """Verify each heater can actually conduct heat to the sensor it drives.
@@ -1028,6 +1069,20 @@ class SimulationRunner:
             self._log_event("sensor_readout_unavailable", str(exc))
             self._sensor_readout_matrix = None
 
+    @staticmethod
+    def _live_temperatures(prepared, temps) -> np.ndarray:
+        """Temperatures of the cells that are actually simulated.
+
+        Quarantined cells have no conduction path to a sink, so they receive no
+        power and never change; keeping them in whole-graph statistics reports the
+        dead end instead of the body."""
+        temps = np.asarray(temps)
+        mask = getattr(prepared, "inert_cell_mask", None)
+        if mask is None or mask.shape != temps.shape or not np.any(mask):
+            return temps
+        live = temps[~mask]
+        return live if live.size else temps
+
     def _sensor_readout_temperatures(self, temps, sensor_ix) -> np.ndarray:
         matrix = getattr(self, "_sensor_readout_matrix", None)
         if matrix is None:
@@ -1038,12 +1093,21 @@ class SimulationRunner:
                  setpoints, heaters, cryo_idx, thr) -> None:
         s = self._series
         s.setdefault("time_s", []).append(float(state.time_s))
-        s.setdefault("avg_temp_K", []).append(float(np.mean(temps)))
-        s.setdefault("max_temp_K", []).append(float(np.max(temps)))
-        s.setdefault("min_temp_K", []).append(float(np.min(temps)))
+        # Whole-graph metrics exclude quarantined cells. A thermal dead end holds
+        # whatever temperature it drifted to and cannot respond to anything, so
+        # including it pins max_temp / the rate / the autoscale colour range to a
+        # body that is not part of the simulation any more.
+        live = self._live_temperatures(prepared, temps)
+        s.setdefault("avg_temp_K", []).append(float(np.mean(live)))
+        s.setdefault("max_temp_K", []).append(float(np.max(live)))
+        s.setdefault("min_temp_K", []).append(float(np.min(live)))
         # Max temperature rate -- soft divergence indicator (logged, not fatal).
         if dt > 0 and prev.shape == temps.shape:
-            rate = float(np.max(np.abs(temps - prev))) / dt
+            delta = np.abs(temps - prev)
+            mask = getattr(prepared, "inert_cell_mask", None)
+            if mask is not None and mask.shape == delta.shape:
+                delta = delta[~mask]
+            rate = float(np.max(delta)) / dt if delta.size else 0.0
             s.setdefault("max_temp_rate_K_per_s", []).append(rate)
             if rate > thr.max_temperature_rate_K_per_s:
                 self._log_event("high_temp_rate", f"t={state.time_s:.1f}s max|dT/dt|={rate:.3g}K/s (soft)")
@@ -1096,6 +1160,13 @@ class SimulationRunner:
         except Exception:
             p_in = p_out = p_rad = net_W = float("nan")
         s.setdefault("power_in_W", []).append(p_in)
+        # Commanded-but-undelivered heater power: nonzero only when a heater is
+        # driving a quarantined cell. A persistent nonzero value means an actuator
+        # is burning its full authority on nothing.
+        try:
+            s.setdefault("heater_undelivered_W", []).append(float(pb.get("heater_undelivered_W", 0.0)))
+        except Exception:
+            s.setdefault("heater_undelivered_W", []).append(float("nan"))
         s.setdefault("power_out_W", []).append(p_out)
         s.setdefault("radiation_W", []).append(p_rad)
         s.setdefault("net_W", []).append(net_W)
@@ -1438,6 +1509,11 @@ class SimulationRunner:
             out["peak_power_in_W"] = max(v for v in s["power_in_W"] if np.isfinite(v)) if any(np.isfinite(v) for v in s["power_in_W"]) else float("nan")
         if s.get("energy_drift_rel"):
             out["max_energy_drift_rel"] = max(s["energy_drift_rel"])
+        out.update(getattr(self, "_quarantine_summary", {}) or {})
+        if s.get("heater_undelivered_W"):
+            finite = [v for v in s["heater_undelivered_W"] if np.isfinite(v)]
+            if finite:
+                out["peak_heater_undelivered_W"] = max(finite)
         return out
 
 

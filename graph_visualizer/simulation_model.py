@@ -458,6 +458,15 @@ class PreparedSimulation:
     inv_C: np.ndarray | None = None
     A: Any | None = None
     base_b: np.ndarray | None = None
+    # Boolean over rows: cells with no conduction path to a sink. They receive no
+    # power (see _advance_with_power_vector) and are excluded from whole-graph
+    # metrics. None => nothing quarantined. See cell_quarantine.py.
+    inert_cell_mask: np.ndarray | None = None
+    # Diagnostics for the report: which heaters lost deposition targets, and the
+    # QuarantineResult itself.
+    quarantine_result: Any | None = None
+    heaters_missing_deposition: dict[int, list[int]] = field(default_factory=dict)
+    orphaned_heater_ids: tuple[int, ...] = ()
     radiation_coeff_W_K4: np.ndarray | None = None
     # Per-node radiative background temperature [K]: the fixed-temperature
     # environment each surface radiates to (exterior/ambient by default; interior
@@ -886,6 +895,14 @@ class PreparedSimulation:
         powers = np.asarray(heater_power, dtype=float).reshape(-1)
         if powers.shape != temperatures.shape:
             raise ValueError(f"Heater power vector length {powers.shape} does not match temperatures {temperatures.shape}.")
+        # Quarantined cells have no conduction path to a sink, so any power landing
+        # here could only accumulate. Zeroing at this single choke point covers
+        # every source -- heaters, cryocoolers, manual inputs -- regardless of how
+        # it was allocated upstream.
+        inert = getattr(self, "inert_cell_mask", None)
+        if inert is not None and np.any(inert):
+            powers = powers.copy()
+            powers[inert] = 0.0
         # Midpoint property/radiation coupling: evaluate the lagged nonlinear
         # terms (temperature-dependent C/L and radiation) at a forward-Euler
         # midpoint T + 0.5*dt*f(T) rather than the step-start temperature. This
@@ -1256,9 +1273,15 @@ class PreparedSimulation:
         is colder than ambient, i.e. a parasitic load); net_W ~ dU/dt. In a
         cryocooled+heater regime these are not expected to balance.
         """
-        heater_W = (
-            float(sum(self.heater_actuator_power_by_node().values())) if self.heater_node_ids else 0.0
-        )
+        commanded = self.heater_actuator_power_by_node() if self.heater_node_ids else {}
+        heater_commanded_W = float(sum(commanded.values()))
+        # Power commanded into a quarantined cell never enters the solve, so it is
+        # not part of dU/dt. Reporting the commanded figure as power_in makes the
+        # energy balance look broken (and hides that an actuator is doing nothing).
+        heater_W = float(sum(
+            power * self._heater_delivered_fraction(heater_id)
+            for heater_id, power in commanded.items()
+        ))
         cryocooler_W = float(sum(self.cryocooler_power_by_node().values())) if self.cryocooler_devices else 0.0
         radiation_W = 0.0
         if self.radiation_coeff_W_K4 is not None and self.params.use_ambient_radiation:
@@ -1269,10 +1292,47 @@ class PreparedSimulation:
                 radiation_W = float(np.sum(coeff * (env4 - temperatures**4)))
         return {
             "heater_W": heater_W,
+            # What the controller asked for, before quarantine. Equal to heater_W
+            # unless some deposition target is a thermal dead end; a gap between
+            # the two IS the diagnostic.
+            "heater_commanded_W": heater_commanded_W,
+            "heater_undelivered_W": heater_commanded_W - heater_W,
             "cryocooler_W": cryocooler_W,
             "radiation_W": radiation_W,
             "net_W": heater_W + radiation_W - cryocooler_W,
         }
+
+    def _heater_delivered_fraction(self, heater_id: int) -> float:
+        """Fraction of a heater's command that reaches non-quarantined cells.
+
+        Static for a given mask, so it is computed once and cached."""
+        inert = getattr(self, "inert_cell_mask", None)
+        if inert is None:
+            return 1.0
+        cached = getattr(self, "_heater_delivered_fraction_cache", None)
+        if cached is None:
+            cached = {}
+            self._heater_delivered_fraction_cache = cached
+        hit = cached.get(int(heater_id))
+        if hit is not None:
+            return hit
+        fraction = 1.0
+        heater = self.model.nodes.get(int(heater_id)) if self.model is not None else None
+        if heater is not None:
+            targets = [int(v) for v in getattr(heater, "power_deposition_node_ids", []) or []]
+            if not targets:
+                targets = [int(heater_id)]
+            weights = _normalized_power_weights(
+                getattr(heater, "power_deposition_weights", []) or [], len(targets)
+            )
+            index = self.node_index_by_id or {}
+            fraction = float(sum(
+                weight
+                for node_id, weight in zip(targets, weights)
+                if node_id in index and not bool(inert[index[node_id]])
+            ))
+        cached[int(heater_id)] = fraction
+        return fraction
 
     def cryocooler_diagnostics(self) -> list[dict[str, Any]]:
         if self.model is None:
@@ -1343,10 +1403,13 @@ class PreparedSimulation:
         operating point) and validate it maps onto this graph. Returns a dict or
         None (falls back to PID+QP). Cached per prepared simulation."""
         path = str(getattr(self.params, "modal_controller_path", "") or "")
+        # Keyed on (path, dt): the LQR gain is only valid at the sample rate it was
+        # designed for, so a dt change has to re-derive it, not reuse the cache.
+        dt_key = float(getattr(self.params, "dt_s", 1.0) or 1.0)
         cache = getattr(self, "_modal_controller_cache", None)
-        if cache is not None and getattr(self, "_modal_controller_cache_path", None) == path:
+        if cache is not None and getattr(self, "_modal_controller_cache_path", None) == (path, dt_key):
             return cache or None  # {} means "tried this path and it was unavailable"
-        self._modal_controller_cache_path = path
+        self._modal_controller_cache_path = (path, dt_key)
         if not path or self.model is None:
             self._modal_controller_cache = {}
             return None
@@ -1363,8 +1426,9 @@ class PreparedSimulation:
                     f"modal controller references {len(missing)} node id(s) not in this graph "
                     "(built for a different graph?)"
                 )
+            K = self._modal_gain_for_dt(data, dt_key, path)
             cache = {
-                "K": np.asarray(data["K"], dtype=float),
+                "K": K,
                 "E": np.asarray(data["E_reg"], dtype=float),
                 "Nx": np.asarray(data["Nx"], dtype=float),
                 "Nu": np.asarray(data["Nu"], dtype=float),
@@ -1383,6 +1447,65 @@ class PreparedSimulation:
             self.warnings.append(f"Modal controller unavailable ({exc}); using PID+QP allocator.")
             self._modal_controller_cache = {}
             return None
+
+    def _modal_gain_for_dt(self, data, dt_s: float, path: str) -> np.ndarray:
+        """The LQR gain valid at THIS run's sample rate.
+
+        The stored ``K`` is only correct at the ``design_dt_s`` it was built for. An
+        LQR gain designed in continuous time -- or at a different dt -- is not a
+        harmless approximation when sampled: on this plant, applying a
+        continuous-time gain at any practical dt puts the sampled closed-loop poles
+        outside the unit circle, which shows up as commands flipping sign on every
+        step. So when the rate differs and the artifact carries the reduced plant,
+        re-solve the discrete Riccati equation (~4 ms) instead of using a gain that
+        does not belong to this sample rate.
+
+        Artifacts built before this was stored have no ``A_r``/``B_r``/``Q``/``R``,
+        so nothing can be re-derived -- warn loudly and use the stored gain."""
+        stored_K = np.asarray(data["K"], dtype=float)
+        design_dt = float(data["design_dt_s"]) if "design_dt_s" in data else None
+        have_plant = all(key in data for key in ("A_r", "B_r", "Q_lqr", "R_lqr"))
+        if design_dt is None:
+            self.warnings.append(
+                f"Modal controller '{Path(path).name}' predates discrete-time LQR design: it "
+                "stores a gain solved from the CONTINUOUS Riccati equation with no record of a "
+                "sample rate, and not enough of the reduced plant to re-derive one. A "
+                "continuous-time gain applied on a sampled loop is unstable on this plant at "
+                "every practical dt (it is what makes the heater commands alternate sign every "
+                "step). Rebuild the controller to fix this; running as-is for now."
+            )
+            return stored_K
+        if abs(float(design_dt) - float(dt_s)) <= 1.0e-12:
+            return stored_K
+        if not have_plant:
+            self.warnings.append(
+                f"Modal controller '{Path(path).name}' was designed at dt={design_dt:g} s but this "
+                f"run uses dt={dt_s:g} s, and the artifact does not carry the reduced plant needed "
+                "to re-derive the gain. Rebuild it at this dt; running the mismatched gain for now."
+            )
+            return stored_K
+        try:
+            from .modal_reduction import discrete_lqr_gain
+
+            K = discrete_lqr_gain(
+                np.asarray(data["A_r"], dtype=float),
+                np.asarray(data["B_r"], dtype=float),
+                np.asarray(data["Q_lqr"], dtype=float),
+                np.asarray(data["R_lqr"], dtype=float),
+                float(dt_s),
+            )
+            self.warnings.append(
+                f"Modal controller was designed at dt={design_dt:g} s; re-solved the discrete LQR "
+                f"for this run's dt={dt_s:g} s (|K| {np.linalg.norm(stored_K):.4g} -> "
+                f"{np.linalg.norm(K):.4g})."
+            )
+            return K
+        except Exception as exc:  # noqa: BLE001 - fall back to the stored gain
+            self.warnings.append(
+                f"Could not re-derive the modal LQR gain for dt={dt_s:g} s ({exc}); using the gain "
+                f"designed at dt={design_dt:g} s, which is not valid at this rate."
+            )
+            return stored_K
 
     def _modal_controller_power_vector(self, update_state: bool) -> np.ndarray:
         """Reduced-model output-feedback controller: regularized static state
@@ -2351,6 +2474,62 @@ def prepare_simulation(
         except Exception as exc:  # noqa: BLE001 - fall back to constant properties
             warnings.append(f"Temperature-dependent properties unavailable; using constant properties: {exc}")
             temperature_dependent_operator = None
+    # Quarantine thermal dead ends before the first step, so a detached solid can
+    # never absorb heater power it has no way to shed.
+    inert_mask = None
+    quarantine_result = None
+    heaters_missing_deposition: dict[int, list[int]] = {}
+    orphaned_heater_ids: tuple[int, ...] = ()
+    if bool(getattr(params, "quarantine_inert_cells", True)):
+        try:
+            from .cell_quarantine import (
+                deposition_targets_lost,
+                find_quarantined_cells,
+                fully_orphaned_heaters,
+            )
+
+            sink_rows = [
+                node_index_by_id[int(node_id)]
+                for node_id in cryocooler_node_ids
+                if int(node_id) in node_index_by_id
+            ]
+            # Radiation is a diagonal sink absent from L, so a radiating cell is
+            # grounded even with no conduction edges.
+            grounded = None
+            if bool(getattr(params, "use_ambient_radiation", False)) and radiation_coeff is not None:
+                grounded = np.asarray(radiation_coeff, dtype=float).reshape(-1) > 0.0
+            quarantine_result = find_quarantined_cells(
+                L,
+                sink_rows=sink_rows,
+                radiation_grounded=grounded,
+                min_conductance_W_per_K=float(
+                    getattr(params, "quarantine_min_conductance_W_per_K", 0.0)
+                ),
+            )
+            warnings.append(quarantine_result.summary(node_ids))
+            if quarantine_result.any_quarantined:
+                inert_mask = quarantine_result.mask
+                heaters_missing_deposition = deposition_targets_lost(
+                    model, heater_node_ids, node_index_by_id, inert_mask
+                )
+                orphaned_heater_ids = tuple(
+                    fully_orphaned_heaters(model, heater_node_ids, node_index_by_id, inert_mask)
+                )
+                if orphaned_heater_ids:
+                    # Deliberately NOT removed from the controller: killing an
+                    # actuator is a bigger call than killing a cell. But its
+                    # commands now reach nothing, so say so.
+                    warnings.append(
+                        f"{len(orphaned_heater_ids)} heater(s) deposit only into quarantined "
+                        f"cells and can no longer affect the plant (node ids "
+                        f"{list(orphaned_heater_ids[:8])}"
+                        + (", ..." if len(orphaned_heater_ids) > 8 else "")
+                        + "). They stay in the controller and will command power into nothing; "
+                        "rebuild the modal controller so its DC gain stops assigning them effort."
+                    )
+        except Exception as exc:  # noqa: BLE001 - quarantine is a safeguard, never a blocker
+            warnings.append(f"Cell quarantine unavailable; continuing without it: {exc}")
+
     prepared = PreparedSimulation(
         node_ids=node_ids,
         z=np.concatenate([initial, np.array([1.0])]),
@@ -2360,6 +2539,10 @@ def prepare_simulation(
         inv_C=inv_C,
         A=A,
         base_b=b,
+        inert_cell_mask=inert_mask,
+        quarantine_result=quarantine_result,
+        heaters_missing_deposition=heaters_missing_deposition,
+        orphaned_heater_ids=orphaned_heater_ids,
         radiation_coeff_W_K4=radiation_coeff,
         environment_temperature_K=environment_temperature_K,
         radiation_exchange_W=radiation_exchange_W,

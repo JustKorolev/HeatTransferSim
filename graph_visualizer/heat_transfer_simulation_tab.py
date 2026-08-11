@@ -85,6 +85,10 @@ _CONTROLLER_PARAMETER_FIELDS = {
     "derivative_dt_floor_s",
     "mimo_integral_abs_max",
     "mimo_freeze_integral_when_saturated",
+    # The modal controller's integral gain is read fresh every step and is
+    # independent of the LQR build (the artifact's stored integral_gain is
+    # metadata only), so retuning it never needs a controller rebuild.
+    "modal_integral_gain",
     # Adaptive feedforward: pure controller behavior (no plant-matrix change), so
     # these hot-swap during a running sim like the other controller knobs.
     "modal_adaptive_ff_enabled",
@@ -1281,6 +1285,9 @@ class HeatTransferSimulationTab:
                 str(out_path),
                 str(getattr(self.model.metadata, "graph_name", "") or ""),
                 self._modal_design_progress,
+                # Design at the dt this tab runs: an LQR gain is only valid at the
+                # sample rate it was solved for.
+                float(getattr(self.params, "dt_s", 1.0) or 1.0),
             )
             self._modal_design_progress["message"] = "Starting reduction…"
             self.modal_design_status_label.setText("Starting reduction…")
@@ -3394,6 +3401,7 @@ def _run_modal_design_worker(
     out_path: str,
     graph_name: str,
     progress_holder: dict[str, str],
+    design_dt_s: float = 1.0,
 ) -> Any:
     """Background job: reduce the plant + design the modal-LQR controller artifact.
     Writes progress messages into ``progress_holder`` (read by the poll timer)."""
@@ -3405,7 +3413,8 @@ def _run_modal_design_worker(
         C, L, Grad, node_ids, model,
         T_op_K=float(T_op_K), n_modes=int(n_modes), r=int(r),
         effort_weight=float(effort_weight), integral_gain=float(integral_gain),
-        out_path=out_path, graph_name=graph_name, progress=_progress,
+        out_path=out_path, graph_name=graph_name, design_dt_s=float(design_dt_s),
+        progress=_progress,
     )
 
 

@@ -112,7 +112,7 @@ def build(args: argparse.Namespace) -> Path:
 
     started = time.perf_counter()
     print(f"[{_now()}] designing: r={args.order}, {args.modes} modes, T_op={args.t_op:g} K, "
-          f"effort={args.effort:g}, integral={args.integral:g}", flush=True)
+          f"effort={args.effort:g}, integral={args.integral:g}, dt={args.dt:g} s", flush=True)
     result = design_modal_controller(
         capacitance,
         matrices["L"],
@@ -124,6 +124,7 @@ def build(args: argparse.Namespace) -> Path:
         r=int(args.order),
         effort_weight=float(args.effort),
         integral_gain=float(args.integral),
+        design_dt_s=float(args.dt),
         out_path=str(out_path),
         graph_name=str(getattr(model.metadata, "graph_name", "") or folder.name),
         progress=lambda message: print(f"[{_now()}]   {message}", flush=True),
@@ -154,6 +155,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--order", type=int, default=50, help="reduced order r")
     p.add_argument("--effort", type=float, default=0.2, help="LQR effort weight")
     p.add_argument("--integral", type=float, default=0.06, help="integral gain stored in the artifact")
+    p.add_argument("--dt", type=float, default=1.0,
+                   help="control sample rate [s] the LQR gain is designed at. The gain is only "
+                        "valid at this dt; the simulator re-derives it if you run at another.")
     p.add_argument("--allow-full-load", action="store_true",
                    help="permit the graph.json loader when fast-load artifacts are missing "
                         "(needs ~45 GB on a 3M-cell graph)")

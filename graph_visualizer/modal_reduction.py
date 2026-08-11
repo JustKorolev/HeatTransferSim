@@ -25,7 +25,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
-from scipy.linalg import expm, solve_continuous_are, solve_continuous_lyapunov, svd
+from scipy.linalg import (
+    expm,
+    solve_continuous_lyapunov,
+    solve_discrete_are,
+    svd,
+)
+from scipy.signal import cont2discrete
 from scipy.sparse import csr_matrix, diags
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import eigsh, splu
@@ -294,16 +300,47 @@ def heater_sensor_maps_from_model(model: Any, node_ids_full, main_rows, issues: 
 
 # ------------------------------------------------------------------ LQR + estimator + servo
 
-def design_lqr(A_r, B_r, C_ctrl, effort_weight: float):
-    """Continuous-time LQR gain for tracking the controlled outputs.
+def lqr_weights(A_r, B_r, C_ctrl, effort_weight: float):
+    """The LQR cost weights (Q, R) for tracking the controlled outputs.
 
-    Minimizes int (y_ctrl^T y_ctrl + rho u^T u) dt with Q = C_ctrl^T C_ctrl and
-    R = rho I. Returns K (n_heaters x r) with u = -K x."""
+    Q = C_ctrl^T C_ctrl (plus a tiny ridge for numerical detectability) and
+    R = rho I. Split out from the gain solve so the artifact can store the
+    weights and re-derive a gain at any sample rate."""
     r = A_r.shape[0]
-    Q = C_ctrl.T @ C_ctrl + 1.0e-9 * np.eye(r)  # tiny ridge for numerical detectability
+    Q = C_ctrl.T @ C_ctrl + 1.0e-9 * np.eye(r)
     R = max(float(effort_weight), 1.0e-12) * np.eye(B_r.shape[1])
-    P = solve_continuous_are(A_r, B_r, Q, R)
-    return np.linalg.solve(R, B_r.T @ P)
+    return Q, R
+
+
+def discrete_lqr_gain(A_r, B_r, Q, R, dt_s: float):
+    """Zero-order-hold discretize (A_r, B_r) at dt and solve the discrete LQR.
+
+    Returns K (n_heaters x r) for u = -K x, applied once per sample of length dt.
+    The cost weights are scaled by dt so the discrete cost approximates the same
+    continuous integral, which keeps rho meaning the same thing across dt.
+
+    There is deliberately NO continuous-time counterpart to this function. A
+    continuous-time gain assumes the loop is closed continuously, which only holds
+    while dt is short against every mode the gain acts on -- and this plant spans
+    tau = 0.0018 s to ~2800 s, so the local heater-to-sensor path presents its full
+    DC gain within a single control step. In the ``no_mli_high_res`` run of
+    2026-08-10 a continuous-designed gain put 11 eigenvalues of the per-step loop
+    gain ``G*K*E_ctrl`` above 2 (peak 5557) -- closed-loop poles below -1 -- and the
+    heater commands flipped sign on every single sample (measured
+    sign-flip-per-sample of exactly 1.00), bounded only by the u >= 0 clip. On this
+    plant a continuous gain leaves the unit circle at every practical dt, including
+    0.1 s, so there is no safe default to offer.
+
+    Cost is ~4 ms at r=33..50, so this is cheap enough to redo at runtime whenever
+    the sample rate changes."""
+    dt = float(dt_s)
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError(f"design timestep must be finite and positive, got {dt_s!r}")
+    n = np.asarray(A_r).shape[0]
+    m = np.asarray(B_r).shape[1]
+    Ad, Bd, *_ = cont2discrete((A_r, B_r, np.zeros((1, n)), np.zeros((1, m))), dt)
+    P = solve_discrete_are(Ad, Bd, np.asarray(Q) * dt, np.asarray(R) * dt)
+    return np.linalg.solve(np.asarray(R) * dt + Bd.T @ P @ Bd, Bd.T @ P @ Ad)
 
 
 def regularized_estimator(C_r, reg_frac: float = 1.0e-3):
@@ -390,6 +427,7 @@ def design_modal_controller(
     integral_gain: float,
     out_path: str | Path,
     graph_name: str = "",
+    design_dt_s: float = 1.0,
     progress: Callable[[str], None] | None = None,
 ) -> ModalDesignResult:
     """Reduce the plant and design the reduced-order LQR controller, saving the
@@ -446,7 +484,10 @@ def design_modal_controller(
 
     _report(progress, "Designing LQR + estimator…")
     C_ctrl = Cr[ctrl_idx]
-    K = design_lqr(Ar, Br, C_ctrl, effort_weight)
+    design_dt_s = float(design_dt_s)
+    Q_lqr, R_lqr = lqr_weights(Ar, Br, C_ctrl, effort_weight)
+    K = discrete_lqr_gain(Ar, Br, Q_lqr, R_lqr, design_dt_s)
+    _report(progress, f"LQR designed in discrete time at dt={design_dt_s:g} s (|K|={np.linalg.norm(K):.3g}).")
     E_reg = regularized_estimator(Cr)
     Nx, Nu = servo_maps(Ar, Br, C_ctrl)
 
@@ -508,6 +549,16 @@ def design_modal_controller(
         r=int(r),
         n_modes=int(n_modes),
         effort_weight=float(effort_weight),
+        # The sample rate K was designed at, plus the reduced plant and cost
+        # weights it came from. K is only valid at design_dt_s; storing the
+        # ingredients lets the simulator re-derive a correct gain at any other dt
+        # (~4 ms) instead of silently applying a mis-sampled one. The MCU keeps
+        # using the baked K, since it runs at a fixed rate.
+        design_dt_s=float(design_dt_s),
+        A_r=np.asarray(Ar, dtype=float),
+        B_r=np.asarray(Br, dtype=float),
+        Q_lqr=np.asarray(Q_lqr, dtype=float),
+        R_lqr=np.asarray(R_lqr, dtype=float),
         hsv=np.asarray(hsv, dtype=float),
         lam=np.asarray(lam, dtype=float),
         dc_gain=np.asarray(G, dtype=float),
