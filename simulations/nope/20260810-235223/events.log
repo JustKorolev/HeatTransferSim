@@ -1,0 +1,18 @@
+[2026-08-10T23:52:23] run_start: graph=nope out=simulations\nope\20260810-235223
+[2026-08-10T23:52:23] low_memory_load_unavailable: Low-memory load unavailable for C:\Users\andre\AppData\Local\Temp\pytest-of-andre\pytest-94\test_cli_applies_per_sensor_se0\nope: missing nodes.csv.
+[2026-08-10T23:52:23] graph_load: using the full graph.json loader
+[2026-08-10T23:52:23] error: Traceback (most recent call last):
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\simulation_runner.py", line 273, in run
+    prepared, params, C_diag, sensors, heaters, cryo_idx = self._prepare()
+                                                           ^^^^^^^^^^^^^^^
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\simulation_runner.py", line 369, in _prepare
+    model, matrices = self._load_graph()
+                      ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\simulation_runner.py", line 349, in _load_graph
+    return load_graph_folder(str(self.graph_folder))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\andre\Documents\2025-2026 Academic Year\SURF\HeatTransferSim\graph_visualizer\graph_io.py", line 97, in load_graph_folder
+    raise FileNotFoundError(
+FileNotFoundError: Graph folder is incomplete/corrupted. Missing: graph3d.json
+
+[2026-08-10T23:52:23] run_end: status=error: FileNotFoundError: Graph folder is incomplete/corrupted. Missing: graph3d.json

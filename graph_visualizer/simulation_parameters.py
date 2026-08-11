@@ -40,7 +40,21 @@ class SimulationParameters:
     mimo_default_heater_max_power_W: float = 30.0
     mimo_lambda_u: float = 1.0e-3
     mimo_rho_du: float = 0.0
-    mimo_heater_slew_rate_W_per_s: float = 0.0
+    # Max rate of change of a heater's COMMANDED power (W/s), per heater: a step may
+    # move the command by at most slew*dt. This models the DRIVER, not the thermal
+    # response -- a resistive heater on a PWM/DAC stage reaches full power in ~1 ms
+    # (~30 kW/s for a 30 W heater), and the thermal lag is already represented by C
+    # and L, so rate-limiting for "thermal realism" would double-count it.
+    #
+    # 30 W/s = full range in 1 s: honest about the hardware, conservative by three
+    # orders of magnitude, and non-binding at any sane dt (it exceeds the [0, u_max]
+    # clamp whenever dt >= 1 s), so it adds no phase lag. That matters because a rate
+    # limiter is a nonlinearity: when it binds it costs phase margin and can drive
+    # rate-limiter-induced oscillation, and this controller's anti-windup keys off
+    # the PRE-slew clamp, so the integral keeps winding toward a command the actuator
+    # is not delivering. Lower it only to encode a REAL constraint (a documented
+    # driver ramp, or a deliberate thermal-shock limit) -- not as damping.
+    mimo_heater_slew_rate_W_per_s: float = 30.0
     mimo_v_cmd_abs_max_K_per_s: float = 0.25
     heater_sensor_pair_alpha: float = 1.0
     role_contact_tolerance_mm: float = 1.0e-6
