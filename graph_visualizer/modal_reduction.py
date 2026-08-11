@@ -219,8 +219,7 @@ def exact_dc_gain(
         L_dc = (csr_matrix(Lm) + diags(Gradm)).tocsr()
         ground = "radiation"
 
-    _report(progress, f"Factorizing the {L_dc.shape[0]:,}-node DC operator (splu)…")
-    G, RGA = dc_gain_and_rga(L_dc, F, S, monitor)
+    G, RGA = dc_gain_and_rga(L_dc, F, S, monitor, progress=progress)
     controlled_ids = np.asarray(sensor_ids)[~monitor]
 
     # The RGA diagonal only means "how good is pairing i with i" when there is one
@@ -252,14 +251,84 @@ def exact_dc_gain(
     }
 
 
-def dc_gain_and_rga(Leff, F, S, monitor):
-    """Exact steady-state gain G = S_ctrl L_eff^{-1} F and its RGA."""
-    lu = splu(Leff.tocsc())
-    X = lu.solve(np.asarray(F, dtype=float))
+# Above this many nodes, solve the DC system iteratively instead of factorizing.
+# splu is a full sparse LU: on a 3D thermal mesh its fill-in grows far faster than
+# the node count, so a graph that factorizes in seconds at 300k nodes can run for
+# hours (or exhaust RAM) at 3M. L_dc is symmetric positive definite -- a graph
+# Laplacian plus a nonnegative grounding diagonal -- so CG applies directly, needs
+# only matrix-vector products, and costs one solve per heater rather than one
+# factorization for all of them.
+DC_GAIN_DIRECT_MAX_NODES = 250_000
+
+
+def dc_gain_and_rga(Leff, F, S, monitor, *, progress=None, rtol=1.0e-10):
+    """Exact steady-state gain G = S_ctrl L_eff^{-1} F and its RGA.
+
+    Uses a direct factorization when the operator is small enough to afford one,
+    and preconditioned CG per heater column otherwise. Both compute the same
+    quantity; the iterative path reports its residual so the result is checkable
+    rather than merely plausible.
+    """
+    Leff = csr_matrix(Leff)
+    F = np.asarray(F, dtype=float)
+    n = Leff.shape[0]
+    if n <= DC_GAIN_DIRECT_MAX_NODES:
+        _report(progress, f"Factorizing the {n:,}-node DC operator (splu)…")
+        X = splu(Leff.tocsc()).solve(F)
+    else:
+        X = _dc_solve_iterative(Leff, F, progress=progress, rtol=rtol)
     ctrl = ~monitor
     G = S[ctrl] @ X
     RGA = G * np.linalg.pinv(G).T
     return G, RGA
+
+
+def _dc_solve_iterative(Leff, F, *, progress=None, rtol=1.0e-10, maxiter=20_000):
+    """Solve Leff X = F column by column with Jacobi-preconditioned CG.
+
+    One column per heater. A heater's load is a point source, so the columns are
+    independent and each converges on its own; solving them separately also means
+    progress is reportable, which matters when the alternative is a silent
+    multi-hour factorization.
+
+    Raises if a column fails to converge: a quietly under-converged G would be a
+    plausible-looking matrix that produces a subtly wrong decoupler, which is far
+    worse than a build that stops and says so.
+    """
+    from scipy.sparse.linalg import LinearOperator, cg
+
+    n, m = Leff.shape[0], F.shape[1]
+    diag = Leff.diagonal().astype(float)
+    # Jacobi preconditioner. Zero/negative diagonals cannot be inverted; leave them
+    # unscaled rather than producing inf and poisoning the whole solve.
+    inv_diag = np.where(diag > 0.0, 1.0 / np.where(diag > 0.0, diag, 1.0), 1.0)
+    M = LinearOperator((n, n), matvec=lambda v: inv_diag * v, dtype=float)
+
+    X = np.zeros((n, m), dtype=float)
+    worst = 0.0
+    for j in range(m):
+        b = F[:, j]
+        scale = float(np.linalg.norm(b))
+        if scale == 0.0:
+            continue  # a heater with no deposition cells contributes a zero column
+        try:
+            x, info = cg(Leff, b, rtol=rtol, atol=0.0, maxiter=maxiter, M=M)
+        except TypeError:  # scipy < 1.12 spells the tolerance "tol"
+            x, info = cg(Leff, b, tol=rtol, atol=0.0, maxiter=maxiter, M=M)
+        residual = float(np.linalg.norm(Leff @ x - b)) / scale
+        worst = max(worst, residual)
+        if info != 0 or not np.isfinite(residual) or residual > max(1.0e-6, 100.0 * rtol):
+            raise RuntimeError(
+                f"DC solve did not converge for heater column {j + 1}/{m} "
+                f"(cg info={info}, relative residual {residual:.3e}). The operator may be "
+                "singular -- check that the graph has a cryocooler or a radiation path to "
+                "ground, since an ungrounded Laplacian has no unique steady state."
+            )
+        X[:, j] = x
+        if progress is not None and (j + 1) % max(1, m // 20) == 0:
+            _report(progress, f"DC solve: {j + 1}/{m} heater columns (worst residual {worst:.2e})")
+    _report(progress, f"DC solve complete: {m} columns, worst relative residual {worst:.2e}")
+    return X
 
 
 def drop_inert_cells(

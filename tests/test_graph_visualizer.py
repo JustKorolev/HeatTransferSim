@@ -1397,39 +1397,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(model.nodes[2].assigned_sensor_id, 3)
         self.assertEqual(model.nodes[3].assigned_heater_ids, [2])
 
-    def test_mimo_dynamic_rate_gain_is_static_direct_capacitance(self) -> None:
-        model = ThermalGraphModel(metadata=GraphMetadata(graph_name="mimo_static_bdyn"))
-        for node_id, capacitance in ((1, 10.0), (2, 20.0)):
-            node = NodeProperties.with_material(node_id, (node_id, 0, 0), material="copper")
-            node.C_J_K = capacitance
-            node.initial_temperature_K = 300.0
-            node.is_heater = True
-            node.is_sensor = True
-            node.heater.heater_max_power_W = 20.0
-            node.heater_control.mode = "mimo"
-            node.controller_setpoint_K = 310.0
-            node.controller_kp_coarse = 1.0
-            model.add_node(node)
-        matrices = {
-            "node_ids": np.array([1, 2], dtype=int),
-            "C": np.array([10.0, 20.0]),
-            "L": np.array([[1.0, -1.0], [-1.0, 1.0]]),
-            "G_rad": np.array([0.0, 0.0]),
-        }
-        prepared = prepare_simulation(
-            model,
-            matrices,
-            SimulationParameters(dt_s=1.0, input_mode="heater_inputs", mimo_lambda_u=0.0, use_ambient_radiation=False),
-        )
-
-        B_dyn = prepared._mimo_dynamic_gain_matrix(
-            [1, 2],
-            [1, 2],
-            {1: 0, 2: 1},
-        )
-
-        np.testing.assert_allclose(B_dyn, np.diag([0.1, 0.05]))
-
     def test_refresh_cryocoolers_activates_cooling_without_reprepare(self) -> None:
         # A cryocooler (re)assignment should take effect via a light device rebuild,
         # NOT a full re-prepare: matrices/operators are preserved and cooling becomes

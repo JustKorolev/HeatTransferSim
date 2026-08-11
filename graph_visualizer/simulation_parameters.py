@@ -35,8 +35,6 @@ class SimulationParameters:
     cryocooler_capacity_scale: float = 1.0
     cryocooler_enabled: bool = True
     mimo_controller_enabled: bool = False
-    mimo_hold_threshold_K: float = 1.0
-    mimo_coarse_threshold_K: float = 3.0
     mimo_default_heater_max_power_W: float = 30.0
     mimo_lambda_u: float = 1.0e-3
     mimo_rho_du: float = 0.0
@@ -58,22 +56,16 @@ class SimulationParameters:
     # Read ONLY by the removed PID+QP allocator (it clamped that scheme's desired
     # sensor rate before allocation). Kept so existing simulation_parameters.json
     # files still load; nothing consumes it.
-    mimo_v_cmd_abs_max_K_per_s: float = 0.25
-    heater_sensor_pair_alpha: float = 1.0
     role_contact_tolerance_mm: float = 1.0e-6
     role_contact_tolerance_max_mm: float = 1.0
     role_contact_tolerance_growth_factor: float = 2.0
-    drift_lpf_tau_s: float = 2.0
-    derivative_dt_floor_s: float = 1.0e-9
     mimo_integral_abs_max: float = 1.0e6
-    mimo_freeze_integral_when_saturated: bool = True
     # Passive sensor-drift source for the MIMO feedforward. True (default): a
     # disturbance observer -- estimate drift from the MEASURED sensor rate minus
     # the commanded-heater effect (d = dT/dt_measured - B_s @ u_prev). This is what
     # a real controller can do (no plant model on the MCU) and is reactive (needs a
     # step of history). False: the model-based oracle (project the full thermal RHS
     # with MIMO heating excluded) -- only available in simulation, kept for A/B.
-    mimo_passive_drift_from_measurement: bool = True
     # Which heater controller runs in "heater_inputs" mode:
     #   "mimo_pi"   -> static-decoupling PI over the plant's DC gain G (default),
     #   "none"      -> nothing regulates the heaters (cryocoolers/manual only),
@@ -269,6 +261,14 @@ def load_simulation_parameters(path: Path) -> tuple[SimulationParameters, dict[s
         "fast_sparse_simulation_max_substeps",
         "fast_sparse_simulation_safety_factor",
         "implicit_sparse_simulation_enabled",
+        "mimo_hold_threshold_K",
+        "mimo_coarse_threshold_K",
+        "mimo_v_cmd_abs_max_K_per_s",
+        "heater_sensor_pair_alpha",
+        "drift_lpf_tau_s",
+        "derivative_dt_floor_s",
+        "mimo_freeze_integral_when_saturated",
+        "mimo_passive_drift_from_measurement",
     }
     values = {key: migrated[key] for key in known if key in migrated}
     extras = {key: value for key, value in raw.items() if key not in known and key not in deprecated}

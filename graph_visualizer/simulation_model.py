@@ -583,6 +583,11 @@ class PreparedSimulation:
         self.controller_modal_ff_correction = None
         self._modal_ff_rls_P = None
         self._modal_ff_prev_y_dev = None
+        # MIMO PI's integral and its held passive reference. Both were missed when
+        # the scheme was added, so "Reset integrators" left MIMO PI's windup in
+        # place -- the one button whose entire job is to clear it.
+        self.controller_mimo_pi_integral = None
+        self.controller_mimo_pi_passive_K = None
         self.controller_dynamic_gain_cache = {}
 
     def mark_controller_stale(self) -> None:
@@ -593,6 +598,11 @@ class PreparedSimulation:
         self.controller_modal_ff_correction = None
         self._modal_ff_rls_P = None
         self._modal_ff_prev_y_dev = None
+        # A different G (or a retune) invalidates both: the integral is denominated
+        # in the old decoupler's channels, and the reference was captured against
+        # the old G.
+        self.controller_mimo_pi_integral = None
+        self.controller_mimo_pi_passive_K = None
         self.controller_dynamic_gain_cache = {}
 
     def refresh_cryocoolers(self) -> None:
@@ -1695,6 +1705,33 @@ class PreparedSimulation:
         self._modal_ff_rls_P = P
         return committed, dM, True, float(alpha)
 
+    def _mimo_pi_reference_deviation(self, G, heater_ids, setpoints, y, valid) -> np.ndarray:
+        """(r - y_passive) over the controlled sensors, the reference the QP inverts.
+
+        y_passive -- what the sensors settle to with the controlled heaters at 0 W --
+        is captured once, from the first evaluation, as ``y - G u_prev`` (u_prev is
+        the last command, so this is exact whenever the plant is at steady state and
+        a first-order estimate otherwise).
+
+        It is deliberately NOT refreshed each step. Re-estimating it would turn the
+        law into u = u_prev + G+(Kp e + Ki integral) -- Kp becomes a second
+        integrator, and a double integrator on a plant whose slowest mode is ~24 h
+        overshoots by construction. Holding it keeps this a textbook PI.
+
+        A run that starts far from equilibrium therefore captures a biased reference.
+        That is what the integral is for, and it is strictly better than the mean-
+        setpoint offset this replaced, which was biased AND coupled the channels.
+        """
+        held = getattr(self, "controller_mimo_pi_passive_K", None)
+        if held is None or np.asarray(held).shape[0] != len(setpoints):
+            u_prev = np.array(
+                [float(self.controller_last_power_by_heater.get(int(h), 0.0)) for h in heater_ids],
+                dtype=float,
+            )
+            held = np.where(valid, y - G @ u_prev, 0.0)
+            self.controller_mimo_pi_passive_K = held
+        return np.where(valid, setpoints - np.asarray(held, dtype=float), 0.0)
+
     def _mimo_pi_scheme_active(self) -> bool:
         """True when the static-decoupling MIMO PI should run: scheme selected,
         heater-input mode, and a usable DC gain matrix is loaded for this graph."""
@@ -1828,10 +1865,18 @@ class PreparedSimulation:
         candidate = integral + error * dt
 
         # v is a virtual command in KELVIN: the steady deviation we want the plant
-        # to hold. r_dev carries the setpoint itself so the QP produces the holding
-        # power directly (the feedforward), leaving PI to supply only the correction.
-        T_op = float(np.nanmean(setpoints[valid])) if valid.any() else 0.0
-        r_dev = np.where(valid, setpoints - T_op, 0.0)
+        # to hold. Because G maps power to the rise ABOVE the unheated equilibrium
+        #
+        #     y_ss = y_passive + G u   =>   to hold y = r, G u = r - y_passive
+        #
+        # the reference the QP must be handed is (r - y_passive), NOT the setpoint
+        # itself. This used to pass (r - mean(r)), which is not a physical quantity:
+        # with every setpoint equal -- the common case -- it is identically zero, so
+        # the feedforward contributed nothing and the integral had to supply the
+        # whole holding power (slow, and it winds up across the plant's multi-hour
+        # transient). Worse, it coupled channels through the mean: giving one extra
+        # sensor a setpoint shifted EVERY other channel's reference.
+        r_dev = self._mimo_pi_reference_deviation(G, heater_ids, setpoints, y, valid)
         v_cmd = r_dev + kp * error + ki * candidate
 
         # A heater the user unticked in the enabled-I/O table must not be driven.
@@ -1883,6 +1928,9 @@ class PreparedSimulation:
             "saturated_high": int(np.count_nonzero((maxima > 0.0) & (u >= maxima - 1.0e-9))),
             "slew_rate_limit_W_per_s": float(slew),
             "cond_G": float(np.linalg.cond(G)),
+            # The held (r - y_passive) reference, so a run's feedforward can be
+            # checked after the fact rather than inferred from the commands.
+            "reference_deviation_K": [float(v) for v in r_dev],
         }
         if update_state:
             # Back-calculation anti-windup: integrate the error the plant will
@@ -1944,183 +1992,6 @@ class PreparedSimulation:
             cryocooler_diagnostics=self.last_cryocooler_diagnostics,
             capacitance=self._live_capacitance(),
         )
-
-    def _mimo_baseline_sensor_drift(
-        self,
-        sensor_ids: list[int],
-        node_index: dict[int, int],
-        baseline_powers: np.ndarray,
-    ) -> np.ndarray:
-        if self.model is None or self.A is None or self.base_b is None or self.inv_C is None:
-            return np.zeros(len(sensor_ids), dtype=float)
-        try:
-            rhs = self._thermal_rhs(self.temperatures_K, baseline_powers)
-        except Exception as exc:
-            self.controller_warnings.append(f"MIMO feedforward passive drift estimate failed: {exc}")
-            return np.zeros(len(sensor_ids), dtype=float)
-        values = [
-            sensor_readout_temperature_K(self.model, node_index, rhs, int(sensor_id))
-            for sensor_id in sensor_ids
-        ]
-        return np.where(np.isfinite(values), np.asarray(values, dtype=float), 0.0)
-
-    def _mimo_sensor_drift_estimate(
-        self,
-        sensor_ids: list[int],
-        sensor_temperatures_K: np.ndarray,
-        dt: float,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        temperatures = np.asarray(sensor_temperatures_K, dtype=float).reshape(-1)
-        dt_floor = max(0.0, float(getattr(self.params, "derivative_dt_floor_s", 1.0e-9)))
-        tau = max(0.0, float(getattr(self.params, "drift_lpf_tau_s", 0.0)))
-        use_update = bool(np.isfinite(dt) and dt > dt_floor)
-        raw = np.zeros(len(sensor_ids), dtype=float)
-        filtered = np.zeros(len(sensor_ids), dtype=float)
-        alpha = float(dt / (tau + dt)) if use_update else 0.0
-        alpha = min(1.0, max(0.0, alpha)) if np.isfinite(alpha) else 0.0
-        for index, (sensor_id, temperature) in enumerate(zip(sensor_ids, temperatures)):
-            previous_hat = float(self.controller_dTdt_hat_by_sensor.get(int(sensor_id), 0.0))
-            if not np.isfinite(previous_hat):
-                previous_hat = 0.0
-            previous_temperature = self.controller_y_prev.get(int(sensor_id))
-            if not use_update or previous_temperature is None:
-                raw_value = previous_hat
-            else:
-                raw_value = (float(temperature) - float(previous_temperature)) / float(dt)
-            if not np.isfinite(raw_value):
-                raw_value = previous_hat
-            raw[index] = float(raw_value)
-            filtered[index] = (1.0 - alpha) * previous_hat + alpha * float(raw_value)
-        return raw, filtered
-
-    def _mimo_dynamic_gain_matrix(
-        self,
-        sensor_ids: list[int],
-        heater_ids: list[int],
-        node_index: dict[int, int],
-    ) -> np.ndarray:
-        inv_C = np.asarray(self.inv_C, dtype=float).reshape(-1) if self.inv_C is not None else np.zeros(len(self.node_ids))
-        connected_key: tuple[tuple[tuple[int, float], ...], ...]
-        if self.model is None:
-            connected_key = tuple()
-        else:
-            connected_rows: list[tuple[tuple[int, float], ...]] = []
-            for sensor_id in sensor_ids:
-                sensor = self.model.nodes[int(sensor_id)]
-                readout_ids = (
-                    getattr(sensor, "readout_node_ids", [])
-                    or getattr(sensor, "sensor_connected_node_ids", [])
-                    or []
-                )
-                rows_for_sensor: list[tuple[int, float]] = []
-                for node_id in readout_ids:
-                    node_id = int(node_id)
-                    row = node_index.get(node_id)
-                    if row is None:
-                        continue
-                    rows_for_sensor.append((node_id, round(float(inv_C[int(row)]), 12)))
-                connected_rows.append(tuple(rows_for_sensor))
-            connected_key = tuple(connected_rows)
-        gain_key: tuple[tuple[float, ...], ...]
-        if self.model is None:
-            gain_key = tuple()
-        else:
-            gain_key = tuple(
-                tuple(float(self.model.controller_gain(int(sensor_id), int(heater_id))) for heater_id in heater_ids)
-                for sensor_id in sensor_ids
-            )
-        key = (
-            tuple(int(value) for value in sensor_ids),
-            tuple(int(value) for value in heater_ids),
-            connected_key,
-            gain_key,
-            float(getattr(self.params, "heater_sensor_pair_alpha", 1.0)),
-        )
-        cache = self.controller_dynamic_gain_cache
-        if (
-            isinstance(cache, dict)
-            and cache.get("key") == key
-            and "B_dyn" in cache
-        ):
-            return np.asarray(cache["B_dyn"], dtype=float).copy()
-        B_dyn = np.zeros((len(sensor_ids), len(heater_ids)), dtype=float)
-        heater_col_by_id = {int(heater_id): col for col, heater_id in enumerate(heater_ids)}
-        warnings: list[str] = []
-        average_inverse_C_s: list[float] = []
-        sources: list[str] = []
-        alpha = max(0.0, float(getattr(self.params, "heater_sensor_pair_alpha", 1.0)))
-        for sensor_index, sensor_id in enumerate(sensor_ids):
-            if self.model is None:
-                average_inverse_C_s.append(0.0)
-                sources.append("none")
-                continue
-            sensor = self.model.nodes[int(sensor_id)]
-            average_inverse_C, valid_node_ids = average_inverse_capacitance_for_sensor(
-                self.model,
-                node_index,
-                inv_C,
-                int(sensor_id),
-            )
-            average_inverse_C_s.append(float(average_inverse_C))
-            source = "none"
-            for heater_id, heater_col in heater_col_by_id.items():
-                explicit_gain = float(self.model.controller_gain(int(sensor_id), int(heater_id)))
-                if np.isfinite(explicit_gain) and abs(explicit_gain) > 0.0:
-                    B_dyn[sensor_index, heater_col] = explicit_gain
-                    source = "G_ctrl"
-            paired_heater_cols = [
-                col
-                for heater_id, col in heater_col_by_id.items()
-                if int(getattr(self.model.nodes[int(heater_id)], "assigned_sensor_id", -1) or -1) == int(sensor_id)
-                or (
-                    int(heater_id) == int(sensor_id)
-                    and sensor.is_heater
-                    and str(getattr(getattr(sensor, "heater_control", None), "mode", "")) == "mimo"
-                )
-            ]
-            if not paired_heater_cols:
-                if not np.any(np.abs(B_dyn[sensor_index, :]) > 0.0):
-                    warnings.append(f"MIMO sensor {int(sensor_id)} has no active paired heater; B_s row set to zero.")
-                sources.append(source)
-                continue
-            if np.isfinite(average_inverse_C) and average_inverse_C > 0.0:
-                for heater_col in paired_heater_cols:
-                    if abs(float(B_dyn[sensor_index, heater_col])) <= 0.0:
-                        B_dyn[sensor_index, heater_col] = alpha * float(average_inverse_C)
-                        if source == "none":
-                            source = "capacitance"
-            elif not np.any(np.abs(B_dyn[sensor_index, :]) > 0.0):
-                warnings.append(
-                    f"MIMO sensor {int(sensor_id)} has no valid connected-node capacitance; B_s row set to zero."
-                )
-            if not valid_node_ids and not np.any(np.abs(B_dyn[sensor_index, :]) > 0.0):
-                warnings.append(f"MIMO sensor {int(sensor_id)} has no valid connected nodes for average inverse C.")
-            sources.append(source)
-        for sensor_index, sensor_id in enumerate(sensor_ids):
-            sensor = self.model.nodes[int(sensor_id)] if self.model is not None else None
-            if sensor is not None and _controller_sensor_weight(sensor) > 0.0 and not np.any(np.abs(B_dyn[sensor_index, :]) > 0.0):
-                warnings.append(f"MIMO sensor {int(sensor_id)} has nonzero control weight but B_s row is all zero.")
-        for heater_index, heater_id in enumerate(heater_ids):
-            if not np.any(np.abs(B_dyn[:, heater_index]) > 0.0):
-                warnings.append(f"MIMO heater {int(heater_id)} is active but B_s column is all zero.")
-        self.controller_dynamic_gain_cache = {
-            "key": key,
-            "B_dyn": B_dyn.copy(),
-            "warnings": tuple(warnings),
-            "average_inverse_C_s": [float(value) for value in average_inverse_C_s],
-            "sources": tuple(sources),
-        }
-        return B_dyn
-
-    def _update_controller_mode(self, weighted_rms: float) -> bool:
-        previous_mode = self.controller_mode
-        if self.controller_mode not in {"coarse", "hold"}:
-            self.controller_mode = "coarse"
-        if self.controller_mode == "coarse" and weighted_rms <= float(self.params.mimo_hold_threshold_K):
-            self.controller_mode = "hold"
-        elif self.controller_mode == "hold" and weighted_rms >= float(self.params.mimo_coarse_threshold_K):
-            self.controller_mode = "coarse"
-        return self.controller_mode != previous_mode
 
 def prepare_simulation(
     model: ThermalGraphModel,

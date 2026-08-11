@@ -350,3 +350,76 @@ def test_empty_enabled_set_drives_no_heater(monkeypatch) -> None:
     sim._mimo_pi_controller_power_vector(update_state=True)
     commands = sim.controller_allocator_diagnostics["heater_commands_W"]
     assert all(c == pytest.approx(0.0, abs=1e-9) for c in commands), commands
+
+
+# --- the feedforward reference ----------------------------------------------- #
+def _ref(sim, setpoints):
+    """The (r - y_passive) reference the law hands the QP, for given setpoints."""
+    for sid, target in zip([20, 21], setpoints):
+        sim.model.nodes[sid].controller_setpoint_K = target
+    sim._mimo_pi_controller_power_vector(update_state=True)
+    return np.array(sim.controller_allocator_diagnostics["reference_deviation_K"])
+
+
+def test_reference_is_the_rise_needed_above_the_passive_equilibrium(monkeypatch) -> None:
+    """G maps power to the rise ABOVE the unheated equilibrium, so the QP's
+    reference must be (r - y_passive), not the setpoint itself."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    # Sensors read 50 K with the heaters at 0 W, so y_passive = 50 K.
+    ref = _ref(sim, [60.0, 65.0])
+    assert ref == pytest.approx([10.0, 15.0])
+
+
+def test_one_sensors_setpoint_does_not_move_another_channels_reference(monkeypatch) -> None:
+    """The regression this guards: the reference used to be (r - mean(r)), so
+    changing ONE setpoint shifted every other channel through the mean -- a purely
+    numerical coupling on top of the physical coupling the decoupler exists to undo.
+    """
+    a = _ref(_pi_sim(monkeypatch, enabled_heater_node_ids=None), [60.0, 65.0])
+    b = _ref(_pi_sim(monkeypatch, enabled_heater_node_ids=None), [60.0, 300.0])
+    assert a[0] == pytest.approx(b[0]), "sensor 0's reference must not depend on sensor 1's"
+
+
+def test_uniform_setpoints_still_produce_a_feedforward(monkeypatch) -> None:
+    """With (r - mean(r)) this was identically zero whenever every setpoint matched
+    -- the common case -- leaving the integral to supply the entire holding power
+    across a multi-hour transient. It must now be the actual required rise."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    ref = _ref(sim, [60.0, 60.0])
+    assert ref == pytest.approx([10.0, 10.0])
+    assert all(c > 0.0 for c in sim.controller_allocator_diagnostics["heater_commands_W"])
+
+
+def test_the_passive_reference_is_held_not_re_estimated(monkeypatch) -> None:
+    """Re-estimating y_passive every step would make Kp a second integrator. Once
+    captured it must stay put even as the plant heats up under the command."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    first = _ref(sim, [60.0, 60.0])
+    sim.z = np.append(np.full(len(sim.node_ids), 55.0), 0.0)   # plant responds
+    monkeypatch.setattr(
+        "graph_visualizer.simulation_model.sensor_readout_temperature_K",
+        lambda model, idx, temps, nid: 55.0,
+    )
+    assert _ref(sim, [60.0, 60.0]) == pytest.approx(first)
+
+
+def test_reset_integrators_clears_mimo_pi_state(monkeypatch) -> None:
+    """The button's whole job is clearing windup; it used to clear only the modal
+    scheme's integral, silently leaving MIMO PI's in place."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    _ref(sim, [60.0, 60.0])
+    assert sim.controller_mimo_pi_integral is not None
+    assert sim.controller_mimo_pi_passive_K is not None
+    sim.reset_controller_integrators()
+    assert sim.controller_mimo_pi_integral is None
+    assert sim.controller_mimo_pi_passive_K is None
+
+
+def test_changing_the_controller_invalidates_the_held_reference(monkeypatch) -> None:
+    """Both the integral and the captured reference are denominated in a specific
+    G; carrying them onto a different matrix would be meaningless."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    _ref(sim, [60.0, 60.0])
+    sim.mark_controller_stale()
+    assert sim.controller_mimo_pi_integral is None
+    assert sim.controller_mimo_pi_passive_K is None

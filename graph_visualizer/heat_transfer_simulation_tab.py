@@ -73,18 +73,11 @@ _DISPLAY_PARAMETER_FIELDS = {
 }
 _CONTROLLER_PARAMETER_FIELDS = {
     "mimo_controller_enabled",
-    "mimo_hold_threshold_K",
-    "mimo_coarse_threshold_K",
     "mimo_default_heater_max_power_W",
     "mimo_lambda_u",
     "mimo_rho_du",
     "mimo_heater_slew_rate_W_per_s",
-    "mimo_v_cmd_abs_max_K_per_s",
-    "heater_sensor_pair_alpha",
-    "drift_lpf_tau_s",
-    "derivative_dt_floor_s",
     "mimo_integral_abs_max",
-    "mimo_freeze_integral_when_saturated",
     # The modal controller's integral gain is read fresh every step and is
     # independent of the LQR build (the artifact's stored integral_gain is
     # metadata only), so retuning it never needs a controller rebuild.
@@ -2340,21 +2333,14 @@ class HeatTransferSimulationTab:
             simulation_history_limit=int(self.inputs["simulation_history_limit"].value()),
             live_step_profiling_enabled=True,
             mimo_controller_enabled=self._mimo_controller_should_run(),
-            mimo_hold_threshold_K=float(self.inputs["mimo_hold_threshold_K"].value()),
-            mimo_coarse_threshold_K=float(self.inputs["mimo_coarse_threshold_K"].value()),
             mimo_default_heater_max_power_W=float(self.inputs["mimo_default_heater_max_power_W"].value()),
             mimo_lambda_u=float(self.inputs["mimo_lambda_u"].value()),
             mimo_rho_du=float(self.inputs["mimo_rho_du"].value()),
             mimo_heater_slew_rate_W_per_s=float(self.inputs["mimo_heater_slew_rate_W_per_s"].value()),
-            mimo_v_cmd_abs_max_K_per_s=float(self.inputs["mimo_v_cmd_abs_max_K_per_s"].value()),
-            heater_sensor_pair_alpha=float(self.inputs["heater_sensor_pair_alpha"].value()),
             role_contact_tolerance_mm=float(self.inputs["role_contact_tolerance_mm"].value()),
             role_contact_tolerance_max_mm=float(self.inputs["role_contact_tolerance_max_mm"].value()),
             role_contact_tolerance_growth_factor=float(self.inputs["role_contact_tolerance_growth_factor"].value()),
-            drift_lpf_tau_s=float(self.inputs["drift_lpf_tau_s"].value()),
-            derivative_dt_floor_s=float(self.inputs["derivative_dt_floor_s"].value()),
             mimo_integral_abs_max=float(self.inputs["mimo_integral_abs_max"].value()),
-            mimo_freeze_integral_when_saturated=bool(self.inputs["mimo_freeze_integral_when_saturated"].isChecked()),
             enabled_heater_node_ids=(
                 tuple(sorted(int(node_id) for node_id in self.enabled_heater_node_ids))
                 if self._enabled_io_initialized
@@ -2611,25 +2597,34 @@ class HeatTransferSimulationTab:
                 rms_text = "?" if rms is None else f"{float(rms):.4g} K"
                 warnings = "\n".join(self.prepared.controller_warnings[:4])
                 diagnostics = self.prepared.controller_allocator_diagnostics
+                # Report the keys the ACTIVE scheme actually emits. This block used
+                # to read PID+QP's (B_s_source, rate_command_norm, ...), so after
+                # that scheme was removed every field would have rendered as "?" or
+                # 0 -- a status panel that looks populated while saying nothing.
+                scheme = str(diagnostics.get("controller_scheme", "")) if diagnostics else ""
                 allocation_text = ""
                 if diagnostics:
-                    b_sources = diagnostics.get("B_s_source", []) or []
-                    source_text = ",".join(sorted({str(source) for source in b_sources if str(source)})) or "?"
+                    commands = [float(v) for v in diagnostics.get("heater_commands_W", [])]
+                    maxima = [float(v) for v in diagnostics.get("heater_max_power_W", [])]
+                    total = sum(commands)
+                    capacity = sum(maxima)
                     allocation_text = (
-                        f"\nthermal-rate QP: sensors={diagnostics.get('active_sensor_count', '?')}, "
-                        f"heaters={diagnostics.get('active_heater_count', '?')}, "
-                        f"||v_cmd||={float(diagnostics.get('rate_command_norm', 0.0)):.4g} K/s, "
-                        f"||u_ff||={float(diagnostics.get('feedforward_hold_power_norm', 0.0)):.4g} W, "
-                        f"||u||={float(diagnostics.get('heater_command_norm', 0.0)):.4g}, "
-                        f"rate_resid={float(diagnostics.get('predicted_dTdt_residual_norm', 0.0)):.4g} K/s, "
-                        f"B_s={source_text}"
+                        f"\nsensors={diagnostics.get('active_sensor_count', '?')}, "
+                        f"heaters={len(commands)}, "
+                        f"total={total:.4g} W"
+                        + (f" of {capacity:.4g} W" if capacity > 0.0 else "")
                     )
-                    if diagnostics.get("v_cmd_clipped"):
-                        allocation_text += ", v_cmd clipped"
-                    if diagnostics.get("bounds_active"):
-                        allocation_text += ", bounds active"
+                    if "saturated_low" in diagnostics or "saturated_high" in diagnostics:
+                        allocation_text += (
+                            f", at 0 W={diagnostics.get('saturated_low', 0)}"
+                            f", at max={diagnostics.get('saturated_high', 0)}"
+                        )
+                    if diagnostics.get("cond_G") is not None:
+                        allocation_text += f", cond(G)={float(diagnostics['cond_G']):.4g}"
+                    if diagnostics.get("reduced_order") is not None:
+                        allocation_text += f", r={diagnostics['reduced_order']}"
                 self.controller_status_label.setText(
-                    f"MIMO thermal-rate QP mode = {self.prepared.controller_mode}, weighted RMS error = {rms_text}"
+                    f"controller = {scheme or 'none'}, weighted RMS error = {rms_text}"
                     + allocation_text
                     + (f"\n{warnings}" if warnings else "")
                 )

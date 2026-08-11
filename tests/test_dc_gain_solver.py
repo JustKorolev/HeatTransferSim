@@ -1,0 +1,82 @@
+"""The DC-gain solve must scale to the real graph.
+
+dc_gain_and_rga used to always call splu. A sparse LU of a 3D thermal mesh fills
+in far faster than the node count grows, so a build that took seconds at 300k
+nodes ran for tens of minutes at 3M without finishing. L_dc is SPD (a Laplacian
+plus a nonnegative grounding diagonal), so CG solves the same system with only
+matrix-vector products, one column per heater.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+from scipy.sparse import csr_matrix, diags
+
+from graph_visualizer.modal_reduction import (
+    DC_GAIN_DIRECT_MAX_NODES,
+    _dc_solve_iterative,
+    dc_gain_and_rga,
+)
+
+
+def _spd_plant(n=300, m=5, k=7, seed=0):
+    """A grounded random thermal network: symmetric weights, positive grounding."""
+    rng = np.random.default_rng(seed)
+    A = np.triu(rng.random((n, n)) < 0.02, 1)
+    W = np.where(A, rng.random((n, n)) * 0.5 + 0.1, 0.0)
+    W = W + W.T
+    L = (csr_matrix(diags(W.sum(1)) - csr_matrix(W)) + diags(np.full(n, 0.05))).tocsr()
+    F = np.zeros((n, m))
+    for j, cell in enumerate(rng.choice(n, m, replace=False)):
+        F[cell, j] = 1.0
+    S = np.eye(n)[rng.choice(n, k, replace=False)]
+    monitor = np.zeros(k, dtype=bool)
+    monitor[-2:] = True
+    return L, F, S, monitor
+
+
+def test_iterative_solve_reproduces_the_direct_factorization() -> None:
+    """The two paths must be interchangeable -- the size threshold is a performance
+    decision, so it must not change the answer."""
+    L, F, S, monitor = _spd_plant()
+    G_direct, _ = dc_gain_and_rga(L, F, S, monitor)
+    G_iter = S[~monitor] @ _dc_solve_iterative(L, F, rtol=1.0e-12)
+    assert np.allclose(G_direct, G_iter, rtol=1.0e-7, atol=1.0e-12)
+
+
+def test_a_zero_heater_column_is_not_solved_for() -> None:
+    """A heater with no deposition cells has a zero load, hence a zero gain column.
+    CG on a zero right-hand side has no meaningful relative residual, so it must be
+    skipped rather than tripping the convergence check."""
+    L, F, S, monitor = _spd_plant()
+    F[:, 2] = 0.0
+    X = _dc_solve_iterative(L, F, rtol=1.0e-12)
+    assert np.all(X[:, 2] == 0.0)
+    assert np.any(X[:, 0] != 0.0)
+
+
+def test_an_ungrounded_operator_is_reported_not_silently_wrong() -> None:
+    """Without a cryocooler or radiation path the Laplacian is singular and the
+    steady state is not unique. A near-converged answer would look plausible and be
+    meaningless, so the build must stop and say why."""
+    L, F, S, _monitor = _spd_plant()
+    ungrounded = (csr_matrix(L) - diags(np.full(L.shape[0], 0.05))).tocsr()
+    with pytest.raises(RuntimeError, match="did not converge|singular"):
+        _dc_solve_iterative(ungrounded, F, rtol=1.0e-14, maxiter=200)
+
+
+def test_the_threshold_keeps_small_graphs_on_the_direct_path() -> None:
+    """splu is exact and faster below the crossover; the change is meant to rescue
+    large graphs, not to slow down every small one."""
+    assert DC_GAIN_DIRECT_MAX_NODES >= 100_000
+
+
+def test_progress_is_reported_per_column() -> None:
+    """A silent multi-hour solve is indistinguishable from a hung one -- that is
+    exactly how the original was noticed."""
+    L, F, S, _m = _spd_plant()
+    seen: list[str] = []
+    _dc_solve_iterative(L, F, progress=seen.append, rtol=1.0e-12)
+    assert seen, "the iterative solve must report progress"
+    assert any("residual" in line for line in seen)

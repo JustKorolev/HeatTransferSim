@@ -521,7 +521,6 @@ class SimulationControlsPanel:
         for name, label, minimum, maximum, step in (
             ("mimo_default_heater_max_power_W", "max heater power W", 0.0, 1.0e9, 1.0),
             ("mimo_heater_slew_rate_W_per_s", "hard slew W/s", 0.0, 1.0e9, 1.0),
-            ("mimo_v_cmd_abs_max_K_per_s", "max rate cmd K/s", 0.0, 1.0e9, 0.01),
         ):
             self._add_double(controller_form, name, label, minimum, maximum, step)
 
@@ -529,22 +528,14 @@ class SimulationControlsPanel:
 
         mimo_box, mimo_form = self._add_section(form, "mimo", "MIMO Thermal-Rate QP")
         for name, label, minimum, maximum, step in (
-            ("mimo_hold_threshold_K", "enter hold below K", 0.0, 1.0e6, 0.1),
-            ("mimo_coarse_threshold_K", "return coarse above K", 0.0, 1.0e6, 0.1),
             ("mimo_lambda_u", "lambda_u heater effort", 0.0, 1.0e9, 0.001),
             ("mimo_rho_du", "rho_du power change", 0.0, 1.0e9, 0.01),
-            ("heater_sensor_pair_alpha", "pair alpha", 0.0, 1.0e9, 0.01),
             ("role_contact_tolerance_mm", "role contact tol mm", 0.0, 1.0e9, 1.0e-6),
             ("role_contact_tolerance_max_mm", "role contact max mm", 0.0, 1.0e9, 0.1),
             ("role_contact_tolerance_growth_factor", "role contact growth", 1.01, 1.0e6, 0.1),
-            ("drift_lpf_tau_s", "drift LPF tau s", 0.0, 1.0e9, 0.1),
-            ("derivative_dt_floor_s", "derivative dt floor s", 0.0, 1.0e9, 1.0e-6),
             ("mimo_integral_abs_max", "integral abs max", 0.0, 1.0e12, 1.0),
         ):
             self._add_double(mimo_form, name, label, minimum, maximum, step)
-        self._add_checkbox(
-            mimo_form, "mimo_freeze_integral_when_saturated", "Freeze integral when saturated"
-        )
 
         self._build_solver_controls(form)
 
