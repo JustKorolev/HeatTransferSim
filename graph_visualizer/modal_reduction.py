@@ -557,6 +557,7 @@ def design_modal_controller(
         design_dt_s=float(design_dt_s),
         A_r=np.asarray(Ar, dtype=float),
         B_r=np.asarray(Br, dtype=float),
+        C_r=np.asarray(Cr, dtype=float),
         Q_lqr=np.asarray(Q_lqr, dtype=float),
         R_lqr=np.asarray(R_lqr, dtype=float),
         hsv=np.asarray(hsv, dtype=float),
