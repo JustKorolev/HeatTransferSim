@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -188,7 +190,12 @@ def test_controller_entries_carry_their_own_scheme(tmp_path, monkeypatch) -> Non
     for label, data in entries.items():
         assert isinstance(data, tuple) and len(data) == 2, (label, data)
     schemes = {data[0] for data in entries.values()}
-    assert "mimo_pi" in schemes and "pid_qp" in schemes
+    # "none" is the placeholder row a graph shows before it has an artifact. It is
+    # NOT a controller: PID+QP used to sit in that slot and has been removed, so
+    # selecting it must leave nothing regulating rather than silently running a
+    # scheme whose per-pair PID this plant's negative RGA diagonal makes unusable.
+    assert "mimo_pi" in schemes and "none" in schemes
+    assert "pid_qp" not in schemes
 
 
 def test_selecting_a_gain_matrix_selects_the_mimo_pi_scheme(tmp_path, monkeypatch) -> None:
@@ -232,3 +239,114 @@ def test_gain_build_uses_the_panel_operating_temperature(tmp_path, monkeypatch) 
     )
     tab.build_gain_matrix()
     assert captured == {"t_op_K": 50.0}, captured
+
+
+# --- enabled-I/O gating ------------------------------------------------------ #
+def _pi_sim(monkeypatch, *, enabled_heater_node_ids):
+    """A PreparedSimulation stubbed down to what the MIMO PI law reads.
+
+    Built with object.__new__ rather than prepare_simulation because the behaviour
+    under test is the bound the law puts on each heater, and a real graph would add
+    a mesh, a solver and a cryocooler without making the assertion any stronger.
+    """
+    from graph_visualizer.simulation_model import PreparedSimulation
+    from graph_visualizer.simulation_parameters import SimulationParameters
+
+    class _Node:
+        def __init__(self, setpoint):
+            self.controller_setpoint_K = setpoint
+            self.is_heater = True
+            self.heater_max_power_W = 10.0
+            self.mimo_enabled = True
+            self.C_J_K = 1.0
+            self.heater_mode = "mimo"
+            self.is_cryocooler = False
+
+    heater_ids, sensor_ids = [10, 11], [20, 21]
+    nodes = {i: _Node(float("nan")) for i in heater_ids}
+    nodes.update({s: _Node(60.0) for s in sensor_ids})
+
+    sim = object.__new__(PreparedSimulation)
+    sim.model = type("M", (), {"nodes": nodes})()
+    sim.node_ids = np.array(heater_ids + sensor_ids, dtype=int)
+    sim.node_index_by_id = {int(v): i for i, v in enumerate(sim.node_ids)}
+    # temperatures_K is a read-only view of the augmented state z (temps + time).
+    sim.z = np.append(np.full(len(sim.node_ids), 50.0), 0.0)
+    sim.params = replace(
+        SimulationParameters(),
+        dt_s=1.0,
+        mimo_pi_kp=0.0,
+        mimo_pi_ki=1.0e-2,
+        mimo_heater_slew_rate_W_per_s=0.0,
+        enabled_heater_node_ids=enabled_heater_node_ids,
+    )
+    sim.heater_node_ids = np.array(heater_ids, dtype=int)
+    sim.cryocooler_node_ids = np.array([], dtype=int)
+    sim.cryocooler_devices = {}
+    sim.cryocooler_lift_curve = None
+    sim.controller_last_power_by_heater = {}
+    sim.controller_mimo_pi_integral = None
+    sim.controller_allocator_diagnostics = {}
+    sim.last_cryocooler_diagnostics = []
+
+    # A well-conditioned 2x2 gain so the QP has a genuine choice of heaters.
+    G = np.array([[0.5, 0.1], [0.1, 0.5]])
+    monkeypatch.setattr(
+        PreparedSimulation, "_load_mimo_pi_gain",
+        lambda self: {"G": G, "sensor_ids": sensor_ids, "heater_ids": heater_ids},
+    )
+    monkeypatch.setattr(
+        PreparedSimulation, "_mimo_pi_gains",
+        lambda self, gain, sids: (np.zeros(len(sids)), np.full(len(sids), 1.0e-2)),
+    )
+    monkeypatch.setattr(
+        "graph_visualizer.simulation_model.sensor_readout_temperature_K",
+        lambda model, idx, temps, nid: 50.0,
+    )
+    return sim
+
+
+def test_disabled_heater_is_bounded_to_zero_by_mimo_pi(monkeypatch) -> None:
+    """A heater unticked in the enabled-I/O table must not be commanded.
+
+    G is identified over every heater and its column order is frozen at build time,
+    so the law cannot drop the column the way PID+QP dropped the heater -- it has to
+    bound it to 0 W instead. The regression this guards is silent: the heater would
+    keep drawing power with nothing in the UI to show for it.
+    """
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=(11,))
+    sim._mimo_pi_controller_power_vector(update_state=True)
+    commands = dict(zip(
+        sim.controller_allocator_diagnostics["heater_ids"],
+        sim.controller_allocator_diagnostics["heater_commands_W"],
+    ))
+    assert commands[10] == pytest.approx(0.0, abs=1e-9)
+    assert commands[11] > 0.0, "the enabled heater must still take up the demand"
+    # And a 0 W bound is not "saturated high" -- that would misreport the run.
+    assert sim.controller_allocator_diagnostics["saturated_high"] == 0
+
+
+def test_no_enabled_filter_drives_every_heater(monkeypatch) -> None:
+    """None means "no enabled-I/O filter" -- every heater in G is available.
+
+    This is the convention the rest of simulation_model.py uses (_node_id_enabled
+    returns True for a None set), and MIMO PI must share it or an untouched graph
+    would come up with no usable heaters at all.
+    """
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    sim._mimo_pi_controller_power_vector(update_state=True)
+    commands = sim.controller_allocator_diagnostics["heater_commands_W"]
+    assert all(c > 0.0 for c in commands), commands
+
+
+def test_empty_enabled_set_drives_no_heater(monkeypatch) -> None:
+    """An EMPTY tuple is not the same as None: it disables every heater.
+
+    Worth pinning because the two are easy to conflate and the failure modes are
+    opposite -- conflating them either runs a controller the user switched off or
+    switches off one they never touched.
+    """
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=())
+    sim._mimo_pi_controller_power_vector(update_state=True)
+    commands = sim.controller_allocator_diagnostics["heater_commands_W"]
+    assert all(c == pytest.approx(0.0, abs=1e-9) for c in commands), commands

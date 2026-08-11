@@ -521,7 +521,7 @@ def test_both_modes_build_identical_sections_in_identical_order():
         "Material Properties",
         "Cryocooler",
         "Controller (global limits)",
-        "Modal LQR Design",
+        "Controller Design (modal LQR / MIMO PI G)",
         "MIMO Thermal-Rate QP",
         "Solver",
         "Display",
@@ -676,7 +676,7 @@ def test_read_reports_the_selected_controller_artifact():
 
     panel.controller_scheme_combo.setCurrentIndex(0)
     pid = panel.read(SimulationParameters())
-    assert pid.mimo_controller_scheme == "pid_qp"
+    assert pid.mimo_controller_scheme == "none"
     assert pid.modal_controller_path == ""
 
     panel.controller_scheme_combo.setCurrentIndex(1)

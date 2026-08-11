@@ -434,7 +434,7 @@ class SimulationRunner:
         for warning in prepared.warnings:
             self._log_event("prepare_warning", str(warning))
         # The engine appends some warnings LAZILY -- notably "modal controller
-        # unavailable (...); using PID+QP allocator", which is only raised when the
+        # unavailable (...); nothing is regulating", which is only raised when the
         # controller is first evaluated, i.e. after this point. Remember how many we
         # have logged so the step loop can surface the rest; otherwise a run could
         # silently use a different controller than the one requested.
@@ -620,6 +620,18 @@ class SimulationRunner:
         SimulationParameters we keep its physics (tdep properties, radiation,
         cryocooler, substeps, ...) and only enforce the controller wiring; otherwise
         we build the legacy minimal defaults."""
+        # --controller carries whichever artifact the caller picked, and the two
+        # schemes take DIFFERENT artifacts: modal LQR wants a modal_controller.npz,
+        # MIMO PI wants the sys-id run FOLDER holding G. Wiring the folder into
+        # modal_controller_path (which is what this used to do unconditionally)
+        # produces a modal load failure and an open-loop overnight run.
+        scheme = (
+            str(getattr(self.cfg.params, "mimo_controller_scheme", "") or "")
+            if self.cfg.params is not None else ""
+        )
+        if not scheme or scheme == "none":
+            scheme = "modal_lqr" if has_controller else "none"
+        is_mimo_pi = has_controller and scheme == "mimo_pi"
         controller_fields = dict(
             dt_s=float(self.cfg.dt_s),
             t_final_s=float(self.cfg.t_final_s),
@@ -633,9 +645,11 @@ class SimulationRunner:
                 else ("zero" if self.cfg.params is None else self.cfg.params.input_mode)
             ),
             mimo_controller_enabled=has_controller,
-            mimo_controller_scheme="modal_lqr" if has_controller else "pid_qp",
-            modal_controller_path=controller_path or "",
+            mimo_controller_scheme=(scheme if has_controller else "none"),
+            modal_controller_path="" if is_mimo_pi else (controller_path or ""),
         )
+        if is_mimo_pi:
+            controller_fields["mimo_pi_gain_matrix_path"] = controller_path or ""
         if self.cfg.params is not None:
             return replace(self.cfg.params, **controller_fields)
         return SimulationParameters(**controller_fields)
@@ -966,7 +980,7 @@ class SimulationRunner:
 
         Some are only raised once a feature is first exercised -- e.g. a modal
         controller artifact that does not match the graph is detected when the
-        controller is first evaluated and silently degrades to the PID+QP
+        controller is first evaluated and silently degrades to open-loop
         allocator. Surfacing them keeps the run's log honest about what actually
         ran."""
         warnings = getattr(prepared, "warnings", None)

@@ -55,6 +55,9 @@ class SimulationParameters:
     # is not delivering. Lower it only to encode a REAL constraint (a documented
     # driver ramp, or a deliberate thermal-shock limit) -- not as damping.
     mimo_heater_slew_rate_W_per_s: float = 30.0
+    # Read ONLY by the removed PID+QP allocator (it clamped that scheme's desired
+    # sensor rate before allocation). Kept so existing simulation_parameters.json
+    # files still load; nothing consumes it.
     mimo_v_cmd_abs_max_K_per_s: float = 0.25
     heater_sensor_pair_alpha: float = 1.0
     role_contact_tolerance_mm: float = 1.0e-6
@@ -72,10 +75,11 @@ class SimulationParameters:
     # with MIMO heating excluded) -- only available in simulation, kept for A/B.
     mimo_passive_drift_from_measurement: bool = True
     # Which heater controller runs in "heater_inputs" mode:
-    #   "pid_qp"    -> the standard PID + bounded QP allocator (default),
+    #   "mimo_pi"   -> static-decoupling PI over the plant's DC gain G (default),
+    #   "none"      -> nothing regulates the heaters (cryocoolers/manual only),
     #   "modal_lqr" -> the reduced-model LQR + regularized static state estimate
     #                  (needs a modal_controller.npz for the graph; see
-    #                  tools/analyze_plant_modes.py). Falls back to pid_qp if the
+    #                  tools/analyze_plant_modes.py). Runs open-loop if the
     #                  artifact is missing or mismatched.
     mimo_controller_scheme: str = "mimo_pi"
     # --- MIMO PI ---------------------------------------------------------------

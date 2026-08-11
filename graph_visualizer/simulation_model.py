@@ -1390,9 +1390,9 @@ class PreparedSimulation:
 
     def _modal_scheme_active(self) -> bool:
         """True when the reduced-model LQR controller should run instead of the
-        PID+QP allocator: scheme selected, heater-input mode, and a usable modal
+        the modal scheme: scheme selected, heater-input mode, and a usable modal
         controller artifact is loaded for this graph."""
-        if str(getattr(self.params, "mimo_controller_scheme", "pid_qp")) != "modal_lqr":
+        if str(getattr(self.params, "mimo_controller_scheme", "none")) != "modal_lqr":
             return False
         if self.params.input_mode != "heater_inputs":
             return False
@@ -1401,7 +1401,7 @@ class PreparedSimulation:
     def _load_modal_controller(self):
         """Load + cache the modal controller artifact (K, E_reg, Nx, Nu, node ids,
         operating point) and validate it maps onto this graph. Returns a dict or
-        None (falls back to PID+QP). Cached per prepared simulation."""
+        None (leaving nothing regulating). Cached per prepared simulation."""
         path = str(getattr(self.params, "modal_controller_path", "") or "")
         # Keyed on (path, dt): the LQR gain is only valid at the sample rate it was
         # designed for, so a dt change has to re-derive it, not reuse the cache.
@@ -1444,7 +1444,7 @@ class PreparedSimulation:
             self._modal_controller_cache = cache
             return cache
         except Exception as exc:  # noqa: BLE001 - controller is optional
-            self.warnings.append(f"Modal controller unavailable ({exc}); using PID+QP allocator.")
+            self.warnings.append(f"Modal controller unavailable ({exc}); nothing is regulating the heaters.")
             self._modal_controller_cache = {}
             return None
 
@@ -1594,7 +1594,7 @@ class PreparedSimulation:
         increment = ki * (ff_map @ error) * dt
         candidate_int = u_int + increment
         base = u_ff - mc["K"] @ (x_hat - x_ff)
-        # Global controller limits (shared with the PID+QP scheme): absolute
+        # Global controller limits (shared with the MIMO PI scheme): absolute
         # per-heater power clamp, then a hard per-step slew-rate limit. These
         # cap the transient a large-signal setpoint step can inject into the
         # low-heat-capacity deposition nodes.
@@ -1834,8 +1834,20 @@ class PreparedSimulation:
         r_dev = np.where(valid, setpoints - T_op, 0.0)
         v_cmd = r_dev + kp * error + ki * candidate
 
+        # A heater the user unticked in the enabled-I/O table must not be driven.
+        # G was identified over ALL heaters, so its columns outlive any later
+        # disabling; bound those columns to 0 W rather than dropping them, which
+        # keeps G's shape intact and lets the QP redistribute the demand across the
+        # heaters that remain. (PID+QP filtered its heater list up front; MIMO PI
+        # cannot, because the gain matrix's column order is fixed at build time.)
+        enabled_heaters = _enabled_node_id_set(self.params.enabled_heater_node_ids)
         maxima = np.array(
-            [max(0.0, _controller_heater_max_power(model.nodes[int(h)], self.params)) for h in heater_ids],
+            [
+                max(0.0, _controller_heater_max_power(model.nodes[int(h)], self.params))
+                if _node_id_enabled(enabled_heaters, int(h))
+                else 0.0
+                for h in heater_ids
+            ],
             dtype=float,
         )
         u_prev = np.array(
@@ -1865,7 +1877,10 @@ class PreparedSimulation:
             "active_sensor_count": int(valid.sum()),
             "heater_max_power_W": [float(m) for m in maxima],
             "saturated_low": int(np.count_nonzero(u <= 1.0e-9)),
-            "saturated_high": int(np.count_nonzero(u >= maxima - 1.0e-9)),
+            # Only heaters that CAN deliver can be saturated high. Without the
+            # maxima > 0 guard a heater bounded to 0 W (disabled, or with no power
+            # configured) reads as both saturated low and saturated high.
+            "saturated_high": int(np.count_nonzero((maxima > 0.0) & (u >= maxima - 1.0e-9))),
             "slew_rate_limit_W_per_s": float(slew),
             "cond_G": float(np.linalg.cond(G)),
         }
@@ -1894,430 +1909,41 @@ class PreparedSimulation:
         return powers
 
     def _mimo_controller_power_vector(self, update_state: bool) -> np.ndarray:
+        """Dispatch to the selected heater controller.
+
+        The PID+QP allocator that used to live here has been removed. It ran a
+        per-heater-per-sensor PID producing a desired sensor RATE, then allocated
+        power with a QP. The PID layer was never viable on this plant: the RGA
+        diagonal is negative on 26 of 27 pairings, so a pairing's gain changes sign
+        once its neighbours close, and only ~0.7% of a heater's steady influence
+        reaches its paired sensor. Its QP survives as the allocator MIMO PI uses --
+        the multivariable half was the part that was doing real work.
+        """
         if self.model is None:
             return np.zeros(len(self.node_ids), dtype=float)
         if self._mimo_pi_scheme_active():
             return self._mimo_pi_controller_power_vector(update_state)
         if self._modal_scheme_active():
             return self._modal_controller_power_vector(update_state)
-        powers = _controlled_heater_power_vector(
-            self.model,
-            self.node_ids,
-            self.temperatures_K,
-            float(self.params.dt_s),
-            self.params,
-            include_heater_inputs=True,
-            update_pid_state=update_state,
-            excluded_modes={"mimo"},
-            node_index_by_id=self.node_index_by_id,
-            heater_node_ids=self.heater_node_ids,
+        # No controller is selected/usable. Apply cryocoolers and any manual heaters
+        # so the run is still physical, and say why nothing is regulating -- silently
+        # running open-loop is how a "converged" overnight run turns out to have had
+        # no controller at all.
+        self._warn_once(
+            "No heater controller active: select a MIMO PI gain matrix or a modal LQR "
+            "artifact in the controller row. Cryocoolers and manual heaters still apply, "
+            "but nothing is tracking a setpoint."
+        )
+        return _controlled_heater_power_vector(
+            self.model, self.node_ids, self.temperatures_K, float(self.params.dt_s), self.params,
+            include_heater_inputs=True, update_pid_state=update_state, excluded_modes={"mimo"},
+            node_index_by_id=self.node_index_by_id, heater_node_ids=self.heater_node_ids,
             cryocooler_node_ids=self.cryocooler_node_ids,
             cryocooler_devices=self.cryocooler_devices,
             cryocooler_lift_curve=self.cryocooler_lift_curve,
             cryocooler_diagnostics=self.last_cryocooler_diagnostics,
             capacitance=self._live_capacitance(),
         )
-        enabled_heater_ids = _enabled_node_id_set(self.params.enabled_heater_node_ids)
-        enabled_sensor_ids = _enabled_node_id_set(self.params.enabled_sensor_node_ids)
-        pair_warnings = refresh_heater_power_deposition_nodes(self.model)
-        pair_warnings.extend(refresh_sensor_connected_nodes(self.model))
-        active_sensor_ids: set[int] = set()
-        heater_ids: list[int] = []
-        for node_id in self.heater_node_ids:
-            heater_id = int(node_id)
-            heater = self.model.nodes[heater_id]
-            if (
-                not heater.is_heater
-                or not _node_id_enabled(enabled_heater_ids, heater_id)
-                or not bool(getattr(heater, "heater_valid", True))
-                or not getattr(heater, "power_deposition_node_ids", [])
-            ):
-                continue
-            sensor_id = getattr(heater, "assigned_sensor_id", None)
-            if sensor_id is None and heater.is_sensor and str(getattr(getattr(heater, "heater_control", None), "mode", "")) == "mimo":
-                sensor_id = heater_id
-            if sensor_id is None:
-                continue
-            sensor_id = int(sensor_id)
-            sensor = self.model.nodes.get(sensor_id)
-            if sensor is None or not _node_is_mimo_sensor(sensor):
-                continue
-            if _heater_controller_mode(heater, sensor) != "mimo":
-                continue
-            if not _node_id_enabled(enabled_sensor_ids, sensor_id):
-                continue
-            active_sensor_ids.add(sensor_id)
-            heater_ids.append(heater_id)
-        sensor_ids = sorted(active_sensor_ids)
-        if not sensor_ids or not heater_ids:
-            self.controller_warnings = pair_warnings + [
-                "MIMO controller enabled, but at least one paired valid MIMO sensor and heater are required."
-            ]
-            self.controller_allocator_diagnostics = {
-                "active_sensor_count": len(sensor_ids),
-                "active_heater_count": len(heater_ids),
-                "rate_command_norm": 0.0,
-                "heater_command_norm": 0.0,
-                "measured_drift_dTdt_norm": 0.0,
-                "predicted_dTdt_residual_norm": 0.0,
-                "allocation_residual_norm": 0.0,
-                "bounds_active": False,
-                "solver_success": False,
-                "solver_message": "empty active MIMO set",
-            }
-            if update_state:
-                self.controller_last_power_by_heater = {heater_id: 0.0 for heater_id in heater_ids}
-            return powers
-
-        node_index = self.node_index_by_id or {int(node_id): row for row, node_id in enumerate(self.node_ids)}
-        readouts = [
-            sensor_readout_temperature_K(self.model, node_index, self.temperatures_K, sensor_id)
-            for sensor_id in sensor_ids
-        ]
-        valid_pairs = [
-            (sensor_id, readout)
-            for sensor_id, readout in zip(sensor_ids, readouts)
-            if np.isfinite(float(readout))
-        ]
-        if len(valid_pairs) != len(sensor_ids):
-            pair_warnings.append("One or more MIMO sensors have invalid averaged readouts and were excluded.")
-        sensor_ids = [int(sensor_id) for sensor_id, _readout in valid_pairs]
-        valid_sensor_id_set = set(sensor_ids)
-        filtered_heater_ids: list[int] = []
-        for heater_id in heater_ids:
-            heater = self.model.nodes[int(heater_id)]
-            assigned_sensor_id = getattr(heater, "assigned_sensor_id", None)
-            if assigned_sensor_id is not None and int(assigned_sensor_id) in valid_sensor_id_set:
-                filtered_heater_ids.append(int(heater_id))
-                continue
-            if (
-                int(heater_id) in valid_sensor_id_set
-                and heater.is_sensor
-                and str(getattr(getattr(heater, "heater_control", None), "mode", "")) == "mimo"
-            ):
-                filtered_heater_ids.append(int(heater_id))
-        heater_ids = filtered_heater_ids
-        if not sensor_ids or not heater_ids:
-            self.controller_warnings = pair_warnings + ["No valid paired MIMO sensor readouts are available."]
-            if update_state:
-                self.controller_last_power_by_heater = {}
-            return powers
-        heaters_by_sensor: dict[int, list[int]] = {int(sensor_id): [] for sensor_id in sensor_ids}
-        for heater_id in heater_ids:
-            heater = self.model.nodes[int(heater_id)]
-            sensor_id = getattr(heater, "assigned_sensor_id", None)
-            if sensor_id is None and heater.is_sensor:
-                sensor_id = int(heater_id)
-            if sensor_id is not None and int(sensor_id) in heaters_by_sensor:
-                heaters_by_sensor[int(sensor_id)].append(int(heater_id))
-        y = np.array([float(readout) for _sensor_id, readout in valid_pairs], dtype=float)
-        estimates = []
-        for sensor_id, measured in zip(sensor_ids, y):
-            settling_time = _heater_controller_average(
-                self.model,
-                heaters_by_sensor.get(int(sensor_id), []),
-                "sensor_settling_time_s",
-                0.0,
-                sensor_id=int(sensor_id),
-                clamp_min=0.0,
-            )
-            tau = settling_time / 5.0 if settling_time > 0.0 else 0.0
-            previous = self.controller_y_prev.get(sensor_id)
-            if previous is None or tau <= 0.0:
-                estimates.append(measured)
-                continue
-            alpha = float(np.exp(-max(float(self.params.dt_s), 0.0) / max(tau, 1.0e-12)))
-            denominator = 1.0 - alpha
-            if abs(denominator) <= 1.0e-9:
-                estimates.append(measured)
-            else:
-                estimates.append((measured - alpha * float(previous)) / denominator)
-        T_hat = np.array(estimates, dtype=float)
-        setpoints = np.array(
-            [float(getattr(self.model.nodes[sensor_id], "controller_setpoint_K", 293.15)) for sensor_id in sensor_ids],
-            dtype=float,
-        )
-        errors = setpoints - T_hat
-        weights = np.array(
-            [
-                _heater_controller_average(
-                    self.model,
-                    heaters_by_sensor.get(int(sensor_id), []),
-                    "controller_weight",
-                    0.0,
-                    sensor_id=int(sensor_id),
-                    clamp_min=0.0,
-                )
-                for sensor_id in sensor_ids
-            ],
-            dtype=float,
-        )
-        rms = weighted_rms_error(errors, weights)
-        self.controller_weighted_rms_error = rms
-        mode_changed = self._update_controller_mode(rms) if update_state else False
-
-        dt = max(float(self.params.dt_s), 1.0e-12)
-        # Standard (integer-order) PID with recursive O(1) state -- no growing
-        # error history, so it maps directly onto the microcontroller firmware.
-        # On a mode change the integrator and derivative memory reset so gains
-        # tuned for one mode do not carry into the other.
-        integral_abs_max = max(0.0, float(getattr(self.params, "mimo_integral_abs_max", 1.0e6)))
-        previous_integrators = {} if mode_changed else self.controller_integrators
-        previous_error = {} if mode_changed else self.controller_error_prev
-        integrator_prev = np.array(
-            [float(previous_integrators.get(int(sensor_id), 0.0)) for sensor_id in sensor_ids],
-            dtype=float,
-        )
-        # Recursive integral, rectangular rule: I_k = I_{k-1} + e_k * dt.
-        eta = integrator_prev + errors * dt
-        if integral_abs_max > 0.0:
-            eta = np.clip(eta, -integral_abs_max, integral_abs_max)
-        # Backward-difference derivative; zero on the first sample after a reset.
-        has_prev_error = np.array(
-            [int(sensor_id) in previous_error for sensor_id in sensor_ids], dtype=bool
-        )
-        error_prev = np.array(
-            [float(previous_error.get(int(sensor_id), 0.0)) for sensor_id in sensor_ids],
-            dtype=float,
-        )
-        error_derivative = np.where(has_prev_error, (errors - error_prev) / dt, 0.0)
-        if self.controller_mode == "hold":
-            kp_key = "controller_kp_hold"
-            ki_key = "controller_ki_hold"
-            kd_key = "controller_kd_hold"
-        else:
-            kp_key = "controller_kp_coarse"
-            ki_key = "controller_ki_coarse"
-            kd_key = "controller_kd_coarse"
-        sensor_row_by_id = {int(sensor_id): row for row, sensor_id in enumerate(sensor_ids)}
-        heater_sensor_rows = np.full(len(heater_ids), -1, dtype=int)
-        per_heater_rate_cmd = np.zeros(len(heater_ids), dtype=float)
-        for heater_col, heater_id in enumerate(heater_ids):
-            heater = self.model.nodes[int(heater_id)]
-            assigned_sensor_id = getattr(heater, "assigned_sensor_id", None)
-            if assigned_sensor_id is None and heater.is_sensor:
-                assigned_sensor_id = int(heater_id)
-            row = sensor_row_by_id.get(int(assigned_sensor_id)) if assigned_sensor_id is not None else None
-            if row is None:
-                continue
-            sensor = self.model.nodes[int(sensor_ids[int(row)])]
-            try:
-                kp = max(0.0, float(_heater_controller_value(heater, sensor, kp_key, 0.0)))
-            except (TypeError, ValueError):
-                kp = 0.0
-            try:
-                ki = max(0.0, float(_heater_controller_value(heater, sensor, ki_key, 0.0)))
-            except (TypeError, ValueError):
-                ki = 0.0
-            try:
-                kd = max(0.0, float(_heater_controller_value(heater, sensor, kd_key, 0.0)))
-            except (TypeError, ValueError):
-                kd = 0.0
-            if _heater_controller_is_default(heater):
-                inherited_count = max(1, len(heaters_by_sensor.get(int(sensor_ids[int(row)]), [])))
-                kp /= float(inherited_count)
-                ki /= float(inherited_count)
-                kd /= float(inherited_count)
-            heater_sensor_rows[int(heater_col)] = int(row)
-            per_heater_rate_cmd[int(heater_col)] = (
-                kp * float(errors[int(row)])
-                + ki * float(eta[int(row)])
-                + kd * float(error_derivative[int(row)])
-            )
-        v_cmd_unclipped = np.zeros(len(sensor_ids), dtype=float)
-        for heater_col, row in enumerate(heater_sensor_rows):
-            if int(row) >= 0:
-                v_cmd_unclipped[int(row)] += float(per_heater_rate_cmd[int(heater_col)])
-        v_cmd = v_cmd_unclipped.copy()
-        v_abs_max = max(0.0, float(getattr(self.params, "mimo_v_cmd_abs_max_K_per_s", 0.25)))
-        if v_abs_max > 0.0:
-            v_cmd = np.clip(v_cmd, -v_abs_max, v_abs_max)
-            for row, (raw, clipped) in enumerate(zip(v_cmd_unclipped, v_cmd)):
-                if abs(float(raw)) <= float(v_abs_max) or abs(float(raw)) <= 1.0e-15:
-                    continue
-                per_heater_rate_cmd[heater_sensor_rows == int(row)] *= float(clipped) / float(raw)
-
-        maxima = np.array(
-            [_controller_heater_max_power(self.model.nodes[heater_id], self.params) for heater_id in heater_ids],
-            dtype=float,
-        )
-        u_prev = np.array(
-            [float(self.controller_last_power_by_heater.get(int(heater_id), 0.0)) for heater_id in heater_ids],
-            dtype=float,
-        )
-        slew_rate = max(0.0, float(getattr(self.params, "mimo_heater_slew_rate_W_per_s", 0.0)))
-        max_delta_power = np.full(len(heater_ids), slew_rate * dt, dtype=float) if slew_rate > 0.0 else None
-        B_s = self._mimo_dynamic_gain_matrix(
-            sensor_ids,
-            heater_ids,
-            node_index,
-        )
-        raw_dTdt, dTdt_hat = self._mimo_sensor_drift_estimate(sensor_ids, y, dt)
-        # Steady-state setpoint feedforward from the exact plant DC gain (if the
-        # graph has a modal controller artifact). When present it carries the reach,
-        # so we DROP the passive-drift observer and let the PID handle the hold.
-        dc_feedforward = self._dc_gain_feedforward(sensor_ids, heater_ids, errors)
-        if dc_feedforward is not None:
-            passive_dTdt = np.zeros(len(sensor_ids), dtype=float)
-        elif bool(getattr(self.params, "mimo_passive_drift_from_measurement", True)):
-            # Disturbance observer: the passive (non-MIMO) sensor drift is the
-            # MEASURED sensor rate with the commanded-heater contribution removed.
-            # Deployable on the MCU without a plant model; reactive by one step.
-            passive_dTdt = dTdt_hat - B_s @ u_prev
-        else:
-            # Model-based oracle (simulation only): project the full thermal RHS
-            # evaluated with MIMO heating excluded.
-            passive_dTdt = self._mimo_baseline_sensor_drift(sensor_ids, node_index, powers)
-        hold_result = allocate_thermal_rate_qp(
-            B_s,
-            passive_dTdt,
-            np.zeros(len(sensor_ids), dtype=float),
-            weights,
-            maxima,
-            np.zeros(len(heater_ids), dtype=float),
-            0.0,
-            0.0,
-            None,
-        )
-        u_ff = np.asarray(hold_result.u, dtype=float).reshape(-1)
-        u_ff = np.clip(np.where(np.isfinite(u_ff), u_ff, 0.0), 0.0, maxima)
-        u_ref = u_ff.copy()
-        if dc_feedforward is not None:
-            # Bias the allocator toward the DC-gain reach power (clamped to limits).
-            u_ref = np.clip(u_ref + dc_feedforward, 0.0, maxima)
-        for heater_col, row in enumerate(heater_sensor_rows):
-            if int(row) < 0:
-                continue
-            authority = float(B_s[int(row), int(heater_col)])
-            if not np.isfinite(authority) or abs(authority) <= 1.0e-15:
-                continue
-            u_ref[int(heater_col)] += float(per_heater_rate_cmd[int(heater_col)]) / authority
-        u_ref = np.clip(np.where(np.isfinite(u_ref), u_ref, 0.0), 0.0, maxima)
-        drift_for_qp = passive_dTdt + B_s @ u_prev
-        allocation = allocate_thermal_rate_qp(
-            B_s,
-            drift_for_qp,
-            v_cmd,
-            weights,
-            maxima,
-            u_prev,
-            float(getattr(self.params, "mimo_lambda_u", 1.0e-3)),
-            float(getattr(self.params, "mimo_rho_du", 0.0)),
-            max_delta_power,
-            u_ref,
-        )
-        u = np.asarray(allocation.u, dtype=float).reshape(-1)
-        u = np.clip(np.where(np.isfinite(u), u, 0.0), 0.0, maxima)
-        for heater_id, command in zip(heater_ids, u):
-            _deposit_heater_command_power(
-                powers,
-                self.model,
-                node_index,
-                int(heater_id),
-                float(command),
-            )
-        heater_delta_dTdt = B_s @ (u - u_prev)
-        heater_total_dTdt = B_s @ u
-        predicted_dTdt = passive_dTdt + heater_total_dTdt
-        residual = predicted_dTdt - v_cmd
-        gain_warnings = list((self.controller_dynamic_gain_cache or {}).get("warnings", ()))
-        hold_warnings = [f"MIMO feedforward hold solve: {warning}" for warning in hold_result.warnings]
-        self.controller_warnings = pair_warnings + gain_warnings + hold_warnings + list(allocation.warnings)
-        self.controller_allocator_diagnostics = {
-            "active_sensor_count": len(sensor_ids),
-            "active_heater_count": len(heater_ids),
-            "sensor_ids": [int(value) for value in sensor_ids],
-            "heater_ids": [int(value) for value in heater_ids],
-            "sensor_connected_node_ids": {
-                str(sensor_id): [int(value) for value in getattr(self.model.nodes[int(sensor_id)], "readout_node_ids", []) or getattr(self.model.nodes[int(sensor_id)], "sensor_connected_node_ids", [])]
-                for sensor_id in sensor_ids
-            },
-            "heater_power_deposition_node_ids": {
-                str(heater_id): [int(value) for value in getattr(self.model.nodes[int(heater_id)], "power_deposition_node_ids", [])]
-                for heater_id in heater_ids
-            },
-            "rate_command_norm": float(np.linalg.norm(v_cmd)),
-            "rate_command_unclipped_norm": float(np.linalg.norm(v_cmd_unclipped)),
-            "heater_command_norm": float(np.linalg.norm(u)),
-            "measured_drift_dTdt_norm": float(np.linalg.norm(dTdt_hat)),
-            "passive_drift_dTdt_norm": float(np.linalg.norm(passive_dTdt)),
-            "feedforward_hold_power_norm": float(np.linalg.norm(u_ff)),
-            "predicted_dTdt_norm": float(np.linalg.norm(predicted_dTdt)),
-            "predicted_dTdt_residual_norm": float(np.linalg.norm(residual)),
-            "allocation_residual_norm": float(np.linalg.norm(residual)),
-            "target_residual_norm": float(allocation.residual_norm),
-            "bounds_active": bool(allocation.bounds_active),
-            "solver_success": bool(allocation.solver_success),
-            "solver_message": str(allocation.solver_message),
-            "feedforward_solver_success": bool(hold_result.solver_success),
-            "feedforward_solver_message": str(hold_result.solver_message),
-            "feedforward_residual_norm": float(hold_result.residual_norm),
-            "lambda_u": float(getattr(self.params, "mimo_lambda_u", 1.0e-3)),
-            "rho_du": float(getattr(self.params, "mimo_rho_du", 0.0)),
-            "slew_rate_limit_W_per_s": float(slew_rate),
-            "slew_delta_limit_W": float(slew_rate * dt) if slew_rate > 0.0 else 0.0,
-            "v_cmd_min_K_per_s": float(np.min(v_cmd)) if v_cmd.size else 0.0,
-            "v_cmd_max_K_per_s": float(np.max(v_cmd)) if v_cmd.size else 0.0,
-            "v_cmd_clipped": bool(v_abs_max > 0.0 and np.any(np.abs(v_cmd_unclipped - v_cmd) > 1.0e-12)),
-            "raw_dTdt_s": [float(value) for value in raw_dTdt],
-            "filtered_dTdt_hat_s": [float(value) for value in dTdt_hat],
-            "passive_dTdt_s": [float(value) for value in passive_dTdt],
-            "drift_for_qp_dTdt_s": [float(value) for value in drift_for_qp],
-            "B_s": [[float(value) for value in row] for row in B_s],
-            "B_s_source": list((self.controller_dynamic_gain_cache or {}).get("sources", [])),
-            "average_inverse_C_s": list((self.controller_dynamic_gain_cache or {}).get("average_inverse_C_s", [])),
-            "B_s_delta_u_dTdt_s": [float(value) for value in heater_delta_dTdt],
-            "B_s_u_dTdt_s": [float(value) for value in heater_total_dTdt],
-            "v_cmd_s": [float(value) for value in v_cmd],
-            "v_cmd_unclipped_s": [float(value) for value in v_cmd_unclipped],
-            "per_heater_rate_cmd_s": [float(value) for value in per_heater_rate_cmd],
-            "predicted_dTdt_s": [float(value) for value in predicted_dTdt],
-            "achieved_predicted_dTdt_s": [float(value) for value in predicted_dTdt],
-            "residual_s": [float(value) for value in residual],
-            "feedforward_hold_power_W": [float(value) for value in u_ff],
-            "heater_reference_power_W": [float(value) for value in u_ref],
-            "heater_commands_W": [float(value) for value in u],
-            "u_prev_W": [float(value) for value in u_prev],
-            "heater_at_lower_bound": [bool(value <= 1.0e-9) for value in u],
-            "heater_at_upper_bound": [bool(value >= max(max_power - 1.0e-9, 0.0)) for value, max_power in zip(u, maxima)],
-        }
-        if update_state:
-            # Conditional-integration anti-windup: if a sensor is saturated in the
-            # direction it needs (all its heaters at 0 while too warm, or all at max
-            # while too cold), discard this step's integral increment (keep I_{k-1}).
-            committed_integrators = eta.copy()
-            if bool(getattr(self.params, "mimo_freeze_integral_when_saturated", True)):
-                for row in range(len(sensor_ids)):
-                    relevant = np.abs(B_s[row, :]) > 1.0e-12
-                    if not np.any(relevant):
-                        continue
-                    if errors[row] < 0.0 and bool(np.all(u[relevant] <= 1.0e-9)):
-                        committed_integrators[row] = integrator_prev[row]
-                    elif errors[row] > 0.0 and bool(np.all(u[relevant] >= np.maximum(maxima[relevant] - 1.0e-9, 0.0))):
-                        committed_integrators[row] = integrator_prev[row]
-            if integral_abs_max > 0.0:
-                committed_integrators = np.clip(committed_integrators, -integral_abs_max, integral_abs_max)
-            self.controller_last_power_by_heater = {
-                int(heater_id): float(command)
-                for heater_id, command in zip(heater_ids, u)
-            }
-            self.controller_integrators = {
-                int(sensor_id): float(value)
-                for sensor_id, value in zip(sensor_ids, committed_integrators)
-            }
-            self.controller_y_prev = {
-                int(sensor_id): float(value)
-                for sensor_id, value in zip(sensor_ids, y)
-            }
-            self.controller_dTdt_hat_by_sensor = {
-                int(sensor_id): float(value)
-                for sensor_id, value in zip(sensor_ids, dTdt_hat)
-            }
-            self.controller_error_prev = {
-                int(sensor_id): float(value)
-                for sensor_id, value in zip(sensor_ids, errors)
-            }
-        return powers
 
     def _mimo_baseline_sensor_drift(
         self,

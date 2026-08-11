@@ -39,7 +39,12 @@ from .simulation_parameters import SimulationParameters
 MODE_LIVE = "live"
 MODE_HEADLESS = "headless"
 
-PID_QP_LABEL = "PID + QP allocator"
+# Placeholder shown when a graph has no controller artifact yet. The PID+QP
+# allocator it used to name is gone: its per-pair PID could not work on a plant
+# whose RGA diagonal is negative on 26 of 27 pairings. Kept as a name so the combo
+# always has a "nothing selected" row rather than being empty.
+NO_CONTROLLER_LABEL = "(no controller selected)"
+PID_QP_LABEL = NO_CONTROLLER_LABEL  # back-compat for importers
 
 # Rows hidden per mode, by row key (see the _row(...) calls below).
 _HEADLESS_HIDDEN_ROWS = frozenset(
@@ -339,7 +344,7 @@ class SimulationControlsPanel:
         self.controller_scheme_combo = self.QtWidgets.QComboBox()
         self.controller_scheme_combo.setToolTip(
             "Heater controller for 'heater_inputs' mode.\n"
-            "- PID + QP allocator: the standard controller, always available.\n"
+            "- MIMO PI entries: static-decoupling PI, one per G matrix built for this graph. This is the controller to use; tune it in the per-sensor gain table.\n"
             "- Modal LQR entries: one per controller actually built for this graph, labelled with "
             "the reduced order, mode count and design operating point that distinguish them. "
             "Build one with the 'Modal LQR Design' panel below (or tools/analyze_plant_modes.py); "
@@ -506,9 +511,9 @@ class SimulationControlsPanel:
             self._add_double(cooler_form, name, label, minimum, maximum, step)
         self._add_checkbox(cooler_form, "cryocooler_enabled", "Enabled")
 
-        # Global controller limits: enforced by BOTH the PID+QP and modal-LQR
+        # Global controller limits: enforced by BOTH the MIMO PI and modal-LQR
         # schemes (absolute heater-power clamp + hard slew rate). "max rate cmd"
-        # additionally bounds the PID+QP rate command; it is inert for modal-LQR
+        # additionally bounded the removed PID+QP rate command; it is inert now
         # (which has no rate command) but kept here as a global controller knob.
         controller_box, controller_form = self._add_section(
             form, "controller_limits", "Controller (global limits)"
@@ -549,13 +554,18 @@ class SimulationControlsPanel:
         self._add_double(display_form, "color_max_K", "color max K", 0.0, 1.0e6, 1.0)
 
     def _build_modal_design_controls(self, form: Any) -> None:
-        box, design_form = self._add_section(form, "modal_design", "Modal LQR Design")
+        box, design_form = self._add_section(form, "modal_design", "Controller Design (modal LQR / MIMO PI G)")
         self.modal_temp_spin = self.double_spin(
             0.0, 1.0e6, self._modal_operating_temperature_K, 1.0
         )
         self.modal_temp_spin.setToolTip(
-            "Operating temperature to linearize the plant about. The controller offsets its "
-            "measurements and setpoints from this."
+            "Operating temperature to linearize the plant about. BOTH controller builds read "
+            "this one field, so the modal artifact and the MIMO PI G matrix describe the same "
+            "linearization and can be compared directly.\n\n"
+            "It matters because conductance is temperature dependent through k(T) and h(T): a "
+            "gain taken at the wrong background is systematically wrong, not just noisy. Set it "
+            "to the temperature the plant will actually sit at.\n\n"
+            "The modal controller additionally offsets its measurements and setpoints from this."
         )
         self._row(design_form, "modal_operating_temperature", self.modal_temp_spin, "operating T K")
         self.modal_modes_spin = self.int_spin(2, 100000, 120, 1)
@@ -1150,7 +1160,7 @@ class SimulationControlsPanel:
             return str(scheme), str(path or "")
         if data:
             return "modal_lqr", str(data)
-        return "pid_qp", ""
+        return "none", ""
 
     def selected_controller_artifact(self) -> str:
         """Path of the selected artifact, or "" when none is selected."""

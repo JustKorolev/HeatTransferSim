@@ -843,10 +843,10 @@ class HeatTransferSimulationTab:
     def _refresh_controller_choices(self, select_path: Path | str | None = None) -> None:
         """Rebuild the controller dropdown from what has actually been built.
 
-        PID+QP is always offered; every other row is a modal-LQR artifact that
+        A placeholder row is always offered; every other row is an artifact that
         exists on disk for this graph. Modal LQR is deliberately NOT listed as a
         standing option -- selecting a controller that has no artifact behind it
-        just silently fell back to PID+QP at run time."""
+        just silently ran open-loop."""
         combo = getattr(self, "controller_scheme_combo", None)
         if combo is None:
             return
@@ -898,7 +898,7 @@ class HeatTransferSimulationTab:
         return Path(str(data))
 
     def _controller_selected_scheme(self) -> str:
-        return "modal_lqr" if self._selected_modal_artifact_path() is not None else "pid_qp"
+        return "modal_lqr" if self._selected_modal_artifact_path() is not None else "none"
 
     def _modal_controller_path(self) -> Path | None:
         selected = self._selected_modal_artifact_path()
@@ -910,7 +910,7 @@ class HeatTransferSimulationTab:
         if self.input_mode.currentText() != "heater_inputs":
             return True  # controller isn't used in this input mode
         if self._controller_selected_scheme() != "modal_lqr":
-            return True  # PID+QP needs no artifact
+            return True  # the placeholder row needs no artifact
         if self._modal_controller_path() is not None:
             return True
         # Only reachable if the artifact was deleted/moved after it was listed.
@@ -919,7 +919,7 @@ class HeatTransferSimulationTab:
             "Controller artifact missing",
             f"The selected modal controller file is gone:\n\n"
             f"{self._selected_modal_artifact_path()}\n\n"
-            "The run will fall back to the PID+QP controller. Run anyway?",
+            "Nothing will regulate the heaters: the run goes open-loop apart from the cryocoolers and any manual heaters. Run anyway?",
             self.QtWidgets.QMessageBox.Yes | self.QtWidgets.QMessageBox.No,
             self.QtWidgets.QMessageBox.No,
         )
@@ -2372,11 +2372,11 @@ class HeatTransferSimulationTab:
     def _controller_scheme_value(self) -> str:
         combo = getattr(self, "controller_scheme_combo", None)
         if combo is None:
-            return str(getattr(self.params, "mimo_controller_scheme", "pid_qp"))
+            return str(getattr(self.params, "mimo_controller_scheme", "none"))
         return self._controller_selected_scheme()
 
     def _modal_controller_path_value(self) -> str:
-        # Whichever built artifact the dropdown points at; empty for PID+QP.
+        # Whichever built artifact the dropdown points at; empty for the placeholder.
         selected = self._selected_modal_artifact_path()
         if selected is not None:
             return str(selected)
@@ -2458,7 +2458,7 @@ class HeatTransferSimulationTab:
         self.input_mode.blockSignals(False)
         combo = getattr(self, "controller_scheme_combo", None)
         if combo is not None:
-            scheme = str(getattr(self.params, "mimo_controller_scheme", "pid_qp"))
+            scheme = str(getattr(self.params, "mimo_controller_scheme", "none"))
             configured = str(getattr(self.params, "modal_controller_path", "") or "")
             combo.blockSignals(True)
             self._refresh_controller_choices(

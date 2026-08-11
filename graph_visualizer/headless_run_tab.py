@@ -146,7 +146,8 @@ class HeadlessRunTab:
         self.build_gain_button.setToolTip(
             "Solve the plant's DC gain exactly from the operator, in a SEPARATE process, "
             "WITHOUT loading graph.json.\n\n"
-            "G is a LINEARIZATION, so it is computed at the operating temperature below - "
+            "G is a LINEARIZATION, so it is computed at the 'operating T K' field in the "
+            "Controller Design section below (the same field the modal build uses) - "
             "conductance depends on temperature through k(T) and h(T), and a gain taken at the "
             "wrong background is systematically wrong.\n\n"
             "The result appears in the controller list as a MIMO PI entry. Progress goes to "
@@ -219,11 +220,41 @@ class HeadlessRunTab:
             setpoint_buttons.addWidget(button)
         setpoint_layout.addLayout(setpoint_buttons)
 
+        # Per-sensor PI gains, beneath the setpoint table. Channels come from the
+        # SELECTED G matrix: after decoupling a channel owns a controlled sensor,
+        # and G's sensor_ids are exactly those channels. Blank = use the global.
+        gain_box = self.QtWidgets.QGroupBox("Per-sensor PI gains (MIMO PI)")
+        gain_layout = self.QtWidgets.QVBoxLayout(gain_box)
+        gain_help = self.QtWidgets.QLabel(
+            "Blank uses the global Kp/Ki. A row needs BOTH values to count as an "
+            "override. Channels come from the selected G matrix; 'Save preset' stores "
+            "the tuning beside that matrix, since gains do not transfer to a different G."
+        )
+        gain_help.setWordWrap(True)
+        gain_layout.addWidget(gain_help)
+        self.gain_table = self.QtWidgets.QTableWidget(0, 3)
+        self.gain_table.setHorizontalHeaderLabels(["sensor", "Kp", "Ki"])
+        self.gain_table.horizontalHeader().setStretchLastSection(True)
+        self.gain_table.setMinimumHeight(180)
+        gain_layout.addWidget(self.gain_table, 1)
+        gain_buttons = self.QtWidgets.QHBoxLayout()
+        for label, slot in (
+            ("Load gains", lambda: self.load_pi_gains(announce=True)),
+            ("Set all", self.apply_pi_gains_to_all),
+            ("Clear", self.clear_pi_gain_overrides),
+            ("Save preset", self.save_pi_preset),
+        ):
+            button = self.QtWidgets.QPushButton(label)
+            button.clicked.connect(slot)
+            gain_buttons.addWidget(button)
+        gain_layout.addLayout(gain_buttons)
+
         editor_column = self.QtWidgets.QWidget()
         editor_layout = self.QtWidgets.QVBoxLayout(editor_column)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.addWidget(self.readout_editor_box)
         editor_layout.addWidget(setpoint_box, 1)
+        editor_layout.addWidget(gain_box, 1)
         outer.addWidget(editor_column, 0, self.QtCore.Qt.AlignTop)
 
         # In place of the 3D viewer: what the launched run is doing.
@@ -433,7 +464,7 @@ class HeadlessRunTab:
 
         artifacts = list_modal_artifacts(folder)
         gains = list_sys_id_gain_matrices(folder)
-        self.controller_scheme_combo.addItem(PID_QP_LABEL, ("pid_qp", ""))
+        self.controller_scheme_combo.addItem(PID_QP_LABEL, ("none", ""))
         for info in gains:
             self.controller_scheme_combo.addItem(f"MIMO PI - {info.name}", ("mimo_pi", str(info.path)))
         for info in artifacts:
@@ -443,6 +474,7 @@ class HeadlessRunTab:
         self._load_parameters_for_graph(folder)
         self.refresh_resume_runs()
         self.load_sensor_setpoints()
+        self.load_pi_gains()
         # Say plainly whether the run will take the fast path and whether the edge
         # data is there. Without edges.npz, temperature-dependent properties would
         # have to fall back to constant properties (L(T) is rebuilt from the edges),
@@ -678,6 +710,125 @@ class HeadlessRunTab:
             return
         for index in range(table.rowCount()):
             table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(""))
+
+    # -- per-sensor MIMO PI gains -------------------------------------------- #
+    def load_pi_gains(self, announce: bool = False) -> None:
+        """Fill the gain table from the SELECTED G matrix.
+
+        The channel list comes from G, not from a run manifest: after decoupling a
+        PI channel owns a controlled sensor, and G's own sensor_ids are exactly
+        those channels. Any preset saved beside that matrix is loaded with it.
+        """
+        table = getattr(self, "gain_table", None)
+        if table is None:
+            return
+        scheme, path = self.panel.selected_controller()
+        self._gain_rows = []
+        if scheme != "mimo_pi" or not path:
+            table.setRowCount(0)
+            if announce:
+                self._status(
+                    "Select a MIMO PI entry in the controller row first; its G matrix "
+                    "defines the channels these gains apply to.",
+                    True,
+                )
+            return
+        try:
+            from .sys_id_artifacts import load_mimo_pi_preset, load_sys_id_gain_matrix_data
+
+            data = load_sys_id_gain_matrix_data(Path(path))
+            preset = load_mimo_pi_preset(Path(path)) or {}
+        except Exception as exc:  # noqa: BLE001
+            table.setRowCount(0)
+            self._status(f"Could not read the gain matrix: {exc}", True)
+            return
+        sensors = [int(v) for v in data.sensor_ids]
+        per_sensor = preset.get("per_sensor", {})
+        if preset:
+            # A saved preset is the tuning this matrix was built with, so show it.
+            self.mimo_pi_kp_spin.setValue(float(preset.get("kp", self.mimo_pi_kp_spin.value())))
+            self.mimo_pi_ki_spin.setValue(float(preset.get("ki", self.mimo_pi_ki_spin.value())))
+        self._gain_rows = sensors
+        table.setRowCount(len(sensors))
+        for index, sensor_id in enumerate(sensors):
+            item = self.QtWidgets.QTableWidgetItem(str(sensor_id))
+            item.setFlags(self.QtCore.Qt.ItemIsEnabled)
+            table.setItem(index, 0, item)
+            override = per_sensor.get(int(sensor_id), {})
+            table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(
+                f"{override['kp']:g}" if "kp" in override else ""))
+            table.setItem(index, 2, self.QtWidgets.QTableWidgetItem(
+                f"{override['ki']:g}" if "ki" in override else ""))
+
+    def collect_pi_gain_overrides(self) -> dict[int, dict[str, float]]:
+        """{sensor_id: {kp, ki}} for rows the user actually filled in. A row needs
+        BOTH values, since a half-specified channel would silently take a global
+        for the other gain and read as intentional."""
+        table = getattr(self, "gain_table", None)
+        rows = getattr(self, "_gain_rows", None) or []
+        overrides: dict[int, dict[str, float]] = {}
+        if table is None:
+            return overrides
+        for index, sensor_id in enumerate(rows):
+            texts = []
+            for column in (1, 2):
+                cell = table.item(index, column)
+                texts.append((cell.text() if cell is not None else "").strip())
+            if not all(texts):
+                continue
+            try:
+                overrides[int(sensor_id)] = {"kp": float(texts[0]), "ki": float(texts[1])}
+            except (TypeError, ValueError):
+                continue
+        return overrides
+
+    def apply_pi_gains_to_all(self) -> None:
+        table = getattr(self, "gain_table", None)
+        if table is None:
+            return
+        kp = f"{self.mimo_pi_kp_spin.value():g}"
+        ki = f"{self.mimo_pi_ki_spin.value():g}"
+        for index in range(table.rowCount()):
+            table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(kp))
+            table.setItem(index, 2, self.QtWidgets.QTableWidgetItem(ki))
+
+    def clear_pi_gain_overrides(self) -> None:
+        table = getattr(self, "gain_table", None)
+        if table is None:
+            return
+        for index in range(table.rowCount()):
+            table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(""))
+            table.setItem(index, 2, self.QtWidgets.QTableWidgetItem(""))
+
+    def save_pi_preset(self) -> None:
+        """Write the current gains beside the selected G matrix.
+
+        Gains are meaningless with a different G -- the unit-DC-gain assumption a
+        channel is tuned against comes from that specific decoupler -- so the
+        preset lives with the matrix rather than in the graph's parameters.
+        """
+        scheme, path = self.panel.selected_controller()
+        if scheme != "mimo_pi" or not path:
+            self._status("Select a MIMO PI entry before saving its tuning.", True)
+            return
+        try:
+            from .sys_id_artifacts import save_mimo_pi_preset
+
+            target = save_mimo_pi_preset(
+                Path(path),
+                kp=float(self.mimo_pi_kp_spin.value()),
+                ki=float(self.mimo_pi_ki_spin.value()),
+                per_sensor=self.collect_pi_gain_overrides(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._status(f"Could not save the tuning: {exc}", True)
+            return
+        overrides = len(self.collect_pi_gain_overrides())
+        self._status(
+            f"Saved Kp={self.mimo_pi_kp_spin.value():g}, Ki={self.mimo_pi_ki_spin.value():g} "
+            f"and {overrides} per-sensor override(s) to {target.name}.",
+            False,
+        )
 
     # -- resume (continue a previous run from its last checkpoint) ----------- #
     def simulations_root(self) -> Path:
