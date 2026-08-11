@@ -1569,7 +1569,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 310.0
-        node.controller_kp_coarse = 1.0
         model.add_node(node)
         model.set_controller_gain(1, 1, 1.0)
         matrices = {
@@ -1631,9 +1630,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         node.heater.heater_max_power_W = 20.0
         node.heater_control.mode = "mimo"
         node.controller_setpoint_K = 310.0
-        node.controller_kp_coarse = 1.0
-        node.controller_ki_coarse = 0.0
-        node.controller_kd_coarse = 1.0
         model.add_node(node)
         model.set_controller_gain(1, 1, 1.0)
         matrices = {
@@ -4091,12 +4087,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         sensor.controller_setpoint_K = 315.0
         sensor.controller_weight = 2.0
         sensor.sensor_settling_time_s = 8.0
-        sensor.controller_kp_coarse = 0.75
-        sensor.controller_ki_coarse = 0.25
-        sensor.controller_kp_hold = 0.5
-        sensor.controller_ki_hold = 0.125
-        sensor.controller_kd_coarse = 0.4
-        sensor.controller_kd_hold = 0.2
         heater = NodeProperties.with_material(2, (1, 0, 0), material="copper")
         heater.is_heater = True
         heater.is_sensor = True
@@ -4110,36 +4100,8 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(restored.nodes[1].controller_setpoint_K, 315.0)
         self.assertAlmostEqual(restored.nodes[1].controller_weight, 2.0)
         self.assertAlmostEqual(restored.nodes[1].sensor_settling_time_s, 8.0)
-        self.assertAlmostEqual(restored.nodes[1].controller_kp_coarse, 0.75)
-        self.assertAlmostEqual(restored.nodes[1].controller_ki_coarse, 0.25)
-        self.assertAlmostEqual(restored.nodes[1].controller_kp_hold, 0.5)
-        self.assertAlmostEqual(restored.nodes[1].controller_ki_hold, 0.125)
-        self.assertAlmostEqual(restored.nodes[1].controller_kd_coarse, 0.4)
-        self.assertAlmostEqual(restored.nodes[1].controller_kd_hold, 0.2)
         self.assertFalse(hasattr(restored.nodes[1], "controller_integral_negative_error_leak_per_s"))
         self.assertAlmostEqual(restored.controller_gain(1, 2), 0.125)
-
-    def test_legacy_mimo_gain_scales_load_as_sensor_specific_gains(self) -> None:
-        node = NodeProperties.from_dict(
-            {
-                "node_id": 1,
-                "coord": [0, 0, 0],
-                "controller": {
-                    "setpoint_K": 312.0,
-                    "kp_scale": 0.75,
-                    "ki_scale": 0.25,
-                },
-            }
-        )
-
-        self.assertAlmostEqual(node.controller_kp_coarse, 0.75)
-        self.assertAlmostEqual(node.controller_ki_coarse, 0.25)
-        self.assertAlmostEqual(node.controller_kp_hold, 0.75)
-        self.assertAlmostEqual(node.controller_ki_hold, 0.25)
-        serialized = node.to_octree_node_dict()["controller"]
-        self.assertNotIn("kp_scale", serialized)
-        self.assertNotIn("ki_scale", serialized)
-        self.assertAlmostEqual(serialized["kp_coarse"], 0.75)
 
     def test_heater_inputs_still_conducts_with_zero_heater_power(self) -> None:
         model = ThermalGraphModel(metadata=GraphMetadata(graph_name="zero_power_conduction"))

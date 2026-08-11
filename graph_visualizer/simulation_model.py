@@ -3209,12 +3209,6 @@ _HEATER_CONTROLLER_DEFAULTS = {
     "sensor_manual_power_W": 0.0,
     "controller_weight": 0.0,
     "sensor_settling_time_s": 0.0,
-    "controller_kp_coarse": 0.0,
-    "controller_ki_coarse": 0.0,
-    "controller_kd_coarse": 0.0,
-    "controller_kp_hold": 0.0,
-    "controller_ki_hold": 0.0,
-    "controller_kd_hold": 0.0,
 }
 
 

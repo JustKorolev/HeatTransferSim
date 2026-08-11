@@ -188,3 +188,39 @@ def test_refresh_subprocess_restores_a_stale_fast_load(tmp_path) -> None:
 
     usable, reason = can_load_fast(folder)
     assert usable, reason
+
+
+def test_a_graph_carrying_the_retired_pid_gains_still_loads() -> None:
+    """Every existing graph.json has the per-heater PID gains in it.
+
+    They were removed with the PID+QP allocator (nothing read them: heater control
+    modes are only "mimo" or "manual"), so from_dict has to drop them rather than
+    choke. A graph that will not open is a far worse outcome than a dead knob.
+    """
+    from graph_visualizer.models import NodeProperties
+
+    node = NodeProperties.from_dict(
+        {
+            "node_id": 1,
+            "coord": [0, 0, 0],
+            "controller": {
+                "setpoint_K": 312.0,
+                "weight": 2.0,
+                "kp_coarse": 0.75,
+                "ki_coarse": 0.25,
+                "kd_coarse": 0.4,
+                "kp_hold": 0.5,
+                "ki_hold": 0.125,
+                "kd_hold": 0.2,
+                "kp_scale": 0.9,   # the even older spelling
+                "ki_scale": 0.3,
+            },
+            "controller_kp_coarse": 1.5,   # and the flattened form
+        }
+    )
+    assert node.controller_setpoint_K == 312.0, "the fields that still matter survive"
+    assert node.controller_weight == 2.0
+    for dead in ("controller_kp_coarse", "controller_ki_hold", "controller_kd_coarse"):
+        assert not hasattr(node, dead), dead
+    # And they must not come back on the way out.
+    assert "kp_coarse" not in node.to_octree_node_dict()["controller"]

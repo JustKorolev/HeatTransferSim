@@ -104,12 +104,6 @@ _READOUT_HEATER_CONTROLLER_FIELDS = (
     "sensor_manual_power_W",
     "controller_weight",
     "sensor_settling_time_s",
-    "controller_kp_coarse",
-    "controller_ki_coarse",
-    "controller_kd_coarse",
-    "controller_kp_hold",
-    "controller_ki_hold",
-    "controller_kd_hold",
 )
 _READOUT_HEATER_HARDWARE_FIELDS = (
     "heater_id",
@@ -3331,12 +3325,6 @@ def _readout_heater_controller_is_default(heater: Any) -> bool:
         "sensor_manual_power_W": 0.0,
         "controller_weight": 0.0,
         "sensor_settling_time_s": 0.0,
-        "controller_kp_coarse": 0.0,
-        "controller_ki_coarse": 0.0,
-        "controller_kd_coarse": 0.0,
-        "controller_kp_hold": 0.0,
-        "controller_ki_hold": 0.0,
-        "controller_kd_hold": 0.0,
     }
     for field, default in defaults.items():
         value = getattr(heater, field, default)

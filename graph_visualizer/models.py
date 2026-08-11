@@ -207,12 +207,6 @@ class NodeProperties:
     controller_setpoint_K: float = 293.15
     controller_weight: float = 0.0
     sensor_settling_time_s: float = 0.0
-    controller_kp_coarse: float = 0.0
-    controller_ki_coarse: float = 0.0
-    controller_kp_hold: float = 0.0
-    controller_ki_hold: float = 0.0
-    controller_kd_coarse: float = 0.0
-    controller_kd_hold: float = 0.0
     controller_integral_leak_per_s: float = 0.0
 
     @classmethod
@@ -297,45 +291,25 @@ class NodeProperties:
                 "sensor_settling_time_s",
                 float(controller_data.get("sensor_settling_time_s", controller_data.get("settling_time_s", 0.0))),
             )
-            legacy_kp = controller_data.get("kp_scale", copied.get("controller_kp_scale", 0.0))
-            legacy_ki = controller_data.get("ki_scale", copied.get("controller_ki_scale", 0.0))
-            copied.setdefault(
-                "controller_kp_coarse",
-                float(controller_data.get("kp_coarse", controller_data.get("kp", legacy_kp))),
-            )
-            copied.setdefault(
-                "controller_ki_coarse",
-                float(controller_data.get("ki_coarse", controller_data.get("ki", legacy_ki))),
-            )
-            copied.setdefault(
-                "controller_kp_hold",
-                float(controller_data.get("kp_hold", copied.get("controller_kp_hold", legacy_kp))),
-            )
-            copied.setdefault(
-                "controller_ki_hold",
-                float(controller_data.get("ki_hold", copied.get("controller_ki_hold", legacy_ki))),
-            )
-            copied.setdefault(
-                "controller_kd_coarse",
-                float(controller_data.get("kd_coarse", controller_data.get("kd", copied.get("controller_kd_coarse", 0.0)))),
-            )
-            copied.setdefault(
-                "controller_kd_hold",
-                float(controller_data.get("kd_hold", copied.get("controller_kd_hold", 0.0))),
-            )
             copied.setdefault(
                 "controller_integral_leak_per_s",
                 float(controller_data.get("integral_leak_per_s", copied.get("controller_integral_leak_per_s", 0.0))),
             )
+        # Retired with the PID+QP allocator: these per-heater PID gains had no
+        # consumer left (heater control modes are only "mimo" or "manual"), so
+        # they were knobs in the node editor that changed nothing. Dropped on load
+        # so existing graph.json files still open.
+        copied.pop("controller_kp_coarse", None)
+        copied.pop("controller_ki_coarse", None)
+        copied.pop("controller_kd_coarse", None)
+        copied.pop("controller_kp_hold", None)
+        copied.pop("controller_ki_hold", None)
+        copied.pop("controller_kd_hold", None)
+        copied.pop("controller_kp_scale", None)
+        copied.pop("controller_ki_scale", None)
         copied.pop("controller_integral_negative_error_leak_per_s", None)
         copied.pop("integral_negative_error_leak_per_s", None)
         copied.pop("negative_error_leak_per_s", None)
-        if "controller_kp_scale" in copied and "controller_kp_coarse" not in copied:
-            copied["controller_kp_coarse"] = float(copied["controller_kp_scale"])
-            copied.setdefault("controller_kp_hold", float(copied["controller_kp_scale"]))
-        if "controller_ki_scale" in copied and "controller_ki_coarse" not in copied:
-            copied["controller_ki_coarse"] = float(copied["controller_ki_scale"])
-            copied.setdefault("controller_ki_hold", float(copied["controller_ki_scale"]))
         copied.pop("controller_kp_scale", None)
         copied.pop("controller_ki_scale", None)
         copied.pop("heat_sink", None)
@@ -422,12 +396,6 @@ class NodeProperties:
                 float(copied.get(key, 0.0) or 0.0) > 0.0
                 for key in (
                     "controller_weight",
-                    "controller_kp_coarse",
-                    "controller_ki_coarse",
-                    "controller_kd_coarse",
-                    "controller_kp_hold",
-                    "controller_ki_hold",
-                    "controller_kd_hold",
                 )
             )
             copied["sensor_control_mode"] = "mimo" if old_mode == "mimo" or has_controller_gains else "manual"
@@ -574,12 +542,6 @@ class NodeProperties:
                 "setpoint_K": self.controller_setpoint_K,
                 "weight": self.controller_weight,
                 "sensor_settling_time_s": self.sensor_settling_time_s,
-                "kp_coarse": self.controller_kp_coarse,
-                "ki_coarse": self.controller_ki_coarse,
-                "kp_hold": self.controller_kp_hold,
-                "ki_hold": self.controller_ki_hold,
-                "kd_coarse": self.controller_kd_coarse,
-                "kd_hold": self.controller_kd_hold,
                 "integral_leak_per_s": self.controller_integral_leak_per_s,
             },
         }
@@ -1119,12 +1081,6 @@ _LEGACY_HEATER_CONTROLLER_DEFAULTS = {
     "sensor_manual_power_W": 0.0,
     "controller_weight": 0.0,
     "sensor_settling_time_s": 0.0,
-    "controller_kp_coarse": 0.0,
-    "controller_ki_coarse": 0.0,
-    "controller_kd_coarse": 0.0,
-    "controller_kp_hold": 0.0,
-    "controller_ki_hold": 0.0,
-    "controller_kd_hold": 0.0,
 }
 
 

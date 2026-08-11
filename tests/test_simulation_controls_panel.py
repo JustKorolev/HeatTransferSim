@@ -749,13 +749,12 @@ def test_every_input_maps_to_a_real_parameter(mode):
 def test_readout_editor_builds_the_same_heater_sensor_options(mode):
     panel, _form = _build(mode)
     panel.build_readout_editor()
-    # setpoint, heater power/PID and cryocooler options exist in both tabs.
+    # setpoint, heater power and cryocooler options exist in both tabs.
     for field in (
         "controller_setpoint_K",
         "sensor_control_mode",
         "heater_max_power_W",
         "heater_efficiency",
-        "controller_kp_coarse",
         "cryocooler_max_power_W",
         "cryocooler_enabled",
     ):

@@ -1009,12 +1009,6 @@ class SimulationControlsPanel:
             ("sensor_manual_power_W", "manual power W", 0.0, 1.0e9, 1.0),
             ("controller_weight", "weight", 0.0, 1.0e9, 0.1),
             ("sensor_settling_time_s", "settling time s", 0.0, 1.0e9, 1.0),
-            ("controller_kp_coarse", "coarse kP", 0.0, 1.0e9, 0.1),
-            ("controller_ki_coarse", "coarse kI", 0.0, 1.0e9, 0.1),
-            ("controller_kd_coarse", "coarse kD", 0.0, 1.0e9, 0.1),
-            ("controller_kp_hold", "hold kP", 0.0, 1.0e9, 0.1),
-            ("controller_ki_hold", "hold kI", 0.0, 1.0e9, 0.1),
-            ("controller_kd_hold", "hold kD", 0.0, 1.0e9, 0.1),
         ):
             widget = self.double_spin(minimum, maximum, float(node_defaults.get(name, 0.0)), step)
             widget.valueChanged.connect(self._readout_slot("readout_heater_change", name))

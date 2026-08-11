@@ -90,12 +90,6 @@ _EDITOR_CONTROLLER_RUNTIME_FIELDS = {
     "controller_setpoint_K",
     "controller_weight",
     "sensor_settling_time_s",
-    "controller_kp_coarse",
-    "controller_ki_coarse",
-    "controller_kp_hold",
-    "controller_ki_hold",
-    "controller_kd_coarse",
-    "controller_kd_hold",
 }
 
 
@@ -541,12 +535,6 @@ class GraphVisualizerApp:
         self.inputs["controller_weight"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
         self.inputs["sensor_manual_power_W"] = self._double_spin(0.0, 1.0e9, 0.0, 1.0)
         self.inputs["sensor_settling_time_s"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
-        self.inputs["controller_kp_coarse"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
-        self.inputs["controller_ki_coarse"] = self._double_spin(0.0, 1.0e9, 0.0, 0.01)
-        self.inputs["controller_kp_hold"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
-        self.inputs["controller_ki_hold"] = self._double_spin(0.0, 1.0e9, 0.0, 0.01)
-        self.inputs["controller_kd_coarse"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
-        self.inputs["controller_kd_hold"] = self._double_spin(0.0, 1.0e9, 0.0, 0.1)
         self.inputs["sensor_settling_time_s"].setToolTip(
             "MIMO sensor settling time used by this heater controller for lag compensation."
         )
@@ -554,12 +542,6 @@ class GraphVisualizerApp:
         for label, key in (
             ("sensor weight", "controller_weight"),
             ("settling time s", "sensor_settling_time_s"),
-            ("coarse kP", "controller_kp_coarse"),
-            ("coarse kI", "controller_ki_coarse"),
-            ("coarse kD", "controller_kd_coarse"),
-            ("hold kP", "controller_kp_hold"),
-            ("hold kI", "controller_ki_hold"),
-            ("hold kD", "controller_kd_hold"),
         ):
             heater_form.addRow(label, self.inputs[key])
 
@@ -788,12 +770,6 @@ class GraphVisualizerApp:
             "controller_setpoint_K",
             "controller_weight",
             "sensor_settling_time_s",
-            "controller_kp_coarse",
-            "controller_ki_coarse",
-            "controller_kp_hold",
-            "controller_ki_hold",
-            "controller_kd_coarse",
-            "controller_kd_hold",
         ):
             self.inputs[key].valueChanged.connect(
                 lambda *_args, field=key: self._handle_node_form_changed(field)
@@ -933,12 +909,6 @@ class GraphVisualizerApp:
             target.sensor_manual_power_W = template.sensor_manual_power_W
             target.controller_weight = template.controller_weight
             target.sensor_settling_time_s = template.sensor_settling_time_s
-            target.controller_kp_coarse = template.controller_kp_coarse
-            target.controller_ki_coarse = template.controller_ki_coarse
-            target.controller_kp_hold = template.controller_kp_hold
-            target.controller_ki_hold = template.controller_ki_hold
-            target.controller_kd_coarse = template.controller_kd_coarse
-            target.controller_kd_hold = template.controller_kd_hold
         else:
             target.heater_control.reset_pid_state()
             target.assigned_sensor_id = None
@@ -951,12 +921,6 @@ class GraphVisualizerApp:
             target.sensor_manual_power_W = 0.0
             target.controller_weight = 0.0
             target.sensor_settling_time_s = 0.0
-            target.controller_kp_coarse = 0.0
-            target.controller_ki_coarse = 0.0
-            target.controller_kp_hold = 0.0
-            target.controller_ki_hold = 0.0
-            target.controller_kd_coarse = 0.0
-            target.controller_kd_hold = 0.0
         if target.is_sensor:
             target.sensor = deepcopy(template.sensor)
             if target_id != self.selected_node_id:
@@ -1638,12 +1602,6 @@ class GraphVisualizerApp:
             controller_setpoint_K=float(self.inputs["controller_setpoint_K"].value()) if is_sensor else 293.15,
             controller_weight=float(self.inputs["controller_weight"].value()) if is_heater else 0.0,
             sensor_settling_time_s=float(self.inputs["sensor_settling_time_s"].value()) if is_heater else 0.0,
-            controller_kp_coarse=float(self.inputs["controller_kp_coarse"].value()) if is_heater else 0.0,
-            controller_ki_coarse=float(self.inputs["controller_ki_coarse"].value()) if is_heater else 0.0,
-            controller_kp_hold=float(self.inputs["controller_kp_hold"].value()) if is_heater else 0.0,
-            controller_ki_hold=float(self.inputs["controller_ki_hold"].value()) if is_heater else 0.0,
-            controller_kd_coarse=float(self.inputs["controller_kd_coarse"].value()) if is_heater else 0.0,
-            controller_kd_hold=float(self.inputs["controller_kd_hold"].value()) if is_heater else 0.0,
             notes=self.inputs["notes"].toPlainText(),
         )
         if not node.C_manual_override:
@@ -1694,12 +1652,6 @@ class GraphVisualizerApp:
         self.inputs["controller_setpoint_K"].setValue(float(getattr(node, "controller_setpoint_K", 293.15)))
         self.inputs["controller_weight"].setValue(float(getattr(node, "controller_weight", 0.0)))
         self.inputs["sensor_settling_time_s"].setValue(float(getattr(node, "sensor_settling_time_s", 0.0)))
-        self.inputs["controller_kp_coarse"].setValue(float(getattr(node, "controller_kp_coarse", 0.0)))
-        self.inputs["controller_ki_coarse"].setValue(float(getattr(node, "controller_ki_coarse", 0.0)))
-        self.inputs["controller_kp_hold"].setValue(float(getattr(node, "controller_kp_hold", 0.0)))
-        self.inputs["controller_ki_hold"].setValue(float(getattr(node, "controller_ki_hold", 0.0)))
-        self.inputs["controller_kd_coarse"].setValue(float(getattr(node, "controller_kd_coarse", 0.0)))
-        self.inputs["controller_kd_hold"].setValue(float(getattr(node, "controller_kd_hold", 0.0)))
         self.inputs["has_cryocooler"].setChecked(node.has_cryocooler)
         self._sync_pairing_labels(node)
         self._sync_node_role_label(node)
@@ -1777,12 +1729,6 @@ class GraphVisualizerApp:
         for key in (
             "controller_weight",
             "sensor_settling_time_s",
-            "controller_kp_coarse",
-            "controller_ki_coarse",
-            "controller_kp_hold",
-            "controller_ki_hold",
-            "controller_kd_coarse",
-            "controller_kd_hold",
         ):
             self.inputs[key].setEnabled(mimo_active)
             self.inputs[key].setSpecialValueText("" if not mimo_active else "")

@@ -63,12 +63,6 @@ def format_node_tooltip(node_id: int, attrs: Any) -> str:
                 f"manual power: {_fmt(getattr(attrs, 'sensor_manual_power_W', None))} W",
                 f"weight: {_fmt(getattr(attrs, 'controller_weight', None))}",
                 f"settling: {_fmt(getattr(attrs, 'sensor_settling_time_s', None))} s",
-                f"coarse kP: {_fmt(getattr(attrs, 'controller_kp_coarse', None))}",
-                f"coarse kI: {_fmt(getattr(attrs, 'controller_ki_coarse', None))}",
-                f"coarse kD: {_fmt(getattr(attrs, 'controller_kd_coarse', None))}",
-                f"hold kP: {_fmt(getattr(attrs, 'controller_kp_hold', None))}",
-                f"hold kI: {_fmt(getattr(attrs, 'controller_ki_hold', None))}",
-                f"hold kD: {_fmt(getattr(attrs, 'controller_kd_hold', None))}",
             ]
         )
         warning = str(getattr(attrs, "heater_warning", "") or "")
