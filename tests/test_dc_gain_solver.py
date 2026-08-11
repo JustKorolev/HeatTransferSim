@@ -136,3 +136,45 @@ def test_a_non_converging_column_still_raises_from_a_worker() -> None:
     S_ctrl = _projection(L.shape[0], 4)
     with pytest.raises(RuntimeError, match="did not converge|singular"):
         _dc_gain_iterative(ungrounded, F, S_ctrl, workers=3, rtol=1.0e-14, maxiter=200)
+
+
+def test_a_crashed_worker_falls_back_to_serial_instead_of_losing_the_build(monkeypatch) -> None:
+    """BrokenProcessPool is itself a RuntimeError, so an `except RuntimeError: raise`
+    guard would abort the build when a worker segfaults -- which scipy's _sparsetools
+    has done on this hardware. A dead pool means retry serially.
+    """
+    from concurrent.futures.process import BrokenProcessPool
+
+    from graph_visualizer import modal_reduction as mr
+
+    L, F, _S, _m = _spd_plant(n=300, m=5)
+    S_ctrl = _projection(L.shape[0], 4)
+    expected = mr._dc_gain_iterative(L, F, S_ctrl, workers=1)
+
+    def explode(*_a, **_k):
+        raise BrokenProcessPool("worker died")
+
+    monkeypatch.setattr(mr, "_dc_gain_parallel", explode)
+    notes: list[str] = []
+    got = mr._dc_gain_iterative(L, F, S_ctrl, workers=4, progress=notes.append)
+    assert np.array_equal(got, expected), "the serial fallback must give the real answer"
+    assert any("falling back to serial" in n for n in notes), notes
+
+
+def test_a_non_converged_column_is_not_retried_serially(monkeypatch) -> None:
+    """The opposite case: a numerical failure would fail identically in serial, so
+    retrying only wastes the time again and buries the reason."""
+    from graph_visualizer import modal_reduction as mr
+
+    L, F, _S, _m = _spd_plant(n=300, m=5)
+    S_ctrl = _projection(L.shape[0], 4)
+    calls: list[int] = []
+
+    def not_converged(*_a, **_k):
+        calls.append(1)
+        raise mr.DCSolveNotConverged("column 1/5 did not converge")
+
+    monkeypatch.setattr(mr, "_dc_gain_parallel", not_converged)
+    with pytest.raises(mr.DCSolveNotConverged):
+        mr._dc_gain_iterative(L, F, S_ctrl, workers=4)
+    assert len(calls) == 1, "must not fall through to a serial retry"

@@ -280,6 +280,16 @@ _DC_WORKER: dict = {}
 DC_GAIN_MAX_WORKERS = 8
 
 
+class DCSolveNotConverged(RuntimeError):
+    """A DC column failed to converge -- a real numerical failure, not a pool one.
+
+    Distinct from BrokenProcessPool, which is ALSO a RuntimeError: a crashed worker
+    means retry serially, while a non-converged column means the operator is wrong
+    and retrying changes nothing. Conflating them either hides a bad G behind a
+    silent serial retry, or aborts a perfectly good build because a worker died.
+    """
+
+
 def _dc_default_workers(n_columns: int) -> int:
     """One process per column, capped by the machine, the work, and the memory bus."""
     import os
@@ -316,7 +326,7 @@ def _dc_check(j, m, info, residual, rtol):
     wrong decoupler -- much worse than a build that stops and says so.
     """
     if info != 0 or not np.isfinite(residual) or residual > max(1.0e-6, 100.0 * rtol):
-        raise RuntimeError(
+        raise DCSolveNotConverged(
             f"DC solve did not converge for heater column {j + 1}/{m} "
             f"(cg info={info}, relative residual {residual:.3e}). The operator may be "
             "singular -- check that the graph has a cryocooler or a radiation path to "
@@ -409,10 +419,14 @@ def _dc_gain_iterative(
     if n_workers > 1 and len(live) > 1:
         try:
             return _dc_gain_parallel(Leff, live, S_ctrl, G, n_workers, rtol, maxiter, progress)
-        except RuntimeError:
-            raise
+        except DCSolveNotConverged:
+            raise  # a numerical failure: serial would fail identically
         except Exception as exc:  # noqa: BLE001 - fall back rather than fail the build
+            # Covers BrokenProcessPool (a worker segfaulted -- scipy's _sparsetools
+            # has done this here before), a pool that cannot start, and pickling
+            # failures. All are reasons to retry serially, not to lose the build.
             _report(progress, f"Parallel DC solve unavailable ({exc}); falling back to serial.")
+            G = np.zeros_like(G)  # discard any partial columns the pool wrote
 
     inv = _dc_jacobi_inverse(Leff.diagonal().astype(float))
     worst = 0.0
