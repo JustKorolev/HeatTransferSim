@@ -109,8 +109,17 @@ def slow_modes(Lm, Cm, Gradm, n_modes: int):
     D = diags(1.0 / np.sqrt(Cm))
     A = (D @ Leff @ D).tocsr()
     A = 0.5 * (A + A.T)
-    lam_max = float(eigsh(A, k=1, which="LA", return_eigenvectors=False, tol=1e-3)[0])
-    vals, vecs = eigsh(A, k=int(n_modes), sigma=-1e-4 * lam_max, which="LM", tol=1e-6)
+    # ARPACK picks a RANDOM start vector when v0 is omitted, so the same graph gave a
+    # slightly different reduced model on every build -- controller artifacts were not
+    # reproducible, and the downstream Riccati solve occasionally landed on a marginal
+    # pencil and failed ("eigenvalues too close to the unit circle") roughly one build
+    # in eight. A fixed start vector makes the pipeline deterministic; the subspace it
+    # converges to is the same either way.
+    v0 = np.random.default_rng(0).standard_normal(A.shape[0])
+    lam_max = float(
+        eigsh(A, k=1, which="LA", return_eigenvectors=False, tol=1e-3, v0=v0)[0]
+    )
+    vals, vecs = eigsh(A, k=int(n_modes), sigma=-1e-4 * lam_max, which="LM", tol=1e-6, v0=v0)
     order = np.argsort(vals)
     vals, vecs = vals[order], vecs[:, order]
     Phi = vecs / np.sqrt(Cm)[:, None]  # C^{-1/2} psi
@@ -408,6 +417,11 @@ def _dc_gain_iterative(
     m = F.shape[1]
     n_workers = _dc_default_workers(m) if workers is None else max(1, int(workers))
     G = np.zeros((S_ctrl.shape[0], m), dtype=float)
+    # S is a READOUT map -- a handful of cells per sensor -- but it is stored dense,
+    # which is 648 MB at 3M nodes x 27 controlled sensors. Each worker gets a copy,
+    # so shipping it dense would mean ~5 GB of pickling before the first solve. As
+    # CSR it is kilobytes, and proj @ x gives the identical result.
+    S_ctrl = csr_matrix(np.asarray(S_ctrl, dtype=float))
     # Columns with no deposition cells have a zero load, hence a zero gain column.
     # CG on a zero right-hand side has no meaningful relative residual, so skip them.
     live = [(j, rows, vals) for j, rows, vals in _sparse_columns(F) if rows.size]

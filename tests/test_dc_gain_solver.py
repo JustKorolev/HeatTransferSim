@@ -178,3 +178,32 @@ def test_a_non_converged_column_is_not_retried_serially(monkeypatch) -> None:
     with pytest.raises(mr.DCSolveNotConverged):
         mr._dc_gain_iterative(L, F, S_ctrl, workers=4)
     assert len(calls) == 1, "must not fall through to a serial retry"
+
+
+def test_the_projection_is_shipped_sparsely_to_workers() -> None:
+    """S is dense but structurally sparse: 618 MB at 3M nodes x 27 sensors, copied
+    to every worker. Densely that is ~5 GB of pickling before the first solve."""
+    import pickle
+
+    from scipy.sparse import csr_matrix
+
+    from graph_visualizer import modal_reduction as mr
+
+    L, F, _S, _m = _spd_plant(n=300, m=4)
+    S_ctrl = _projection(L.shape[0], 6)
+    captured = {}
+
+    def capture(Leff, live, proj, G, *rest):
+        captured["proj"] = proj
+        return mr._dc_gain_parallel(Leff, live, proj, G, *rest)
+
+    original = mr._dc_gain_parallel
+    try:
+        mr._dc_gain_parallel = capture
+        mr._dc_gain_iterative(L, F, S_ctrl, workers=2)
+    finally:
+        mr._dc_gain_parallel = original
+
+    proj = captured["proj"]
+    assert isinstance(proj, csr_matrix), type(proj)
+    assert len(pickle.dumps(proj)) < len(pickle.dumps(S_ctrl))

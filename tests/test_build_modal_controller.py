@@ -201,3 +201,31 @@ def test_reduced_order_above_the_mode_count_is_rejected(tmp_path, monkeypatch) -
     tab.build_modal_controller()
     assert tab._modal_build_process is None
     assert any(error and "cannot exceed" in message for message, error in messages), messages
+
+
+def test_slow_modes_is_reproducible() -> None:
+    """Two builds of the same graph must give the same reduced model.
+
+    ARPACK seeds its Krylov start vector randomly unless v0 is given, so this used
+    to drift between builds: the artifacts were not reproducible, and the Riccati
+    solve downstream occasionally landed on a marginal pencil and failed outright
+    ("eigenvalues too close to the unit circle") about one build in eight.
+    """
+    import numpy as np
+    from scipy.sparse import csr_matrix, diags
+
+    from graph_visualizer.modal_reduction import slow_modes
+
+    rng = np.random.default_rng(3)
+    n = 200
+    A = np.triu(rng.random((n, n)) < 0.05, 1)
+    W = np.where(A, rng.random((n, n)) * 0.4 + 0.1, 0.0)
+    W = W + W.T
+    L = csr_matrix(diags(W.sum(1)) - csr_matrix(W))
+    C = rng.random(n) * 10.0 + 1.0
+    Grad = np.full(n, 0.02)
+
+    first = slow_modes(L, C, Grad, 8)
+    second = slow_modes(L, C, Grad, 8)
+    assert np.array_equal(first[0], second[0]), "eigenvalues must not drift between builds"
+    assert np.array_equal(first[1], second[1]), "eigenvectors must not drift either"
