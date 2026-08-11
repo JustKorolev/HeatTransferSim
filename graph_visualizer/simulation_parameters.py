@@ -77,7 +77,36 @@ class SimulationParameters:
     #                  (needs a modal_controller.npz for the graph; see
     #                  tools/analyze_plant_modes.py). Falls back to pid_qp if the
     #                  artifact is missing or mismatched.
-    mimo_controller_scheme: str = "pid_qp"
+    mimo_controller_scheme: str = "mimo_pi"
+    # --- MIMO PI ---------------------------------------------------------------
+    # Static-decoupling PI. The plant's DC gain G (n_ctrl x n_heaters, K/W) is
+    # inverted once so the loop from the virtual command v (in KELVIN) to the
+    # sensors is the identity; the PI then runs as n_ctrl INDEPENDENT scalar loops
+    # in that decoupled space:
+    #
+    #     e = r - y                       (K)
+    #     v = r_dev + Kp e + Ki \int e dt (K)
+    #     u = QP(G, v)  s.t. 0 <= u <= u_max        (W)
+    #
+    # Decoupling is mandatory here, not a refinement: the RGA diagonal of this
+    # plant is negative on 26 of 27 pairings, i.e. a per-pair SISO loop drives the
+    # WRONG WAY once its neighbours close. Only ~0.7% of a heater's steady
+    # influence lands on its own sensor.
+    #
+    # Gains are PER CONTROLLED SENSOR, because after decoupling a channel owns a
+    # sensor, not a heater -- G+ mixes all sensors into every heater.
+    mimo_pi_gain_matrix_path: str = ""  # sys-id run folder holding G (and the gain preset)
+    # Ki = 1/lambda for a desired closed-loop time constant lambda. Do not ask for
+    # lambda faster than the plant's fastest RETAINED mode (1182 s on
+    # no_mli_high_res) or the command excites truncated dynamics: Ki <~ 8.5e-4.
+    mimo_pi_ki: float = 1.0e-3
+    # After decoupling every channel has unit DC gain, so Kp = tau/lambda. Starting
+    # at 0 gives feedforward + integral, which is what the modal scheme effectively
+    # ran; raise it if the approach is too sluggish.
+    mimo_pi_kp: float = 0.0
+    # Derivative is deliberately absent: the conduction operator is symmetric, so
+    # its spectrum is real and has no resonance to damp -- a D term would only
+    # amplify sensor noise.
     # Quarantine cells that can absorb heat but have no conduction path to a
     # cryocooler. Such a cell is a thermal dead end: deposited power can only
     # raise its temperature, forever. Quarantined cells receive no power and are

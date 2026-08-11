@@ -321,3 +321,73 @@ class _atomic_text_file:
                 self.tmp_path.unlink()
             except FileNotFoundError:
                 pass
+
+
+# --------------------------------------------------------------- MIMO PI presets
+# A MIMO PI is defined by its DC gain G plus the per-sensor gains tuned against
+# it. Gains are meaningless with a different G -- the decoupler G+ is what makes a
+# channel's unit-DC-gain assumption true -- so the preset lives beside the matrix
+# it belongs to rather than in the graph's parameters. Selecting a G matrix loads
+# its gains; tuning and saving writes them back here.
+MIMO_PI_PRESET_JSON = "mimo_pi_gains.json"
+
+
+def save_mimo_pi_preset(
+    run_folder: Path,
+    *,
+    kp: float,
+    ki: float,
+    per_sensor: dict[int, dict[str, float]] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Path:
+    """Store global Kp/Ki plus optional per-controlled-sensor overrides."""
+    folder = Path(run_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "kp": float(kp),
+        "ki": float(ki),
+        # JSON object keys are strings; the reader restores int sensor ids.
+        "per_sensor": {
+            str(int(sensor_id)): {
+                "kp": float(values.get("kp", kp)),
+                "ki": float(values.get("ki", ki)),
+            }
+            for sensor_id, values in (per_sensor or {}).items()
+        },
+        "metadata": dict(metadata or {}),
+    }
+    target = folder / MIMO_PI_PRESET_JSON
+    _atomic_write_json(target, payload, indent=2)
+    return target
+
+
+def load_mimo_pi_preset(run_folder: Path) -> dict[str, Any] | None:
+    """(kp, ki, per_sensor) for a G matrix, or None when it has no preset yet."""
+    path = Path(run_folder) / MIMO_PI_PRESET_JSON
+    if not path.is_file():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    per_sensor: dict[int, dict[str, float]] = {}
+    for key, values in (payload.get("per_sensor") or {}).items():
+        try:
+            sensor_id = int(key)
+            per_sensor[sensor_id] = {
+                "kp": float(values["kp"]),
+                "ki": float(values["ki"]),
+            }
+        except (TypeError, ValueError, KeyError):
+            continue
+    return {
+        "kp": float(payload.get("kp", 0.0)),
+        "ki": float(payload.get("ki", 0.0)),
+        "per_sensor": per_sensor,
+        "saved_at": str(payload.get("saved_at", "")),
+    }

@@ -1695,9 +1695,209 @@ class PreparedSimulation:
         self._modal_ff_rls_P = P
         return committed, dM, True, float(alpha)
 
+    def _mimo_pi_scheme_active(self) -> bool:
+        """True when the static-decoupling MIMO PI should run: scheme selected,
+        heater-input mode, and a usable DC gain matrix is loaded for this graph."""
+        if str(getattr(self.params, "mimo_controller_scheme", "")) != "mimo_pi":
+            return False
+        if self.params.input_mode != "heater_inputs":
+            return False
+        return self._load_mimo_pi_gain() is not None
+
+    def _load_mimo_pi_gain(self):
+        """Load + cache the DC gain G and its per-sensor gain preset.
+
+        Cached per prepared simulation, keyed on the artifact path, so a run does
+        not re-read the matrix every step. Returns None (and records why) when the
+        artifact is missing or does not map onto this graph.
+        """
+        path = str(getattr(self.params, "mimo_pi_gain_matrix_path", "") or "")
+        cache = getattr(self, "_mimo_pi_cache", None)
+        if cache is not None and getattr(self, "_mimo_pi_cache_path", None) == path:
+            return cache or None
+        self._mimo_pi_cache_path = path
+        if not path or self.model is None:
+            self._mimo_pi_cache = {}
+            return None
+        try:
+            from .sys_id_artifacts import load_mimo_pi_preset, load_sys_id_gain_matrix_data
+
+            data = load_sys_id_gain_matrix_data(Path(path))
+            sensor_ids = [int(v) for v in data.sensor_ids]
+            heater_ids = [int(v) for v in data.heater_ids]
+            missing = [n for n in sensor_ids + heater_ids if n not in self.model.nodes]
+            if missing:
+                raise ValueError(
+                    f"gain matrix references {len(missing)} node id(s) not in this graph "
+                    "(built for a different graph?)"
+                )
+            G = np.asarray(data.G, dtype=float)
+            if G.shape != (len(sensor_ids), len(heater_ids)):
+                raise ValueError(f"G shape {G.shape} does not match its own id lists.")
+            if not np.all(np.isfinite(G)):
+                raise ValueError("G contains non-finite entries.")
+            preset = load_mimo_pi_preset(Path(path)) or {}
+            cache = {
+                "G": G,
+                "sensor_ids": sensor_ids,
+                "heater_ids": heater_ids,
+                "per_sensor": preset.get("per_sensor", {}),
+                # A preset saved beside the matrix wins over the run parameters, so
+                # selecting a controller also selects the tuning it was built with.
+                "preset_kp": preset.get("kp"),
+                "preset_ki": preset.get("ki"),
+            }
+            self._mimo_pi_cache = cache
+            self.warnings.append(
+                f"MIMO PI: {G.shape[0]} controlled sensor(s) x {G.shape[1]} heater(s), "
+                f"cond(G)={np.linalg.cond(G):.4g}"
+                + (f", gains from preset saved {preset.get('saved_at', '')}" if preset else
+                   ", no saved preset; using the run's Kp/Ki")
+            )
+            return cache
+        except Exception as exc:  # noqa: BLE001 - fall back to whatever else is configured
+            self.warnings.append(f"MIMO PI gain matrix unavailable ({exc}); scheme not active.")
+            self._mimo_pi_cache = {}
+            return None
+
+    def _mimo_pi_gains(self, gain, sensor_ids) -> tuple[np.ndarray, np.ndarray]:
+        """(Kp, Ki) per controlled sensor: the run's globals, overridden per sensor
+        by anything the preset names."""
+        kp0 = gain.get("preset_kp")
+        ki0 = gain.get("preset_ki")
+        kp0 = float(getattr(self.params, "mimo_pi_kp", 0.0)) if kp0 is None else float(kp0)
+        ki0 = float(getattr(self.params, "mimo_pi_ki", 0.0)) if ki0 is None else float(ki0)
+        per = gain.get("per_sensor") or {}
+        kp = np.array([float(per.get(int(s), {}).get("kp", kp0)) for s in sensor_ids], dtype=float)
+        ki = np.array([float(per.get(int(s), {}).get("ki", ki0)) for s in sensor_ids], dtype=float)
+        return kp, ki
+
+    def _mimo_pi_controller_power_vector(self, update_state: bool) -> np.ndarray:
+        """Static-decoupling MIMO PI.
+
+            e = r - y                          (K)
+            v = r_dev + Kp e + Ki \\int e dt   (K, per controlled sensor)
+            u = QP(G, v) s.t. 0 <= u <= u_max  (W)
+
+        The decoupling lives in the QP: it inverts G, so the loop from v to y is
+        the identity at DC and the PI runs as independent scalar channels. Per-pair
+        SISO control is not an option on this plant -- 26 of 27 RGA diagonals are
+        negative, so a pairing's gain changes sign once its neighbours close.
+
+        The QP (rather than clipping G+ v) is what keeps the decoupling honest when
+        heaters bound: it redistributes to the unsaturated ones instead of
+        truncating each channel independently, which matters here because 10-11 of
+        27 heaters sit at 0 W in normal operation.
+        """
+        model = self.model
+        node_index = self.node_index_by_id or {int(v): i for i, v in enumerate(self.node_ids)}
+        # Cryocoolers and any manual (non-MIMO) heaters first, as the baseline.
+        powers = _controlled_heater_power_vector(
+            model, self.node_ids, self.temperatures_K, float(self.params.dt_s), self.params,
+            include_heater_inputs=True, update_pid_state=False, excluded_modes={"mimo"},
+            node_index_by_id=node_index, heater_node_ids=self.heater_node_ids,
+            cryocooler_node_ids=self.cryocooler_node_ids, cryocooler_devices=self.cryocooler_devices,
+            cryocooler_lift_curve=self.cryocooler_lift_curve,
+            cryocooler_diagnostics=self.last_cryocooler_diagnostics,
+            capacitance=self._live_capacitance(),
+        )
+        gain = self._load_mimo_pi_gain()
+        if gain is None:
+            return powers
+        G = gain["G"]
+        sensor_ids = gain["sensor_ids"]
+        heater_ids = gain["heater_ids"]
+        temps = np.asarray(self.temperatures_K, dtype=float)
+
+        y = np.array(
+            [sensor_readout_temperature_K(model, node_index, temps, int(s)) for s in sensor_ids],
+            dtype=float,
+        )
+        setpoints = np.array(
+            [float(getattr(model.nodes[int(s)], "controller_setpoint_K", np.nan)) for s in sensor_ids],
+            dtype=float,
+        )
+        valid = np.isfinite(y) & np.isfinite(setpoints)
+        error = np.where(valid, setpoints - y, 0.0)
+
+        dt = max(float(self.params.dt_s), 1.0e-12)
+        kp, ki = self._mimo_pi_gains(gain, sensor_ids)
+        integral = getattr(self, "controller_mimo_pi_integral", None)
+        if integral is None or np.asarray(integral).shape[0] != len(sensor_ids):
+            integral = np.zeros(len(sensor_ids), dtype=float)
+        candidate = integral + error * dt
+
+        # v is a virtual command in KELVIN: the steady deviation we want the plant
+        # to hold. r_dev carries the setpoint itself so the QP produces the holding
+        # power directly (the feedforward), leaving PI to supply only the correction.
+        T_op = float(np.nanmean(setpoints[valid])) if valid.any() else 0.0
+        r_dev = np.where(valid, setpoints - T_op, 0.0)
+        v_cmd = r_dev + kp * error + ki * candidate
+
+        maxima = np.array(
+            [max(0.0, _controller_heater_max_power(model.nodes[int(h)], self.params)) for h in heater_ids],
+            dtype=float,
+        )
+        u_prev = np.array(
+            [float(self.controller_last_power_by_heater.get(int(h), 0.0)) for h in heater_ids],
+            dtype=float,
+        )
+        slew = max(0.0, float(getattr(self.params, "mimo_heater_slew_rate_W_per_s", 0.0)))
+        max_delta = np.full(len(heater_ids), slew * dt, dtype=float) if slew > 0.0 else None
+        weights = np.where(valid, 1.0, 0.0)
+        result = allocate_thermal_rate_qp(
+            G,                                   # K/W, so "rate" is a temperature here
+            np.zeros(len(sensor_ids), dtype=float),
+            v_cmd,
+            weights,
+            maxima,
+            u_prev,
+            float(getattr(self.params, "mimo_lambda_u", 1.0e-3)),
+            float(getattr(self.params, "mimo_rho_du", 0.0)),
+            max_delta_power=max_delta,
+        )
+        u = np.asarray(result.u, dtype=float).reshape(-1)
+
+        self.controller_allocator_diagnostics = {
+            "controller_scheme": "mimo_pi",
+            "heater_ids": [int(h) for h in heater_ids],
+            "heater_commands_W": [float(c) for c in u],
+            "active_sensor_count": int(valid.sum()),
+            "heater_max_power_W": [float(m) for m in maxima],
+            "saturated_low": int(np.count_nonzero(u <= 1.0e-9)),
+            "saturated_high": int(np.count_nonzero(u >= maxima - 1.0e-9)),
+            "slew_rate_limit_W_per_s": float(slew),
+            "cond_G": float(np.linalg.cond(G)),
+        }
+        if update_state:
+            # Back-calculation anti-windup: integrate the error the plant will
+            # ACTUALLY see given the clipped command, not the one we asked for. With
+            # several heaters bounded at once, freezing per channel would either
+            # stall recovery or keep winding toward a command nothing delivers.
+            realised = G @ u
+            residual = v_cmd - realised
+            unreachable = np.abs(residual) > 1.0e-9
+            committed = np.where(unreachable & (np.abs(error) > 0.0), integral, candidate)
+            cap = max(0.0, float(getattr(self.params, "mimo_integral_abs_max", 1.0e6)))
+            if cap > 0.0:
+                committed = np.clip(committed, -cap, cap)
+            self.controller_mimo_pi_integral = committed
+            self.controller_weighted_rms_error = (
+                float(np.sqrt(np.mean(error[valid] ** 2))) if valid.any() else 0.0
+            )
+            self.controller_warnings = []
+            self.controller_last_power_by_heater = {
+                int(h): float(c) for h, c in zip(heater_ids, u)
+            }
+        for heater_id, command in zip(heater_ids, u):
+            _deposit_heater_command_power(powers, model, node_index, int(heater_id), float(command))
+        return powers
+
     def _mimo_controller_power_vector(self, update_state: bool) -> np.ndarray:
         if self.model is None:
             return np.zeros(len(self.node_ids), dtype=float)
+        if self._mimo_pi_scheme_active():
+            return self._mimo_pi_controller_power_vector(update_state)
         if self._modal_scheme_active():
             return self._modal_controller_power_vector(update_state)
         powers = _controlled_heater_power_vector(
