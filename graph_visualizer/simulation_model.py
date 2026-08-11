@@ -1785,6 +1785,10 @@ class PreparedSimulation:
                 "preset_ki": preset.get("ki"),
             }
             self._mimo_pi_cache = cache
+            # Published so a resume can tell whether a checkpoint's integrator state
+            # belongs to THIS controller before applying it (see the runner's
+            # _restore_controller_state).
+            self._mimo_pi_sensor_ids = list(sensor_ids)
             self.warnings.append(
                 f"MIMO PI: {G.shape[0]} controlled sensor(s) x {G.shape[1]} heater(s), "
                 f"cond(G)={np.linalg.cond(G):.4g}"

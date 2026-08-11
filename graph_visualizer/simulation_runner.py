@@ -1260,11 +1260,25 @@ class SimulationRunner:
                 else np.asarray(prepared.z[:-1], dtype=float)
             )
             t = float(state.time_s) if state is not None else 0.0
+            # The CONTROLLER's state is part of the simulation state, not incidental
+            # to it. Checkpointing only temperatures made a resume silently restart
+            # the controller cold: the integral (which holds the accumulated holding
+            # power) went back to zero, and MIMO PI re-captured its passive reference
+            # from the resumed temperatures with u_prev = 0 -- i.e. it took a plant
+            # already warmed by 20 W to BE the unheated equilibrium, and sized the
+            # feedforward against that. Resuming is exactly when this matters.
+            heater_ids = sorted(prepared.controller_last_power_by_heater)
             np.savez(
                 self.ckpt_dir / f"ckpt_{step:08d}.npz",
                 temperatures_K=temps,
                 time_s=t,
                 step=step,
+                controller_heater_ids=np.array(heater_ids, dtype=np.int64),
+                controller_last_power_W=np.array(
+                    [prepared.controller_last_power_by_heater[h] for h in heater_ids],
+                    dtype=float,
+                ),
+                **_optional_state_arrays(prepared),
             )
         except Exception as exc:  # noqa: BLE001
             self._log_event("checkpoint_error", str(exc))
@@ -1277,7 +1291,14 @@ class SimulationRunner:
             return
         data = np.load(ckpts[-1])
         prepared.set_temperatures(np.asarray(data["temperatures_K"], dtype=float))
-        self._log_event("resumed", f"from {ckpts[-1].name} at t={float(data['time_s']):.1f}s")
+        restored = _restore_controller_state(prepared, data)
+        self._log_event(
+            "resumed",
+            f"from {ckpts[-1].name} at t={float(data['time_s']):.1f}s"
+            + (f"; controller state restored ({restored})" if restored else
+               "; NO controller state in this checkpoint (written before it was saved) -- "
+               "the controller starts cold and must re-wind its integral"),
+        )
 
     def _current_time(self, prepared, step, dt) -> float:
         ts = self._series.get("time_s")
@@ -1529,6 +1550,61 @@ class SimulationRunner:
             if finite:
                 out["peak_heater_undelivered_W"] = max(finite)
         return out
+
+
+
+def _optional_state_arrays(prepared) -> dict:
+    """Controller integrator state, when the active scheme has any.
+
+    Stored per scheme rather than as one blob because the two are not
+    interchangeable: MIMO PI's integral is indexed by controlled sensor, the modal
+    one by heater. Loading the wrong one would be worse than loading neither.
+    """
+    out = {}
+    for name in (
+        "controller_mimo_pi_integral",
+        "controller_mimo_pi_passive_K",
+        "controller_modal_integral",
+    ):
+        value = getattr(prepared, name, None)
+        if value is not None:
+            out[name] = np.asarray(value, dtype=float)
+    return out
+
+
+def _restore_controller_state(prepared, data) -> str:
+    """Put a checkpoint's controller state back. Returns what was restored.
+
+    Silently tolerates checkpoints written before this existed, and any array whose
+    length no longer matches the current controller -- a resume with a different G
+    must start clean rather than apply gains to the wrong channels.
+    """
+    restored = []
+    ids = data["controller_heater_ids"] if "controller_heater_ids" in data else None
+    if ids is not None and ids.size:
+        powers = np.asarray(data["controller_last_power_W"], dtype=float)
+        prepared.controller_last_power_by_heater = {
+            int(h): float(p) for h, p in zip(ids, powers)
+        }
+        restored.append(f"{ids.size} heater command(s)")
+    expected = {
+        "controller_mimo_pi_integral": len(getattr(prepared, "_mimo_pi_sensor_ids", []) or []),
+        "controller_mimo_pi_passive_K": len(getattr(prepared, "_mimo_pi_sensor_ids", []) or []),
+    }
+    for name in (
+        "controller_mimo_pi_integral",
+        "controller_mimo_pi_passive_K",
+        "controller_modal_integral",
+    ):
+        if name not in data:
+            continue
+        value = np.asarray(data[name], dtype=float)
+        want = expected.get(name, 0)
+        if want and value.shape[0] != want:
+            continue  # a different controller: start clean
+        setattr(prepared, name, value)
+        restored.append(name.replace("controller_", ""))
+    return ", ".join(restored)
 
 
 class _HardFailure(Exception):

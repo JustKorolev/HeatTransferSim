@@ -458,31 +458,54 @@ def _dc_gain_iterative(
 
 
 def _dc_gain_parallel(Leff, live, S_ctrl, G, n_workers, rtol, maxiter, progress):
-    from concurrent.futures import ProcessPoolExecutor
+    """Run the columns across a process pool, reporting each one as it lands.
 
+    Uses submit + as_completed rather than pool.map, which yields in SUBMISSION
+    order: with 8 workers that produced a burst of 8 results and then silence for a
+    whole column-time, which is indistinguishable from a hang on a graph where a
+    column takes minutes. Each line now carries elapsed time and an ETA so a slow
+    build can be told apart from a stuck one without attaching a debugger.
+    """
+    import time
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+
+    total = len(live)
     _report(
         progress,
-        f"DC solve: {len(live)} columns across {n_workers} processes "
-        f"({Leff.shape[0]:,} nodes, ~{Leff.data.nbytes / 2**20:.0f} MB operator per worker)...",
+        f"DC solve: {total} columns across {n_workers} processes "
+        f"({Leff.shape[0]:,} nodes, ~{Leff.data.nbytes / 2**20:.0f} MB operator per worker). "
+        f"Results arrive as each column finishes, not in order.",
     )
     worst = 0.0
     m = G.shape[1]
+    started = time.perf_counter()
     with ProcessPoolExecutor(
         max_workers=n_workers,
         initializer=_dc_worker_init,
         initargs=(Leff.shape, Leff.data, Leff.indices, Leff.indptr, S_ctrl, rtol, maxiter),
     ) as pool:
-        for done, (j, projected, info, residual) in enumerate(
-            pool.map(_dc_worker_solve, live), start=1
-        ):
-            _dc_check(j, m, info, residual, rtol)
-            worst = max(worst, residual)
-            G[:, j] = projected
-            if progress is not None and done % max(1, len(live) // 20) == 0:
+        pending = {pool.submit(_dc_worker_solve, task) for task in live}
+        done_count = 0
+        while pending:
+            finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in finished:
+                j, projected, info, residual = future.result()
+                _dc_check(j, m, info, residual, rtol)
+                worst = max(worst, residual)
+                G[:, j] = projected
+                done_count += 1
+                elapsed = time.perf_counter() - started
+                eta = elapsed / done_count * (total - done_count)
                 _report(
-                    progress, f"DC solve: {done}/{len(live)} columns (worst residual {worst:.2e})"
+                    progress,
+                    f"DC solve: {done_count}/{total} columns, {elapsed / 60.0:.1f} min elapsed, "
+                    f"~{eta / 60.0:.1f} min left (worst residual {worst:.2e})",
                 )
-    _report(progress, f"DC solve complete: {len(live)} columns, worst relative residual {worst:.2e}")
+    _report(
+        progress,
+        f"DC solve complete: {total} columns in {(time.perf_counter() - started) / 60.0:.1f} min, "
+        f"worst relative residual {worst:.2e}",
+    )
     return G
 
 
