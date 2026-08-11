@@ -80,6 +80,7 @@ def build(args: argparse.Namespace) -> Path:
         np.asarray(matrices["node_ids"], dtype=int).reshape(-1),
         model,
         T_op_K=float(args.t_op),
+        workers=args.workers,
         progress=lambda message: print(f"[{_now()}]   {message}", flush=True),
     )
     elapsed = time.perf_counter() - started
@@ -134,6 +135,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="operating temperature [K]. G is a LINEARIZATION: conductance depends on "
                         "temperature through k(T) and h(T)=3000*(T/293), so a gain identified at "
                         "the wrong background is systematically wrong (25%% between 40 K and 50 K).")
+    p.add_argument(
+        "--workers", type=int, default=None,
+        help=(
+            "processes for the DC solve (large graphs only). Default caps at 8: CG on a "
+            "sparse operator is memory-bandwidth bound, so measured speedup saturates at "
+            "~3.2x around 8 workers and gets WORSE at 16. Each worker holds a full copy "
+            "of the operator (~250 MB at 3M nodes). Pass 1 to force serial."
+        ),
+    )
     p.add_argument("--name", default=None, help="run name for the saved matrix folder")
     p.add_argument("--allow-full-load", action="store_true",
                    help="permit the graph.json loader when fast-load artifacts are missing")

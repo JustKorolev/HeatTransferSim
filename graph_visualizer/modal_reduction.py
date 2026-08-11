@@ -163,6 +163,7 @@ def exact_dc_gain(
     *,
     T_op_K: float,
     progress: Callable[[str], None] | None = None,
+    workers: int | None = None,
 ) -> dict[str, Any]:
     """The plant's steady-state gain G (K/W), solved exactly from the operator.
 
@@ -219,7 +220,7 @@ def exact_dc_gain(
         L_dc = (csr_matrix(Lm) + diags(Gradm)).tocsr()
         ground = "radiation"
 
-    G, RGA = dc_gain_and_rga(L_dc, F, S, monitor, progress=progress)
+    G, RGA = dc_gain_and_rga(L_dc, F, S, monitor, progress=progress, workers=workers)
     controlled_ids = np.asarray(sensor_ids)[~monitor]
 
     # The RGA diagonal only means "how good is pairing i with i" when there is one
@@ -260,8 +261,104 @@ def exact_dc_gain(
 # factorization for all of them.
 DC_GAIN_DIRECT_MAX_NODES = 250_000
 
+# Per-worker state for the parallel DC solve (see _dc_worker_init). Module-level
+# because Windows spawns fresh interpreters: the operator is shipped once per
+# worker at pool startup rather than once per task.
+_DC_WORKER: dict = {}
 
-def dc_gain_and_rga(Leff, F, S, monitor, *, progress=None, rtol=1.0e-10):
+
+# Worker cap for the parallel DC solve. NOT the core count: CG on a sparse operator
+# is memory-bandwidth bound, not compute bound, so the processes contend for the
+# same bus and the speedup saturates far below the number of cores. Measured on a
+# 512k-node 3D grid Laplacian, 24 columns, 24 cores:
+#
+#     workers   1     2     4     8    12    16
+#     speedup 1.00  1.73  2.57  3.12  3.17  2.97
+#
+# 8 is the knee. Past it the extra processes buy nothing and cost a full copy of
+# the operator each (~250 MB at 3M nodes), and 16 is measurably WORSE than 8.
+DC_GAIN_MAX_WORKERS = 8
+
+
+def _dc_default_workers(n_columns: int) -> int:
+    """One process per column, capped by the machine, the work, and the memory bus."""
+    import os
+
+    cpus = os.cpu_count() or 1
+    usable = cpus - 1 if cpus > 2 else 1
+    return max(1, min(int(n_columns), usable, DC_GAIN_MAX_WORKERS))
+
+
+def _dc_jacobi_inverse(diag: np.ndarray) -> np.ndarray:
+    """Jacobi preconditioner. Zero/negative diagonals cannot be inverted; leave
+    them unscaled rather than producing inf and poisoning the whole solve."""
+    positive = diag > 0.0
+    return np.where(positive, 1.0 / np.where(positive, diag, 1.0), 1.0)
+
+
+def _dc_cg(L, b, inv_diag, rtol, maxiter):
+    """One Jacobi-preconditioned CG solve. Returns (x, info, relative residual)."""
+    from scipy.sparse.linalg import LinearOperator, cg
+
+    M = LinearOperator(L.shape, matvec=lambda v: inv_diag * v, dtype=float)
+    try:
+        x, info = cg(L, b, rtol=rtol, atol=0.0, maxiter=maxiter, M=M)
+    except TypeError:  # scipy < 1.12 spells the tolerance "tol"
+        x, info = cg(L, b, tol=rtol, atol=0.0, maxiter=maxiter, M=M)
+    residual = float(np.linalg.norm(L @ x - b)) / float(np.linalg.norm(b))
+    return x, info, residual
+
+
+def _dc_check(j, m, info, residual, rtol):
+    """Raise unless the column really converged.
+
+    A quietly under-converged G is a plausible-looking matrix that yields a subtly
+    wrong decoupler -- much worse than a build that stops and says so.
+    """
+    if info != 0 or not np.isfinite(residual) or residual > max(1.0e-6, 100.0 * rtol):
+        raise RuntimeError(
+            f"DC solve did not converge for heater column {j + 1}/{m} "
+            f"(cg info={info}, relative residual {residual:.3e}). The operator may be "
+            "singular -- check that the graph has a cryocooler or a radiation path to "
+            "ground, since an ungrounded Laplacian has no unique steady state."
+        )
+
+
+def _dc_worker_init(shape, data, indices, indptr, proj, rtol, maxiter):
+    L = csr_matrix((data, indices, indptr), shape=shape)
+    _DC_WORKER.update(
+        L=L,
+        inv=_dc_jacobi_inverse(L.diagonal().astype(float)),
+        proj=proj,
+        rtol=float(rtol),
+        maxiter=int(maxiter),
+    )
+
+
+def _dc_worker_solve(task):
+    """Solve one column and return only its PROJECTED result.
+
+    Returning the full field would push 8 bytes x n_nodes per column back through
+    the pickle channel (24 MB each at 3M nodes); the projection onto the controlled
+    sensors is a few hundred bytes and is all the caller wants.
+    """
+    j, rows, values = task
+    state = _DC_WORKER
+    b = np.zeros(state["L"].shape[0], dtype=float)
+    b[rows] = values
+    x, info, residual = _dc_cg(state["L"], b, state["inv"], state["rtol"], state["maxiter"])
+    proj = state["proj"]
+    return j, (proj @ x if proj is not None else x), info, residual
+
+
+def _sparse_columns(F):
+    """F's columns as (rows, values). A heater deposits into a handful of cells, so
+    shipping the dense column (24 MB at 3M nodes) to a worker would be absurd."""
+    F = np.asarray(F, dtype=float)
+    return [(j, np.nonzero(F[:, j])[0], F[np.nonzero(F[:, j])[0], j]) for j in range(F.shape[1])]
+
+
+def dc_gain_and_rga(Leff, F, S, monitor, *, progress=None, rtol=1.0e-10, workers=None):
     """Exact steady-state gain G = S_ctrl L_eff^{-1} F and its RGA.
 
     Uses a direct factorization when the operator is small enough to afford one,
@@ -271,62 +368,116 @@ def dc_gain_and_rga(Leff, F, S, monitor, *, progress=None, rtol=1.0e-10):
     """
     Leff = csr_matrix(Leff)
     F = np.asarray(F, dtype=float)
+    ctrl = ~monitor
     n = Leff.shape[0]
     if n <= DC_GAIN_DIRECT_MAX_NODES:
-        _report(progress, f"Factorizing the {n:,}-node DC operator (splu)…")
-        X = splu(Leff.tocsc()).solve(F)
+        _report(progress, f"Factorizing the {n:,}-node DC operator (splu)...")
+        G = S[ctrl] @ splu(Leff.tocsc()).solve(F)
     else:
-        X = _dc_solve_iterative(Leff, F, progress=progress, rtol=rtol)
-    ctrl = ~monitor
-    G = S[ctrl] @ X
+        G = _dc_gain_iterative(
+            Leff, F, np.asarray(S)[ctrl], progress=progress, rtol=rtol, workers=workers
+        )
     RGA = G * np.linalg.pinv(G).T
     return G, RGA
 
 
-def _dc_solve_iterative(Leff, F, *, progress=None, rtol=1.0e-10, maxiter=20_000):
-    """Solve Leff X = F column by column with Jacobi-preconditioned CG.
+def _dc_gain_iterative(
+    Leff, F, S_ctrl, *, progress=None, rtol=1.0e-10, maxiter=20_000, workers=None
+):
+    """G = S_ctrl L^{-1} F by CG, one column per heater, across processes.
 
-    One column per heater. A heater's load is a point source, so the columns are
-    independent and each converges on its own; solving them separately also means
-    progress is reportable, which matters when the alternative is a silent
-    multi-hour factorization.
+    The columns are fully independent -- a heater's load is a point source and no
+    column's solution feeds another -- so this parallelises with no coordination
+    beyond collecting results. Processes rather than threads because scipy's sparse
+    matvec holds the GIL, which is where CG spends nearly all of its time.
 
-    Raises if a column fails to converge: a quietly under-converged G would be a
-    plausible-looking matrix that produces a subtly wrong decoupler, which is far
-    worse than a build that stops and says so.
+    Falls back to serial on any pool failure, having already established that the
+    serial path works: refusing to build at all over a multiprocessing problem
+    would be the worse outcome.
     """
-    from scipy.sparse.linalg import LinearOperator, cg
+    m = F.shape[1]
+    n_workers = _dc_default_workers(m) if workers is None else max(1, int(workers))
+    G = np.zeros((S_ctrl.shape[0], m), dtype=float)
+    # Columns with no deposition cells have a zero load, hence a zero gain column.
+    # CG on a zero right-hand side has no meaningful relative residual, so skip them.
+    live = [(j, rows, vals) for j, rows, vals in _sparse_columns(F) if rows.size]
+    if len(live) < m:
+        _report(progress, f"{m - len(live)} heater(s) deposit nowhere; their columns are zero.")
+    if not live:
+        return G
 
+    if n_workers > 1 and len(live) > 1:
+        try:
+            return _dc_gain_parallel(Leff, live, S_ctrl, G, n_workers, rtol, maxiter, progress)
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - fall back rather than fail the build
+            _report(progress, f"Parallel DC solve unavailable ({exc}); falling back to serial.")
+
+    inv = _dc_jacobi_inverse(Leff.diagonal().astype(float))
+    worst = 0.0
+    for done, (j, rows, vals) in enumerate(live, start=1):
+        b = np.zeros(Leff.shape[0], dtype=float)
+        b[rows] = vals
+        x, info, residual = _dc_cg(Leff, b, inv, rtol, maxiter)
+        _dc_check(j, m, info, residual, rtol)
+        worst = max(worst, residual)
+        G[:, j] = S_ctrl @ x
+        if progress is not None and done % max(1, len(live) // 20) == 0:
+            _report(progress, f"DC solve: {done}/{len(live)} columns (worst residual {worst:.2e})")
+    _report(progress, f"DC solve complete: {len(live)} columns, worst relative residual {worst:.2e}")
+    return G
+
+
+def _dc_gain_parallel(Leff, live, S_ctrl, G, n_workers, rtol, maxiter, progress):
+    from concurrent.futures import ProcessPoolExecutor
+
+    _report(
+        progress,
+        f"DC solve: {len(live)} columns across {n_workers} processes "
+        f"({Leff.shape[0]:,} nodes, ~{Leff.data.nbytes / 2**20:.0f} MB operator per worker)...",
+    )
+    worst = 0.0
+    m = G.shape[1]
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        initializer=_dc_worker_init,
+        initargs=(Leff.shape, Leff.data, Leff.indices, Leff.indptr, S_ctrl, rtol, maxiter),
+    ) as pool:
+        for done, (j, projected, info, residual) in enumerate(
+            pool.map(_dc_worker_solve, live), start=1
+        ):
+            _dc_check(j, m, info, residual, rtol)
+            worst = max(worst, residual)
+            G[:, j] = projected
+            if progress is not None and done % max(1, len(live) // 20) == 0:
+                _report(
+                    progress, f"DC solve: {done}/{len(live)} columns (worst residual {worst:.2e})"
+                )
+    _report(progress, f"DC solve complete: {len(live)} columns, worst relative residual {worst:.2e}")
+    return G
+
+
+def _dc_solve_iterative(Leff, F, *, progress=None, rtol=1.0e-10, maxiter=20_000):
+    """Serial column solve returning the full field X. Kept for direct testing of
+    the solve itself; the build path uses _dc_gain_iterative, which projects in the
+    worker so the full field never crosses a process boundary."""
+    Leff = csr_matrix(Leff)
+    F = np.asarray(F, dtype=float)
     n, m = Leff.shape[0], F.shape[1]
-    diag = Leff.diagonal().astype(float)
-    # Jacobi preconditioner. Zero/negative diagonals cannot be inverted; leave them
-    # unscaled rather than producing inf and poisoning the whole solve.
-    inv_diag = np.where(diag > 0.0, 1.0 / np.where(diag > 0.0, diag, 1.0), 1.0)
-    M = LinearOperator((n, n), matvec=lambda v: inv_diag * v, dtype=float)
-
+    inv = _dc_jacobi_inverse(Leff.diagonal().astype(float))
     X = np.zeros((n, m), dtype=float)
     worst = 0.0
     for j in range(m):
         b = F[:, j]
-        scale = float(np.linalg.norm(b))
-        if scale == 0.0:
-            continue  # a heater with no deposition cells contributes a zero column
-        try:
-            x, info = cg(Leff, b, rtol=rtol, atol=0.0, maxiter=maxiter, M=M)
-        except TypeError:  # scipy < 1.12 spells the tolerance "tol"
-            x, info = cg(Leff, b, tol=rtol, atol=0.0, maxiter=maxiter, M=M)
-        residual = float(np.linalg.norm(Leff @ x - b)) / scale
+        if float(np.linalg.norm(b)) == 0.0:
+            continue
+        x, info, residual = _dc_cg(Leff, b, inv, rtol, maxiter)
+        _dc_check(j, m, info, residual, rtol)
         worst = max(worst, residual)
-        if info != 0 or not np.isfinite(residual) or residual > max(1.0e-6, 100.0 * rtol):
-            raise RuntimeError(
-                f"DC solve did not converge for heater column {j + 1}/{m} "
-                f"(cg info={info}, relative residual {residual:.3e}). The operator may be "
-                "singular -- check that the graph has a cryocooler or a radiation path to "
-                "ground, since an ungrounded Laplacian has no unique steady state."
-            )
         X[:, j] = x
-        if progress is not None and (j + 1) % max(1, m // 20) == 0:
-            _report(progress, f"DC solve: {j + 1}/{m} heater columns (worst residual {worst:.2e})")
+        if progress is not None:
+            _report(progress, f"DC solve: {j + 1}/{m} columns (worst residual {worst:.2e})")
     _report(progress, f"DC solve complete: {m} columns, worst relative residual {worst:.2e}")
     return X
 
