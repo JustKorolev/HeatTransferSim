@@ -47,6 +47,37 @@ def _parse_list(value):
         return []
 
 
+def cell_descriptions(folder: Path, node_ids_wanted):
+    """{node_id: (component_name, material_name, confidence)} from nodes.csv.
+
+    A weak deposition cell is usually weak for a *nameable* reason -- an
+    unassigned or low-confidence material falls back to a default that may be far
+    less conductive than the real part, and a heater bonded to it looks fine in
+    CAD while having almost no thermal authority. Reporting the material next to
+    the conductance turns "this cell is weak" into something actionable.
+    """
+    import pandas as pd
+
+    wanted = {int(v) for v in node_ids_wanted}
+    if not wanted:
+        return {}
+    available = set(pd.read_csv(folder / "nodes.csv", nrows=0).columns)
+    columns = [c for c in ("node_id", "component_name", "material_name", "confidence")
+               if c in available]
+    if "node_id" not in columns:
+        return {}
+    out: dict[int, tuple[str, str, str]] = {}
+    for chunk in pd.read_csv(folder / "nodes.csv", usecols=columns, chunksize=200_000):
+        hit = chunk[chunk["node_id"].isin(wanted)]
+        for _, row in hit.iterrows():
+            out[int(row["node_id"])] = (
+                str(row.get("component_name", "") or ""),
+                str(row.get("material_name", "") or "(no material_name column)"),
+                str(row.get("confidence", "") or ""),
+            )
+    return out
+
+
 def _heater_rows(folder: Path):
     """(heater_node_id, [(deposition_node_id, weight), ...]) from nodes.csv."""
     import pandas as pd
@@ -102,6 +133,7 @@ def main() -> int:
 
     row_of = {int(v): i for i, v in enumerate(node_ids)}
     findings = []
+    worst_cells: dict[int, list[tuple[int, float]]] = {}
     for heater_id, targets in _heater_rows(folder):
         # Series conductance of the weighted deposition set, as seen by the heater.
         conductance = 0.0
@@ -116,6 +148,14 @@ def main() -> int:
             conductance += weight * float(total_G[row])
         rise = args.max_power / conductance if conductance > 0 else float("inf")
         findings.append((heater_id, conductance, rise, off_main, len(targets)))
+        # Keep this heater's least-conductive cells so the material report can say
+        # WHY it is weak, not just that it is.
+        ranked = []
+        for node_id, weight in targets:
+            row = row_of.get(node_id)
+            if row is not None:
+                ranked.append((node_id, float(total_G[row])))
+        worst_cells[heater_id] = sorted(ranked, key=lambda item: item[1])[:3]
 
     findings.sort(key=lambda item: item[2], reverse=True)
     print()
@@ -162,8 +202,40 @@ def main() -> int:
     if not weak and not dead:
         print("Every heater can shed its power. Nothing to configure.")
 
+    _report_materials(folder, weak + dead, worst_cells)
     _report_dc_gain(folder)
     return 0
+
+
+def _report_materials(folder: Path, flagged, worst_cells) -> None:
+    """What the flagged heaters are actually depositing into."""
+    if not flagged:
+        return
+    wanted = [nid for f in flagged for nid, _g in worst_cells.get(f[0], [])]
+    try:
+        described = cell_descriptions(folder, wanted)
+    except Exception as exc:  # noqa: BLE001 - reporting must not break the check
+        print(f"\n(could not read cell materials from nodes.csv: {exc})")
+        return
+    if not described:
+        return
+    print()
+    print("least-conductive deposition cell(s) of each flagged heater:")
+    print(f"{'heater':>12} {'cell':>10} {'G [W/K]':>10}  {'material':<28} {'component':<24} conf")
+    for heater_id, *_ in flagged:
+        for node_id, conductance in worst_cells.get(heater_id, []):
+            component, material, confidence = described.get(node_id, ("?", "?", ""))
+            print(f"{heater_id:>12} {node_id:>10} {conductance:>10.4g}  "
+                  f"{material[:28]:<28} {component[:24]:<24} {confidence}")
+    materials = {described[n][1] for n in described}
+    suspect = {m for m in materials
+               if not m or m.lower().startswith(("not assigned", "unassigned", "none"))}
+    if suspect:
+        print()
+        print(f"NOTE: {', '.join(sorted(suspect))} appears among these cells. An unassigned "
+              "material falls back to a default that may be far less conductive than the real "
+              "part, which would make a heater look bonded in CAD while having almost no "
+              "thermal authority. Fixing the assignment is a better fix than any threshold.")
 
 
 def _report_dc_gain(folder: Path) -> None:
