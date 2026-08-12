@@ -718,6 +718,11 @@ class SimulationRunner:
         # into the tracking error hides how the loop is actually doing: on
         # no_mli_high_res the 27 controlled sensors reached 0.42 K RMS while the
         # reported figure -- diluted by 64 monitor-only sensors -- still read 4.57 K.
+        # Which sensors get an individual series. The cap used to take the first N by
+        # INDEX, which on no_mli_high_res meant 32 slots spent almost entirely on
+        # monitor-only sensors -- the ones the controller cannot act on -- so the
+        # plots showed everything except the loop being tuned. Controlled sensors now
+        # claim the budget first; monitor-only fill whatever is left.
         self._sensor_controlled = np.array(
             [
                 not bool(getattr(prepared.model.nodes.get(int(sid)), "sensor_monitor_only", False))
@@ -725,6 +730,21 @@ class SimulationRunner:
             ],
             dtype=bool,
         )
+        cap = max(0, int(self.cfg.max_logged_sensors))
+        controlled_first = [int(j) for j in np.where(self._sensor_controlled)[0]]
+        monitor_rest = [int(j) for j in np.where(~self._sensor_controlled)[0]]
+        self._logged_sensor_indices = (controlled_first + monitor_rest)[:cap]
+        # Series keep their ORIGINAL sensor index, so sensor_<j> still matches the
+        # "series" column in sensors.csv even though the logging order changed.
+        self._controlled_series_keys = {
+            f"sensor_{j}_K" for j in self._logged_sensor_indices if self._sensor_controlled[j]
+        }
+        if len(controlled_first) > cap:
+            self._log_event(
+                "sensor_logging",
+                f"{len(controlled_first)} controlled sensors exceed max_logged_sensors={cap}; "
+                f"{len(controlled_first) - cap} have no individual series (aggregate RMS still covers all)",
+            )
         self._build_sensor_readout_operator(prepared, sensor_ids, sensor_ix)
         self._write_sensor_manifest(prepared, sensor_ids, setpoints)
         prev_temps = np.asarray(prepared.initial_temperatures_K, dtype=float).copy()
@@ -1139,8 +1159,12 @@ class SimulationRunner:
             # Each per-sensor series is a Python list held for the whole run; with
             # many sensors x an overnight step count that adds up, so log individual
             # sensors up to a cap (the aggregate RMS below always covers them all).
-            logged = min(len(sensor_ix), max(0, int(self.cfg.max_logged_sensors)))
-            for j in range(logged):
+            # Falls back to the plain first-N order when the series order was never
+            # built (a partially constructed runner in a unit test).
+            logged = getattr(self, "_logged_sensor_indices", None)
+            if logged is None:
+                logged = range(min(len(sensor_ix), max(0, int(self.cfg.max_logged_sensors))))
+            for j in logged:
                 s.setdefault(f"sensor_{j}_K", []).append(float(sens[j]))
                 if np.isfinite(setpoints[j]):
                     s.setdefault(f"sensor_{j}_err_K", []).append(float(sens[j] - setpoints[j]))
@@ -1493,13 +1517,26 @@ class SimulationRunner:
                 except (IndexError, ValueError):
                     return 0
 
-            sensor_keys = sorted(k for k in series if k.startswith("sensor_") and k.endswith("_K"))
-            err_keys = sorted(k for k in series if k.endswith("_err_K"))
+            # Only the CONTROLLED sensors. A monitor-only sensor has no heater acting
+            # on it, so plotting it alongside the regulated ones buries the loop being
+            # tuned under traces nothing is steering (64 of 91 here).
+            controlled = getattr(self, "_controlled_series_keys", None)
+            def _is_controlled(key: str) -> bool:
+                return controlled is None or key.replace("_err_K", "_K") in controlled
+
+            sensor_keys = sorted(
+                k for k in series
+                if k.startswith("sensor_") and k.endswith("_K") and _is_controlled(k)
+            )
+            err_keys = sorted(
+                k for k in series
+                if k.endswith("_err_K") and k.startswith("sensor_") and _is_controlled(k)
+            )
             heater_keys = sorted(
                 (k for k in series if k.startswith("heater_") and k.endswith("_W")), key=_heater_id
             )
-            _plot(sensor_keys, "Tracked sensor temperatures", "T [K]", "sensor_temps.png")
-            _plot(err_keys + ["rms_tracking_error_K"], "Tracking error", "error [K]", "tracking_error.png")
+            _plot(sensor_keys, "Controlled sensor temperatures", "T [K]", "sensor_temps.png")
+            _plot(err_keys + ["rms_tracking_error_controlled_K"], "Tracking error (controlled sensors)", "error [K]", "tracking_error.png")
             _plot(["avg_temp_K", "max_temp_K", "min_temp_K"], "System temperature", "T [K]", "system_temp.png")
             _plot(["cryo_tip_K"], "Cryo tip temperature", "T [K]", "cryo_tip.png")
             _plot(heater_keys, "Heater power (per heater)", "power [W]", "heater_power.png")
