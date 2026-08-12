@@ -121,3 +121,44 @@ def test_a_run_killed_after_one_flush_can_still_be_plotted(tmp_path) -> None:
     })
     r._write_timeseries()          # then imagine the machine dies here
     assert "system_temp.png" in regenerate_plots(tmp_path)
+
+
+# --- which RMS the report headlines -------------------------------------------- #
+def _summary(series):
+    from graph_visualizer.simulation_runner import SimulationRunner
+
+    r = object.__new__(SimulationRunner)
+    r._series = series
+    return SimulationRunner._summary_metrics(r)
+
+
+def test_the_headline_rms_is_the_controlled_sensors() -> None:
+    """The all-sensor figure is dominated by sensors the controller cannot act on --
+    64 of 91 on no_mli_high_res -- so it tracks the plant's passive drift while
+    reading as a controller result."""
+    out = _summary({
+        "time_s": [0.0, 4.0],
+        "rms_tracking_error_K": [9.0, 8.0],
+        "rms_tracking_error_controlled_K": [2.0, 0.5],
+        "rms_tracking_error_monitor_K": [11.0, 10.0],
+    })
+    assert out["final_rms_tracking_error_K"] == pytest.approx(0.5)
+    assert out["peak_rms_tracking_error_K"] == pytest.approx(2.0)
+
+
+def test_the_other_figures_are_kept_and_named() -> None:
+    """Monitor drift still matters -- it just is not the controller's score."""
+    out = _summary({
+        "time_s": [0.0],
+        "rms_tracking_error_K": [9.0],
+        "rms_tracking_error_controlled_K": [2.0],
+        "rms_tracking_error_monitor_K": [11.0],
+    })
+    assert out["final_rms_tracking_error_all_sensors_K"] == pytest.approx(9.0)
+    assert out["final_rms_tracking_error_monitor_K"] == pytest.approx(11.0)
+
+
+def test_a_run_with_no_controlled_series_falls_back() -> None:
+    """Older runs recorded only the all-sensor figure; they must still summarize."""
+    out = _summary({"time_s": [0.0], "rms_tracking_error_K": [9.0, 7.0]})
+    assert out["final_rms_tracking_error_K"] == pytest.approx(7.0)

@@ -1431,7 +1431,15 @@ class SimulationRunner:
             "rss_gib": round(_process_rss_gib(), 2),
             "updated": datetime.now().isoformat(timespec="seconds"),
         }
-        for key in ("rms_tracking_error_K", "max_temp_K", "cryo_tip_K", "power_in_W"):
+        # rms_tracking_error_controlled_K first: it is what "is the controller
+        # working" actually means, and it is what the report headlines.
+        for key in (
+            "rms_tracking_error_controlled_K",
+            "rms_tracking_error_K",
+            "max_temp_K",
+            "cryo_tip_K",
+            "power_in_W",
+        ):
             if self._series.get(key):
                 payload[f"last_{key}"] = self._series[key][-1]
         profile = getattr(self, "_last_step_profile", None)
@@ -1702,9 +1710,19 @@ class SimulationRunner:
         out: dict[str, Any] = {"steps": len(s.get("time_s", []))}
         if s.get("time_s"):
             out["sim_time_s"] = s["time_s"][-1]
+        # The headline figure is the CONTROLLED sensors only. The all-sensor RMS is
+        # dominated by sensors the controller cannot act on -- 64 of 91 on
+        # no_mli_high_res -- so it moves with the plant's passive drift and reads as
+        # a controller result. Both are kept, clearly named, so the monitor-only
+        # drift is still visible rather than discarded.
+        controlled = s.get("rms_tracking_error_controlled_K") or s.get("rms_tracking_error_K")
+        if controlled:
+            out["final_rms_tracking_error_K"] = controlled[-1]
+            out["peak_rms_tracking_error_K"] = max(controlled)
         if s.get("rms_tracking_error_K"):
-            out["final_rms_tracking_error_K"] = s["rms_tracking_error_K"][-1]
-            out["peak_rms_tracking_error_K"] = max(s["rms_tracking_error_K"])
+            out["final_rms_tracking_error_all_sensors_K"] = s["rms_tracking_error_K"][-1]
+        if s.get("rms_tracking_error_monitor_K"):
+            out["final_rms_tracking_error_monitor_K"] = s["rms_tracking_error_monitor_K"][-1]
         if s.get("max_temp_K"):
             out["peak_max_temp_K"] = max(s["max_temp_K"])
         if s.get("cryo_tip_K"):
