@@ -8,10 +8,39 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 
 from graph_visualizer.simulation_parameters import load_simulation_parameters
 from graph_visualizer.simulation_runner import RunConfig, FailureThresholds, run_simulation
+
+
+def _enable_crash_traceback(run_dir: str | None) -> None:
+    """Dump a C-level traceback to <run_dir>/crash.log if the process dies natively.
+
+    A segfault / access violation in a compiled extension kills the interpreter
+    outright: no Python exception, no finally, no report -- the run directory just
+    stops, with status.json still saying "running". That is exactly how a 760-step
+    run vanished with nothing to point at. faulthandler installs OS-level signal
+    handlers that write a stack for every thread before the process dies, which is
+    the only evidence available for this class of failure.
+
+    The file handle is deliberately left open for the life of the process: the
+    handler runs during a crash, when opening a file is not safe.
+    """
+    if not run_dir:
+        return
+    try:
+        import faulthandler
+
+        target = Path(run_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        handle = open(target / "crash.log", "a", encoding="utf-8")  # noqa: SIM115
+        handle.write(f"--- run started {datetime.now().isoformat(timespec='seconds')} ---\n")
+        handle.flush()
+        faulthandler.enable(file=handle, all_threads=True)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never block a run
+        print(f"Could not enable crash tracebacks: {exc}")
 
 
 def main() -> None:
@@ -41,6 +70,7 @@ def main() -> None:
                         "controller gains). Defaults to the graph's own saved file if present, "
                         "so a headless run matches what the GUI is configured to do.")
     args = p.parse_args()
+    _enable_crash_traceback(args.run_dir)
 
     sim_params = None
     params_path = Path(args.sim_params) if args.sim_params else Path(args.graph) / "simulation_parameters.json"
