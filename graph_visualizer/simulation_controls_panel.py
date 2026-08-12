@@ -577,18 +577,32 @@ class SimulationControlsPanel:
             self._add_double(cooler_form, name, label, minimum, maximum, step)
         self._add_checkbox(cooler_form, "cryocooler_enabled", "Enabled")
 
-        # Global controller limits: enforced by BOTH the MIMO PI and modal-LQR
-        # schemes (absolute heater-power clamp + hard slew rate). "max rate cmd"
-        # additionally bounded the removed PID+QP rate command; it is inert now
-        # (which has no rate command) but kept here as a global controller knob.
+        # Read by BOTH the MIMO PI and modal-LQR schemes. Called "defaults" rather
+        # than "limits" because that is what the heater-power field actually is: a
+        # per-node heater_max_power_W wins outright, and this is used only when the
+        # node has none (see _controller_heater_max_power). The slew rate is the
+        # exception -- it has no per-node equivalent and does apply to every heater
+        # -- so its own label and tooltip say so.
         controller_box, controller_form = self._add_section(
-            form, "controller_limits", "Controller (global limits)"
+            form, "controller_limits", "Controller (defaults)"
         )
         for name, label, minimum, maximum, step in (
-            ("mimo_default_heater_max_power_W", "max heater power W", 0.0, 1.0e9, 1.0),
-            ("mimo_heater_slew_rate_W_per_s", "hard slew W/s", 0.0, 1.0e9, 1.0),
+            ("mimo_default_heater_max_power_W", "default max heater power W", 0.0, 1.0e9, 1.0),
+            ("mimo_heater_slew_rate_W_per_s", "hard slew W/s (all heaters)", 0.0, 1.0e9, 1.0),
         ):
             self._add_double(controller_form, name, label, minimum, maximum, step)
+        self.inputs["mimo_default_heater_max_power_W"].setToolTip(
+            "Max power for heaters that do NOT set their own. A heater with a non-zero "
+            "max power in the per-node Parameters editor uses that value and ignores "
+            "this one entirely -- this is a fallback, not a cap over the top."
+        )
+        self.inputs["mimo_heater_slew_rate_W_per_s"].setToolTip(
+            "Max rate of change of a heater's COMMANDED power, applied to every heater; "
+            "there is no per-node override. Models the driver, not the thermal response.\n\n"
+            "Non-binding at any sane dt: slew*dt exceeds the [0, u_max] clamp whenever "
+            "dt >= 1 s. Lower it only to encode a real constraint -- a rate limiter that "
+            "binds costs phase margin and can drive rate-limiter-induced oscillation."
+        )
 
         self._build_modal_design_controls(form)
 
