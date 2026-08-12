@@ -287,6 +287,22 @@ def estimate_conductance(node_i: Any, node_j: Any) -> float:
     return float(1.0 / resistance)
 
 
+def _is_attachment_interface(node_i: Any, node_j: Any) -> bool:
+    """True when this face joins a heater/sensor cell to anything else.
+
+    Deliberately one-sided: an interface counts as an attachment if EITHER cell
+    carries the role, which is what a heater bonded onto a plate looks like. Two
+    cells of the same heater are already handled by the same-component test.
+    """
+    for a, b in ((node_i, node_j), (node_j, node_i)):
+        if bool(getattr(a, "is_heater", False)) or bool(getattr(a, "is_sensor", False)):
+            if not (
+                bool(getattr(b, "is_heater", False)) or bool(getattr(b, "is_sensor", False))
+            ):
+                return True
+    return False
+
+
 def _geometry_conductance(
     node_i: Any,
     node_j: Any,
@@ -297,7 +313,18 @@ def _geometry_conductance(
     same_component = bool(getattr(node_i, "component_name", "")) and (
         getattr(node_i, "component_name", "") == getattr(node_j, "component_name", "")
     )
-    interface_conductance = None if same_component else float(contact_interface_conductance_W_m2K)
+    # A heater or sensor is bonded to its mount -- epoxied, varnished or greased --
+    # not bolted to it. Classifying that interface by component name alone made it a
+    # bolted joint at h(50 K) ~ 512 W/m2K, which for a 5 mm face is ~0.01 W/K: a
+    # heater's whole output then had to cross a film resistance that produced tens of
+    # K of local rise while almost nothing reached the body. Structural joints keep
+    # the bolted interface; only the attachment is treated as continuous metal.
+    attachment = _is_attachment_interface(node_i, node_j)
+    interface_conductance = (
+        None
+        if (same_component or attachment)
+        else float(contact_interface_conductance_W_m2K)
+    )
     return _series_contact_conductance(
         float(getattr(node_i, "k_W_mK", 0.0)),
         float(getattr(node_j, "k_W_mK", 0.0)),
