@@ -212,10 +212,17 @@ class QComboBox(_Widget):
     def count(self) -> int:
         return len(self.items)
 
+    def findData(self, data) -> int:
+        for position, (_label, value) in enumerate(self.items):
+            if value == data:
+                return position
+        return -1
+
     def setCurrentIndex(self, index) -> None:
         self.index = int(index)
         if not self._signals_blocked:
             self.currentTextChanged.emit(self.currentText())
+            self.currentIndexChanged.emit(self.index)
 
     def currentIndex(self) -> int:
         return self.index

@@ -2890,6 +2890,19 @@ class HeatTransferSimulationTab:
             self.readout_editor_title.setText(title)
             mode = "mimo" if str(getattr(heater, "sensor_control_mode", "manual")) == "mimo" else "manual"
             self.readout_editor_inputs["sensor_control_mode"].setCurrentText(mode)
+            # Offer the graph's real heater ids rather than making the user type a
+            # 9-digit node id blind into a spin box.
+            try:
+                self.panel.set_heater_id_choices(
+                    sorted(
+                        int(nid)
+                        for nid, node in self.model.nodes.items()
+                        if bool(getattr(getattr(node, "heater", None), "is_heater", False))
+                        or bool(getattr(node, "is_heater", False))
+                    )
+                )
+            except Exception:  # noqa: BLE001 - the editor still works without choices
+                pass
             heater_props = getattr(heater, "heater", None)
             for field in _READOUT_HEATER_HARDWARE_FIELDS:
                 widget = self.readout_editor_inputs.get(field)

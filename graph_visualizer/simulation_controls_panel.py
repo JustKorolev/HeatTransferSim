@@ -198,6 +198,57 @@ class SimulationControlsPanel:
         widget.setValue(float(value))
         return widget
 
+    def heater_id_combo(self) -> Any:
+        """A combo over the graph's real heater ids, presenting the spinbox API.
+
+        The editor sets these widgets with setValue(int) and reads them with
+        value(), and connects valueChanged -- so this matches that interface rather
+        than making every call site special-case a combo. Typing a heater id into a
+        spinbox meant guessing 9-digit node ids with no feedback when one was wrong.
+        """
+        class HeaterIdCombo(self.QtWidgets.QComboBox):
+            def __init__(inner) -> None:
+                super().__init__()
+                inner.addItem("(unassigned)", -1)
+
+            @property
+            def valueChanged(inner):  # noqa: N802 - matches the spinbox API
+                """Alias the combo's own signal. The editor connects valueChanged on
+                every field uniformly, and its slot discards the emitted argument
+                (it re-reads the widget), so no separate signal is needed."""
+                return inner.currentIndexChanged
+
+            def value(inner) -> int:
+                data = inner.currentData()
+                return -1 if data is None else int(data)
+
+            def setValue(inner, new_value: int) -> None:  # noqa: N802 - Qt naming
+                index = inner.findData(int(new_value))
+                if index < 0:
+                    # Keep a value the graph actually holds even when it is not in
+                    # the offered list; dropping it silently would edit the node.
+                    inner.addItem(f"{int(new_value)} (not in graph)", int(new_value))
+                    index = inner.count() - 1
+                inner.setCurrentIndex(index)
+
+            def set_choices(inner, ids) -> None:
+                keep = inner.value()
+                inner.blockSignals(True)
+                inner.clear()
+                inner.addItem("(unassigned)", -1)
+                for node_id in ids:
+                    inner.addItem(str(int(node_id)), int(node_id))
+                inner.setValue(keep)
+                inner.blockSignals(False)
+
+        return HeaterIdCombo()
+
+    def set_heater_id_choices(self, ids) -> None:
+        """Offer these heater node ids in the per-node editor's heater-id combo."""
+        widget = self.readout_editor_inputs.get("heater_id")
+        if widget is not None and hasattr(widget, "set_choices"):
+            widget.set_choices(list(ids))
+
     def int_spin(self, minimum: int, maximum: int, value: int, step: int) -> Any:
         class NoWheelSpinBox(self.QtWidgets.QSpinBox):
             def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802 - Qt override name.
@@ -1012,7 +1063,7 @@ class SimulationControlsPanel:
             ("heater_efficiency", "efficiency", 0.0, 1.0e6, 0.05),
         ):
             if name == "heater_id":
-                widget = self.int_spin(int(minimum), int(maximum), 0, int(step))
+                widget = self.heater_id_combo()
             else:
                 widget = self.double_spin(
                     float(minimum), float(maximum), float(heater_defaults.get(name, 0.0)), float(step)
