@@ -24,6 +24,7 @@ import csv
 import json
 import signal
 import subprocess
+import os
 import sys
 import time
 import traceback
@@ -861,6 +862,13 @@ class SimulationRunner:
                 last_snapshot_t = state.time_s
             if time.time() - last_ckpt_wall >= self.cfg.checkpoint_interval_s:
                 self._checkpoint(prepared, state, step)
+                # Flush the timeseries with every checkpoint. It used to be written
+                # only in _finalize, so a run killed hard -- a machine freeze, a power
+                # cycle -- kept its multi-GB checkpoints and lost every series it had
+                # recorded, along with any chance of plotting what it did before it
+                # died. The file is a few hundred KB against a checkpoint's tens of
+                # MB, so this is free by comparison.
+                self._write_timeseries()
                 last_ckpt_wall = time.time()
             if step % max(1, self.cfg.status_interval_steps) == 0:
                 self._update_status(step, state.time_s)
@@ -1525,7 +1533,15 @@ class SimulationRunner:
         if not self._series.get("time_s"):
             return
         arrs = {k: np.asarray(v, dtype=float) for k, v in self._series.items()}
-        np.savez(self.out_dir / "timeseries.npz", **arrs)
+        # Write-then-rename: this now runs periodically, so a kill during the write
+        # must not replace a good file with a truncated one.
+        npz_tmp = self.out_dir / "timeseries.npz.tmp"
+        # Write through a handle: np.savez APPENDS ".npz" to a path that lacks it, so
+        # passing the temp path directly produces timeseries.npz.tmp.npz and the
+        # rename below then fails on a file that was never created.
+        with npz_tmp.open("wb") as fh:
+            np.savez(fh, **arrs)
+        os.replace(npz_tmp, self.out_dir / "timeseries.npz")
         keys = ["time_s"] + [k for k in arrs if k != "time_s"]
         n = len(arrs["time_s"])
         with (self.out_dir / "timeseries.csv").open("w", newline="", encoding="utf-8") as fh:

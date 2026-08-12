@@ -75,3 +75,49 @@ def test_an_older_run_without_sensors_csv_still_plots(tmp_path) -> None:
     plotting whatever series exist rather than nothing."""
     written = regenerate_plots(_run_dir(tmp_path, with_manifest=False))
     assert "sensor_temps.png" in written
+
+
+# --- surviving a hard kill ----------------------------------------------------- #
+def _writer(tmp_path, series):
+    from graph_visualizer.simulation_runner import SimulationRunner
+
+    r = object.__new__(SimulationRunner)
+    r.out_dir = tmp_path
+    r._series = series
+    return r
+
+
+def test_the_timeseries_is_readable_mid_run(tmp_path) -> None:
+    """It used to be written only at finalize, so a machine freeze or power cycle
+    kept the multi-GB checkpoints and lost every series the run had recorded."""
+    r = _writer(tmp_path, {"time_s": [0.0, 4.0, 8.0], "rms_tracking_error_K": [2.0, 1.0, 0.5]})
+    r._write_timeseries()
+    with np.load(tmp_path / "timeseries.npz") as data:
+        assert data["time_s"].tolist() == [0.0, 4.0, 8.0]
+    assert (tmp_path / "timeseries.csv").is_file()
+
+
+def test_a_later_flush_replaces_the_earlier_one_atomically(tmp_path) -> None:
+    """Written to a temp name and renamed, so a kill during the write cannot replace
+    a good file with a truncated one."""
+    series = {"time_s": [0.0], "rms_tracking_error_K": [2.0]}
+    r = _writer(tmp_path, series)
+    r._write_timeseries()
+    series["time_s"].append(4.0)
+    series["rms_tracking_error_K"].append(1.0)
+    r._write_timeseries()
+    with np.load(tmp_path / "timeseries.npz") as data:
+        assert data["time_s"].tolist() == [0.0, 4.0]
+    assert not (tmp_path / "timeseries.npz.tmp").exists(), "no temp file left behind"
+
+
+def test_a_run_killed_after_one_flush_can_still_be_plotted(tmp_path) -> None:
+    """The point of the whole thing: a crashed run keeps enough to see what it did."""
+    from graph_visualizer.simulation_runner import regenerate_plots
+
+    r = _writer(tmp_path, {
+        "time_s": [0.0, 4.0], "rms_tracking_error_K": [2.0, 1.0],
+        "avg_temp_K": [50.0, 50.1], "max_temp_K": [60.0, 60.1], "min_temp_K": [40.0, 40.1],
+    })
+    r._write_timeseries()          # then imagine the machine dies here
+    assert "system_temp.png" in regenerate_plots(tmp_path)
