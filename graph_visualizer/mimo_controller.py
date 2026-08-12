@@ -44,6 +44,10 @@ def allocate_thermal_rate_qp(
     rho_du: float,
     max_delta_power: np.ndarray | None = None,
     u_ref: np.ndarray | None = None,
+    *,
+    # Keyword-only on purpose: existing callers pass max_delta_power and u_ref
+    # POSITIONALLY, so a new positional parameter would silently land in u_ref's slot.
+    absolute_target: bool = False,
 ) -> AllocationResult:
     raw_B = np.asarray(B_dyn, dtype=float)
     if raw_B.ndim != 2:
@@ -121,8 +125,9 @@ def allocate_thermal_rate_qp(
             previous[positive_power],
             lambda_u,
             rho_du,
-            delta_limit[positive_power],
-            reference[positive_power],
+            max_delta_power=delta_limit[positive_power],
+            u_ref=reference[positive_power],
+            absolute_target=absolute_target,
         )
         u = np.zeros(nh, dtype=float)
         u[positive_power] = sub_result.u
@@ -157,7 +162,22 @@ def allocate_thermal_rate_qp(
 
     sqrt_weights = np.sqrt(q)
     A_parts = [sqrt_weights[:, None] * B]
-    b_parts = [sqrt_weights * (command - drift + B @ previous)]
+    # Two different contracts, and they are not interchangeable.
+    #
+    # Incremental (the default, and what the rate-based PID+QP needed): command is
+    # the desired CHANGE in sensor rate, so the target is B(u - u_prev) = cmd - drift
+    # and the anchor B @ u_prev appears on the right.
+    #
+    # Absolute (absolute_target=True, what MIMO PI needs): command is the steady
+    # deviation the plant must HOLD, so the target is simply B u = cmd. Passing the
+    # anchor here would make each step add G^-1 cmd to the previous command -- an
+    # unintended integrator that ramps to saturation and stays there, which is
+    # exactly what MIMO PI did before this existed.
+    #
+    # u_prev still drives the rho_du smoothing term and the slew bounds in BOTH
+    # modes; only the target anchor differs.
+    anchor = np.zeros_like(command) if absolute_target else B @ previous
+    b_parts = [sqrt_weights * (command - drift + anchor)]
     lam = max(0.0, float(lambda_u))
     if lam > 0.0:
         scale = float(np.sqrt(lam))

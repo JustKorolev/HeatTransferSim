@@ -423,3 +423,97 @@ def test_changing_the_controller_invalidates_the_held_reference(monkeypatch) -> 
     sim.mark_controller_stale()
     assert sim.controller_mimo_pi_integral is None
     assert sim.controller_mimo_pi_passive_K is None
+
+
+# --- closed loop -------------------------------------------------------------- #
+def _closed_loop(monkeypatch, *, kp, steps=4000, dt=4.0):
+    """Run the real law against a first-order plant and return the final error.
+
+    A unit test on one step cannot see an integrator that never integrates. This
+    closes the loop: y relaxes toward its steady value y_passive + G u, which is
+    what the controller is trying to place at the setpoint.
+    """
+    from graph_visualizer.simulation_model import PreparedSimulation
+
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    sim.params = replace(sim.params, mimo_pi_kp=kp, mimo_pi_ki=1.0e-2, dt_s=dt)
+    monkeypatch.setattr(
+        PreparedSimulation, "_mimo_pi_gains",
+        lambda self, gain, sids: (np.full(len(sids), kp), np.full(len(sids), 1.0e-2)),
+    )
+    G = np.array([[0.5, 0.1], [0.1, 0.5]])
+    y_passive, tau = 50.0, 200.0
+    y = np.full(2, y_passive)
+    for sid in (20, 21):
+        sim.model.nodes[sid].controller_setpoint_K = 60.0
+
+    def readout(model, idx, temps, nid):
+        return float(y[0] if int(nid) == 20 else y[1])
+
+    monkeypatch.setattr("graph_visualizer.simulation_model.sensor_readout_temperature_K", readout)
+    for _ in range(steps):
+        sim._mimo_pi_controller_power_vector(update_state=True)
+        u = np.array(sim.controller_allocator_diagnostics["heater_commands_W"])
+        y += (y_passive + G @ u - y) * (dt / tau)     # first-order relaxation
+    return y - 60.0
+
+
+def test_the_loop_removes_the_offset_instead_of_drooping(monkeypatch) -> None:
+    """The regression that mattered: the integral was frozen by an anti-windup test
+    a regularized QP could never pass, so the loop was pure proportional and settled
+    at the droop offset r_dev/Kp -- +0.68 K at Kp=3.0 and +6.9 K at Kp=0.3 on the
+    real plant. Lowering Kp made tracking worse, which is the signature.
+    """
+    assert np.abs(_closed_loop(monkeypatch, kp=0.3)).max() < 0.05
+
+
+def test_tracking_does_not_get_worse_when_kp_is_lowered(monkeypatch) -> None:
+    """With integral action, steady-state accuracy must not depend on Kp. Under the
+    frozen integral the offset scaled as 1/Kp, so this comparison inverts."""
+    low = np.abs(_closed_loop(monkeypatch, kp=0.3)).max()
+    high = np.abs(_closed_loop(monkeypatch, kp=3.0)).max()
+    assert low < 0.05 and high < 0.05, (low, high)
+    assert low < 10.0 * high, "a smaller Kp must not blow up the steady-state error"
+
+
+def test_absolute_allocation_ignores_the_previous_command() -> None:
+    """MIMO PI's v_cmd is the deviation the plant must HOLD, so G u = v_cmd and the
+    answer cannot depend on u_prev.
+
+    The allocator's default contract is INCREMENTAL -- G(u - u_prev) = v_cmd - drift
+    -- which is right for the rate-based scheme it was written for. MIMO PI used it
+    unchanged, so every step added G^-1 v_cmd to the previous command: an unintended
+    integrator that ramped to saturation and parked there. That is what drove the
+    real run to 120 W with every controlled sensor 5-7 K ABOVE setpoint.
+    """
+    from graph_visualizer.mimo_controller import allocate_thermal_rate_qp
+
+    G = _coupled_plant()
+    v = np.array([1.0, 1.0, 1.0])
+    umax = np.full(3, 30.0)
+    solutions = [
+        np.asarray(
+            allocate_thermal_rate_qp(
+                G, np.zeros(3), v, np.ones(3), umax, np.full(3, prev), 1e-3, 0.0,
+                absolute_target=True,
+            ).u
+        ).reshape(-1)
+        for prev in (0.0, 5.0, 29.0)
+    ]
+    for other in solutions[1:]:
+        assert np.allclose(solutions[0], other), "absolute allocation must ignore u_prev"
+    assert np.allclose(G @ solutions[0], v, atol=2e-2), "and it must actually hit v_cmd"
+
+
+def test_incremental_mode_is_unchanged_for_other_callers() -> None:
+    """The default must keep the incremental contract; only MIMO PI opts out."""
+    from graph_visualizer.mimo_controller import allocate_thermal_rate_qp
+
+    G = _coupled_plant()
+    v = np.array([0.5, 0.5, 0.5])
+    umax = np.full(3, 30.0)
+    prev = np.full(3, 4.0)
+    u = np.asarray(
+        allocate_thermal_rate_qp(G, np.zeros(3), v, np.ones(3), umax, prev, 1e-3, 0.0).u
+    ).reshape(-1)
+    assert np.allclose(G @ (u - prev), v, atol=2e-2), "default stays incremental"

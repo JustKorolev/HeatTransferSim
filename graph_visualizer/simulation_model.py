@@ -1916,6 +1916,8 @@ class PreparedSimulation:
             float(getattr(self.params, "mimo_lambda_u", 1.0e-3)),
             float(getattr(self.params, "mimo_rho_du", 0.0)),
             max_delta_power=max_delta,
+            # v_cmd is the steady deviation the plant must HOLD, not a change to it.
+            absolute_target=True,
         )
         u = np.asarray(result.u, dtype=float).reshape(-1)
 
@@ -1937,14 +1939,28 @@ class PreparedSimulation:
             "reference_deviation_K": [float(v) for v in r_dev],
         }
         if update_state:
-            # Back-calculation anti-windup: integrate the error the plant will
-            # ACTUALLY see given the clipped command, not the one we asked for. With
-            # several heaters bounded at once, freezing per channel would either
-            # stall recovery or keep winding toward a command nothing delivers.
+            # Back-calculation anti-windup. This previously FROZE the integral
+            # whenever |v_cmd - G u| exceeded 1e-9, which a regularized QP can never
+            # satisfy: lambda_u alone leaves a residual ~5e-3, so the freeze fired on
+            # every step and the integral sat at zero for the entire run. MIMO PI was
+            # therefore a pure proportional controller, and a P-only loop against the
+            # constant r_dev feedforward settles at the droop offset r_dev/Kp -- which
+            # is exactly what two runs showed (Kp=3.0 -> +0.68 K, Kp=0.3 -> +6.9 K).
+            # Lowering Kp made tracking WORSE because Kp was the only term opposing
+            # the bias.
+            #
+            # The correct form integrates the error and then pulls the integral back
+            # by however much the allocator actually FELL SHORT of the command:
+            #
+            #     I += (e + kt (G u - v_cmd)) dt
+            #
+            # Unconstrained, the shortfall is the QP's small regularization residual
+            # and this is a plain integrator that removes the offset. Saturated, the
+            # shortfall is large and negative and bleeds the integral instead of
+            # letting it wind toward a command nothing will deliver.
             realised = G @ u
-            residual = v_cmd - realised
-            unreachable = np.abs(residual) > 1.0e-9
-            committed = np.where(unreachable & (np.abs(error) > 0.0), integral, candidate)
+            kt = max(0.0, float(getattr(self.params, "mimo_pi_antiwindup_gain", 1.0)))
+            committed = np.where(valid, candidate + kt * (realised - v_cmd) * dt, integral)
             cap = max(0.0, float(getattr(self.params, "mimo_integral_abs_max", 1.0e6)))
             if cap > 0.0:
                 committed = np.clip(committed, -cap, cap)

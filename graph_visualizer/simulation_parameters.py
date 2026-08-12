@@ -100,6 +100,11 @@ class SimulationParameters:
     # at 0 gives feedforward + integral, which is what the modal scheme effectively
     # ran; raise it if the approach is too sluggish.
     mimo_pi_kp: float = 0.0
+    # Back-calculation anti-windup gain (dimensionless). Each step the integral is
+    # pulled back by kt*(G u - v_cmd)*dt, i.e. by however much the allocator fell
+    # short of the command. 1.0 absorbs the whole shortfall; 0 disables the
+    # correction and lets the integral wind against the actuator bounds.
+    mimo_pi_antiwindup_gain: float = 1.0
     # Derivative is deliberately absent: the conduction operator is symmetric, so
     # its spectrum is real and has no resonance to damp -- a D term would only
     # amplify sensor noise.
