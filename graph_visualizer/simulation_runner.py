@@ -202,10 +202,37 @@ def _timestamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def _atomic_write_json(path: Path, payload: dict) -> None:
+def _atomic_write_json(path: Path, payload: dict) -> bool:
+    """Write JSON via a temp file and rename. Returns whether it succeeded.
+
+    NEVER raises. On Windows os.replace fails with PermissionError (WinError 5) if
+    ANY other process holds the target open -- the GUI polling status.json, a
+    OneDrive-synced Documents folder, or an antivirus scanner are all enough. That
+    killed a run at step 60: a progress update, which is pure bookkeeping, took
+    down eight hours of queued simulation.
+
+    Retries briefly because the holder is usually transient, then gives up and
+    lets the run continue with a stale status file. A missing progress update is
+    a non-event; losing the run is not.
+    """
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-    tmp.replace(path)
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    except OSError:
+        return False
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return True
+        except PermissionError:
+            time.sleep(0.05 * (attempt + 1))
+        except OSError:
+            break
+    try:
+        tmp.unlink()          # do not leave .tmp litter behind
+    except OSError:
+        pass
+    return False
 
 
 # --------------------------------------------------------------------------- #

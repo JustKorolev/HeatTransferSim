@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from graph_visualizer import simulation_runner as R
@@ -109,3 +111,44 @@ def test_zero_threshold_keeps_the_old_every_step_behaviour() -> None:
     for t in (50.0, 50.001, 50.002):
         s._refresh_temperature_dependent_operator(np.full(3, t))
     assert s.temperature_dependent_operator.calls == 3
+
+
+# --- status writes must never kill a run --------------------------------------- #
+def test_a_locked_status_file_does_not_end_the_run(tmp_path, monkeypatch) -> None:
+    """os.replace raises PermissionError on Windows whenever another process holds
+    the target open -- the GUI polling status.json, OneDrive, an antivirus scan. A
+    progress update took down a run at step 60; it must degrade to a stale file."""
+    calls = {"n": 0}
+
+    def always_locked(src, dst):
+        calls["n"] += 1
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(R.os, "replace", always_locked)
+    monkeypatch.setattr(R.time, "sleep", lambda _s: None)
+    assert R._atomic_write_json(tmp_path / "status.json", {"step": 1}) is False
+    assert calls["n"] > 1, "must retry, since the holder is usually transient"
+    assert not (tmp_path / "status.json.tmp").exists(), "no .tmp litter left behind"
+
+
+def test_a_transient_lock_still_writes(tmp_path, monkeypatch) -> None:
+    """The common case: whoever held it lets go within a few milliseconds."""
+    real, state = R.os.replace, {"n": 0}
+
+    def locked_once(src, dst):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise PermissionError(5, "Access is denied")
+        return real(src, dst)
+
+    monkeypatch.setattr(R.os, "replace", locked_once)
+    monkeypatch.setattr(R.time, "sleep", lambda _s: None)
+    target = tmp_path / "status.json"
+    assert R._atomic_write_json(target, {"step": 7}) is True
+    assert json.loads(target.read_text(encoding="utf-8"))["step"] == 7
+
+
+def test_a_normal_write_succeeds(tmp_path) -> None:
+    target = tmp_path / "status.json"
+    assert R._atomic_write_json(target, {"step": 3, "status": "running"}) is True
+    assert json.loads(target.read_text(encoding="utf-8"))["status"] == "running"
