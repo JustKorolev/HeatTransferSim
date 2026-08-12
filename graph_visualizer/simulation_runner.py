@@ -881,6 +881,9 @@ class SimulationRunner:
             # (the temperature-dependent operator rebuild vs. the linear solve) --
             # the number needed to decide whether to lag properties or add a GPU.
             self._last_step_profile = dict(getattr(prepared, "last_step_profile_ms", {}) or {})
+            self._last_allocator_diagnostics = dict(
+                getattr(prepared, "controller_allocator_diagnostics", {}) or {}
+            )
             step += 1
 
             # --- snapshots / checkpoints / status ---
@@ -1442,6 +1445,36 @@ class SimulationRunner:
         ):
             if self._series.get(key):
                 payload[f"last_{key}"] = self._series[key][-1]
+        # Say WHY a channel is not tracking, once, rather than leaving it to be
+        # inferred from the commands after the run. Logged on change only: the
+        # unserved set is stable for long stretches and would otherwise flood.
+        diagnostics = getattr(self, "_last_allocator_diagnostics", None) or {}
+        unserved = tuple(diagnostics.get("unserved_sensor_ids", ()) or ())
+        cause = str(diagnostics.get("unserved_cause", "none"))
+        if (unserved, cause) != getattr(self, "_last_unserved", None):
+            self._last_unserved = (unserved, cause)
+            if unserved:
+                shown = ", ".join(str(i) for i in unserved[:8])
+                more = f" (+{len(unserved) - 8} more)" if len(unserved) > 8 else ""
+                detail = (
+                    "heaters are at their bounds; more heater authority would help"
+                    if cause == "saturated"
+                    else (
+                        f"{diagnostics.get('heater_headroom_W', 0.0):.0f} W of heater headroom is "
+                        "unused, so this is NOT a power limit -- serving these would need "
+                        "negative power elsewhere. Tuning cannot fix it; group them with a "
+                        "neighbour or relax their setpoints"
+                    )
+                )
+                self._log_event(
+                    "unserved_channels",
+                    f"{len(unserved)} controlled sensor(s) not being served [{cause}]: "
+                    f"{shown}{more}. {detail}.",
+                )
+        if unserved:
+            payload["unserved_sensor_count"] = len(unserved)
+            payload["unserved_cause"] = cause
+            payload["worst_shortfall_K"] = round(float(diagnostics.get("worst_shortfall_K", 0.0)), 4)
         profile = getattr(self, "_last_step_profile", None)
         if profile:
             for key in ("property_rebuild_ms", "model_solve_ms", "total_ms"):

@@ -581,3 +581,44 @@ def test_it_does_not_disturb_an_already_reachable_demand() -> None:
     want = np.array([2.0, 2.0])          # uniform: no sign conflict
     sym, asym = _allocate(want, 1.0), _allocate(want, 10.0)
     assert np.allclose(sym, asym, atol=1e-3), (sym, asym)
+
+
+# --- reachability diagnostic ---------------------------------------------------- #
+def _reach(monkeypatch, *, v, u, maxima):
+    from graph_visualizer.simulation_model import PreparedSimulation
+
+    sim = object.__new__(PreparedSimulation)
+    G = np.array([[1.0, 0.9], [0.9, 1.0]])
+    return sim._mimo_pi_reachability(
+        G, np.asarray(u, float), np.asarray(v, float), [20, 21], np.asarray(maxima, float)
+    )
+
+
+def test_an_unreachable_channel_is_named_and_distinguished(monkeypatch) -> None:
+    """The question that cost a whole session: mistuned, or impossible? A channel
+    left short while the heaters are nowhere near their bounds is unreachable --
+    serving it would need negative power elsewhere, so no tuning fixes it."""
+    out = _reach(monkeypatch, v=[4.3, 0.52], u=[2.63, 0.0], maxima=[30.0, 30.0])
+    assert out["unserved_sensor_ids"] == [20], out
+    assert out["unserved_cause"] == "unreachable"
+    assert out["heater_headroom_W"] > 50.0, "and it says the power was there unused"
+
+
+def test_a_saturated_channel_reads_as_saturated(monkeypatch) -> None:
+    """The opposite case, which more heater authority WOULD fix."""
+    out = _reach(monkeypatch, v=[100.0, 100.0], u=[30.0, 30.0], maxima=[30.0, 30.0])
+    assert out["unserved_cause"] == "saturated", out
+    assert out["heater_headroom_W"] == pytest.approx(0.0)
+
+
+def test_a_served_plant_reports_nothing(monkeypatch) -> None:
+    out = _reach(monkeypatch, v=[2.0, 2.0], u=[1.0526, 1.0526], maxima=[30.0, 30.0])
+    assert out["unserved_sensor_ids"] == []
+    assert out["unserved_cause"] == "none"
+
+
+def test_shortfall_is_relative_to_the_channels_own_demand(monkeypatch) -> None:
+    """A 0.1 K miss on a 0.2 K demand matters; the same miss on a 40 K demand does
+    not. Judging both against an absolute threshold would report the wrong one."""
+    big = _reach(monkeypatch, v=[40.0, 40.0], u=[21.0, 21.0], maxima=[30.0, 30.0])
+    assert big["unserved_sensor_ids"] == [], big

@@ -1726,6 +1726,39 @@ class PreparedSimulation:
         self._modal_ff_rls_P = P
         return committed, dM, True, float(alpha)
 
+    def _mimo_pi_reachability(self, G, u, v_cmd, sensor_ids, maxima) -> dict:
+        """Per-channel diagnosis of why a sensor is not being served.
+
+        Separates the two cases that look identical from the outside:
+
+        * SATURATED -- the heaters that reach this channel are at their bounds.
+          More heater authority would help.
+        * UNREACHABLE -- the command is well inside its bounds and the channel is
+          STILL short. The allocator is not holding back; serving this channel
+          would need negative power elsewhere, so no tuning will fix it. Grouping
+          it with a neighbour, or relaxing its setpoint, will.
+
+        Reported as ids rather than counts so a run names the specific sensors.
+        """
+        shortfall = np.asarray(v_cmd, dtype=float) - (G @ np.asarray(u, dtype=float))
+        maxima = np.asarray(maxima, dtype=float)
+        headroom = float(np.sum(np.maximum(0.0, maxima - np.asarray(u, dtype=float))))
+        # "Short" is judged against the channel's own demand, so a big channel and a
+        # small one are held to the same relative standard.
+        scale = np.maximum(np.abs(np.asarray(v_cmd, dtype=float)), 1.0e-9)
+        short = shortfall > np.maximum(0.05 * scale, 1.0e-3)
+        bounded = headroom <= 1.0e-6 * max(float(np.sum(maxima)), 1.0)
+        ids = [int(s) for s in sensor_ids]
+        return {
+            "channel_shortfall_K": [float(v) for v in shortfall],
+            "unserved_sensor_ids": [i for i, flag in zip(ids, short) if flag],
+            # The distinction that matters: unreachable means "no command exists",
+            # not "the command was capped".
+            "unserved_cause": ("saturated" if bounded else "unreachable") if short.any() else "none",
+            "heater_headroom_W": headroom,
+            "worst_shortfall_K": float(shortfall.max()) if shortfall.size else 0.0,
+        }
+
     def _mimo_pi_reference_deviation(self, G, heater_ids, setpoints, y, valid) -> np.ndarray:
         """(r - y_passive) over the controlled sensors, the reference the QP inverts.
 
@@ -1959,6 +1992,16 @@ class PreparedSimulation:
             # The held (r - y_passive) reference, so a run's feedforward can be
             # checked after the fact rather than inferred from the commands.
             "reference_deviation_K": [float(v) for v in r_dev],
+            # Reachability, per controlled sensor. The question this answers is the
+            # one that cost a whole debugging session: is a channel tracking badly
+            # because it is mistuned, or because no non-negative heater command can
+            # serve it? The allocator already knows -- it just never said.
+            #
+            # shortfall = what the plant will hold minus what was asked for. A
+            # channel that stays persistently short while the command is nowhere near
+            # its bounds is not underpowered, it is UNREACHABLE: serving it would
+            # require cooling somewhere, and heaters only heat.
+            **self._mimo_pi_reachability(G, u, v_cmd, sensor_ids, maxima),
         }
         if update_state:
             # Back-calculation anti-windup. This previously FROZE the integral
