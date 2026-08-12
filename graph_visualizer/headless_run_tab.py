@@ -179,6 +179,9 @@ class HeadlessRunTab:
                 # reduction in a separate process instead of in this window.
                 "build_modal_controller": self.build_modal_controller,
             },
+            # Autosave: every edit goes straight back to the graph's
+            # simulation_parameters.json, so settings survive closing the app.
+            on_parameter_change=self._handle_parameter_change,
         )
         self.panel.build(form)
         # The same per-heater/sensor/cryocooler "Parameters" editor the simulation
@@ -417,6 +420,47 @@ class HeadlessRunTab:
         # Widgets win; fields without a widget keep the graph's saved value.
         return self.panel.read(base)
 
+    def persist_parameters(self) -> bool:
+        """Write the current form back to <graph>/simulation_parameters.json.
+
+        The tab always LOADED this file but only ever wrote into the run directory,
+        so every edit was lost when the app closed and the panel had to be set up
+        again from scratch each session. Saving to the graph folder makes the graph's
+        file the single place the settings live -- the same file the loader already
+        reads on startup and on every graph switch.
+
+        Extras (unknown keys from other tools) are preserved: the loader hands them
+        back and they are written out again rather than being silently dropped.
+        """
+        folder = self._selected_folder()
+        if folder is None or not folder.is_dir():
+            return False
+        from .simulation_parameters import (
+            load_simulation_parameters,
+            save_simulation_parameters,
+        )
+
+        path = folder / "simulation_parameters.json"
+        extras: dict[str, Any] = {}
+        if path.is_file():
+            try:
+                _base, extras = load_simulation_parameters(path)
+            except Exception:  # noqa: BLE001 - a corrupt file must not block saving
+                extras = {}
+        try:
+            save_simulation_parameters(path, self._collect_parameters(), extras)
+        except OSError as exc:
+            self._status(f"Could not save parameters: {exc}", True)
+            return False
+        return True
+
+    def _handle_parameter_change(self, *_: Any) -> None:
+        """Autosave on every edit. The file is small and writes are atomic enough
+        that doing this per keystroke is cheaper than making the user remember."""
+        if getattr(self, "_loading_parameters", False):
+            return          # do not write back while populating the form from disk
+        self.persist_parameters()
+
     # -- graph discovery (metadata only -- never loads a graph) -------------- #
     def refresh_graphs(self) -> None:
         root = Path(self._graphs_root())
@@ -443,6 +487,16 @@ class HeadlessRunTab:
         return Path(self._graphs_root()) / name
 
     def _handle_graph_changed(self, *_: Any) -> None:
+        # Switching graphs repopulates every widget, which fires the change hook on
+        # each one. Without this guard the newly-selected graph's settings would be
+        # written back over it mid-population, one field at a time.
+        self._loading_parameters = True
+        try:
+            self._populate_from_graph()
+        finally:
+            self._loading_parameters = False
+
+    def _populate_from_graph(self, *_: Any) -> None:
         folder = self._selected_folder()
         self.controller_scheme_combo.clear()
         if folder is None or not folder.is_dir():
