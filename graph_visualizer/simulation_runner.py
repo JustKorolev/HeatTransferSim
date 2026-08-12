@@ -412,7 +412,19 @@ class SimulationRunner:
         # saved-on-disk temps. Done BEFORE _resume_if_checkpoint so a genuine resume
         # still wins. Both the working state (set_temperatures) and the baseline
         # (initial_temperatures_K, used for prev-step metrics) are updated.
-        init_override = self._resolve_initial_temperatures(prepared)
+        # Decide the starting state ONCE, explicitly, rather than letting two writers
+        # race and depend on call order. A checkpoint is the whole point of a resume,
+        # so it beats any initial-temperature setting -- applying the override first
+        # and hoping the checkpoint lands after it is how a resume silently starts
+        # from the graph's initial temperature instead of where it left off.
+        resuming = bool(self._available_checkpoints())
+        init_override = None if resuming else self._resolve_initial_temperatures(prepared)
+        if resuming and self._resolve_initial_temperatures(prepared) is not None:
+            self._log_event(
+                "initial_state",
+                "ignoring the initial-temperature override: this run is resuming from a "
+                "checkpoint, which supplies the starting state.",
+            )
         if init_override is not None:
             prepared.initial_temperatures_K = init_override
             prepared.set_temperatures(init_override)
@@ -1328,18 +1340,37 @@ class SimulationRunner:
         except Exception as exc:  # noqa: BLE001
             self._log_event("checkpoint_error", str(exc))
 
+    def _available_checkpoints(self) -> list:
+        """This run directory's checkpoints, oldest first. One definition, used by
+        both the resume and the start-state decision, so they cannot disagree."""
+        if not self.ckpt_dir.exists():
+            return []
+        return sorted(self.ckpt_dir.glob("ckpt_*.npz"))
+
     def _resume_if_checkpoint(self, prepared) -> None:
         # Resume only from a checkpoint under a PRE-EXISTING run dir passed as
         # output; a fresh timestamped dir has none, so this is a no-op for new runs.
-        ckpts = sorted(self.ckpt_dir.glob("ckpt_*.npz")) if self.ckpt_dir.exists() else []
+        ckpts = self._available_checkpoints()
         if not ckpts:
+            # Silence here is how "resume" turns into "start over" without anyone
+            # noticing: the plant simply sits at the graph's initial temperature and
+            # the run looks normal.
+            self._log_event(
+                "resume",
+                f"no checkpoint found under {self.ckpt_dir}; starting from the initial "
+                "state rather than resuming. If this run was meant to resume, its "
+                "checkpoints are missing or the run directory is not the one intended.",
+            )
             return
         data = np.load(ckpts[-1])
-        prepared.set_temperatures(np.asarray(data["temperatures_K"], dtype=float))
+        temps = np.asarray(data["temperatures_K"], dtype=float)
+        prepared.set_temperatures(temps)
         restored = _restore_controller_state(prepared, data)
         self._log_event(
             "resumed",
-            f"from {ckpts[-1].name} at t={float(data['time_s']):.1f}s"
+            f"from {ckpts[-1].name} at t={float(data['time_s']):.1f}s; "
+            f"restored temperatures min={temps.min():.2f} mean={temps.mean():.2f} "
+            f"max={temps.max():.2f} K"
             + (f"; controller state restored ({restored})" if restored else
                "; NO controller state in this checkpoint (written before it was saved) -- "
                "the controller starts cold and must re-wind its integral"),
