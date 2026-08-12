@@ -113,6 +113,15 @@ class SimulationParameters:
     # raise its temperature, forever. Quarantined cells receive no power and are
     # excluded from whole-graph metrics (see cell_quarantine.py for why this
     # matters far more than the cell count suggests).
+    # Rebuild C(T)/L(T) only once the temperature has moved this far (max over
+    # cells, K) since the last rebuild. 0.0 rebuilds every step (the old behaviour).
+    #
+    # Worth more than the rebuild's own cost: a rebuild invalidates the implicit
+    # stepper's stage-matrix cache, so the CG solve restarts from scratch, and it
+    # churns several 8.7M-nnz sparse matrices per step. On a plant whose fastest
+    # RETAINED mode is ~20 minutes, 0.25 K of drift is far below the uncertainty in
+    # the property curves themselves.
+    tdep_rebuild_delta_K: float = 0.25
     quarantine_inert_cells: bool = True
     # Opt-in per-cell conductance floor for the quarantine, in W/K. 0.0 (the
     # default) quarantines only cells with literally no conduction edges. A

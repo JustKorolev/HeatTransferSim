@@ -875,6 +875,25 @@ class PreparedSimulation:
             if evaluation_temperatures is None
             else np.asarray(evaluation_temperatures, dtype=float).reshape(-1)
         )
+        # Skip the rebuild while the temperatures have barely moved.
+        #
+        # k(T) and h(T) are smooth, and these properties are ALREADY lagged -- the
+        # semi-implicit scheme evaluates them at the step-start temperature. Holding
+        # them across a few steps is the same class of approximation with an explicit,
+        # tunable bound instead of an implicit one-step one.
+        #
+        # The saving is much larger than the rebuild itself: recomputing the operator
+        # invalidates the implicit stepper's stage-matrix cache, so the CG solve pays
+        # full price every step. It also churns several 8.7M-nnz CSR matrices per
+        # step, which is memory pressure an overnight run cannot afford.
+        threshold = max(0.0, float(getattr(self.params, "tdep_rebuild_delta_K", 0.0)))
+        last = getattr(self, "_tdep_rebuild_temps", None)
+        if threshold > 0.0 and last is not None and last.shape == temps.shape:
+            if float(np.max(np.abs(temps - last))) < threshold:
+                self._tdep_rebuild_skips = getattr(self, "_tdep_rebuild_skips", 0) + 1
+                return
+        self._tdep_rebuild_temps = np.array(temps, dtype=float, copy=True)
+        self._tdep_rebuilds = getattr(self, "_tdep_rebuilds", 0) + 1
         C, inv_C, L = operator.rebuild(temps)
         C = _regularize_capacitance(np.asarray(C, dtype=float).reshape(-1), self.params)
         inv_C = np.where(C > 0.0, 1.0 / np.where(C > 0.0, C, 1.0), 0.0)
@@ -1090,7 +1109,9 @@ class PreparedSimulation:
                 if backend_stepper is not None:
                     self._record_implicit_profile(backend_stepper, backend_name, profile)
                 if attempt > 0:
-                    self.warnings.append(
+                    # _warn_once, not append: this fires on every subdivided step,
+                    # and an overnight run produced 48 identical lines from it.
+                    self._warn_once(
                         f"Implicit step subdivided {min_substeps}x to stay stable through stiff cryogenic cells."
                     )
                 return result

@@ -114,6 +114,12 @@ class RunConfig:
     # Cap on individually-logged sensor series (aggregate RMS error is always kept).
     # Every series is a Python list that grows for the whole run.
     max_logged_sensors: int = 32
+    # Abort cleanly above this fraction of physical RAM. An overnight run that
+    # exhausts memory does not just fail -- it takes the machine into swap thrash
+    # and, on the box this was written for, froze Windows hard enough to need a
+    # power cycle, losing the run AND the session. Stopping at a checkpoint costs
+    # the remaining sim time and nothing else. 0 disables the guard.
+    max_rss_fraction: float = 0.85
     seed: int = 0
     notes: str = ""
     thresholds: FailureThresholds = field(default_factory=FailureThresholds)
@@ -1377,8 +1383,36 @@ class SimulationRunner:
             except (ValueError, OSError):
                 pass  # not in main thread (e.g. GUI worker) -> caller uses cancel_event
 
+
+    def _memory_ceiling_hit(self) -> bool:
+        """True once this process is close enough to physical RAM to be dangerous.
+
+        Checked in the stop path so the run finalizes normally: it writes its
+        checkpoint, plots and report, and the run is resumable from where it got to.
+        """
+        fraction = float(getattr(self.cfg, "max_rss_fraction", 0.0) or 0.0)
+        if fraction <= 0.0:
+            return False
+        total_gib = _physical_memory_gib()
+        if total_gib <= 0.0:
+            return False           # cannot measure: never guess a ceiling
+        rss = _process_rss_gib()
+        if rss < fraction * total_gib:
+            return False
+        self._exit_status = "stopped: memory ceiling"
+        self._log_event(
+            "memory_ceiling",
+            f"RSS {rss:.1f} GiB reached {fraction:.0%} of {total_gib:.1f} GiB physical; "
+            "stopping cleanly at a checkpoint rather than driving the machine into swap. "
+            "Resume this run directory to continue, or lower the memory cost first "
+            "(GPU solver, tdep_rebuild_delta_K, fewer substeps).",
+        )
+        return True
+
     def _should_stop(self) -> bool:
         if self._stop:
+            return True
+        if self._memory_ceiling_hit():
             return True
         if self.cancel_event is not None and getattr(self.cancel_event, "is_set", lambda: False)():
             self._exit_status = "cancelled"
@@ -1588,6 +1622,35 @@ class SimulationRunner:
                 out["peak_heater_undelivered_W"] = max(finite)
         return out
 
+
+
+def _physical_memory_gib() -> float:
+    """Total physical RAM in GiB, or 0.0 if it cannot be determined."""
+    try:
+        import psutil
+
+        return float(psutil.virtual_memory().total) / 2**30
+    except Exception:  # noqa: BLE001 - psutil is optional
+        pass
+    try:  # Windows, without psutil
+        import ctypes
+
+        class _Status(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _Status()
+        status.dwLength = ctypes.sizeof(_Status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return float(status.ullTotalPhys) / 2**30
+    except Exception:  # noqa: BLE001
+        pass
+    return 0.0
 
 
 def _optional_state_arrays(prepared) -> dict:
