@@ -682,13 +682,32 @@ def build_octree(
                         if not batch:
                             continue
                     pending_batch = batch  # in-flight; cleared only after success
-                    classifications = list(
-                        executor.map(
-                            _classify_cell_work_item,
-                            batch,
-                            chunksize=max(1, min(8, batch_size // max(mp_workers, 1))),
+                    # Bounded wait. Without a timeout a worker that dies natively
+                    # leaves the parent blocked in fut.result() forever: the queue
+                    # closes, progress keeps redrawing a dead pool, and the build
+                    # looks slow rather than broken. That hang is what turned a
+                    # diagnosable crash into an unexplained one.
+                    #
+                    # Generous on purpose -- a deep cell against 10M triangles is
+                    # legitimately slow, and a false timeout on a healthy build would
+                    # be worse than the hang. This only fires when nothing is coming.
+                    budget = _BATCH_TIMEOUT_BASE_S + _BATCH_TIMEOUT_PER_ITEM_S * len(batch)
+                    try:
+                        classifications = list(
+                            executor.map(
+                                _classify_cell_work_item,
+                                batch,
+                                timeout=budget,
+                                chunksize=max(1, min(8, batch_size // max(mp_workers, 1))),
+                            )
                         )
-                    )
+                    except TimeoutError as exc:
+                        raise RuntimeError(
+                            f"Octree worker pool stopped responding: no result for a batch of "
+                            f"{len(batch)} cell(s) in {budget:.0f} s. A worker almost certainly "
+                            "died natively -- check octree_worker_crash.log for a stack, and "
+                            "retry with --workers 1 to get the failure in-process."
+                        ) from exc
                     for index, (work_item, classification) in enumerate(zip(batch, classifications)):
                         handle_classified_cell(
                             work_item, classification, remaining_batch_items=len(batch) - index - 1
@@ -1030,12 +1049,50 @@ def _prepare_worker_objects(objects: list[MeshObject]) -> list["_WorkerMeshPaylo
     return payloads
 
 
+# Batch timeout budget. A batch is only declared dead when nothing arrives at all;
+# these are sized so a healthy but slow build never trips them.
+_BATCH_TIMEOUT_BASE_S = 600.0
+_BATCH_TIMEOUT_PER_ITEM_S = 5.0
+
+
+def _enable_worker_faulthandler() -> None:
+    """Dump a native crash from this worker to octree_worker_crash.log.
+
+    Appends, and names the pid, because several workers can die and the useful one
+    is not necessarily the first. Written next to the output the CLI was already
+    given via OCTREE_CRASH_LOG_DIR; falls back to the working directory.
+    """
+    try:
+        import faulthandler
+        import os
+        from pathlib import Path as _Path
+
+        target = _Path(os.environ.get("OCTREE_CRASH_LOG_DIR", "."))
+        target.mkdir(parents=True, exist_ok=True)
+        handle = open(target / "octree_worker_crash.log", "a", encoding="utf-8")  # noqa: SIM115
+        handle.write(f"--- worker pid={os.getpid()} started ---\n")
+        handle.flush()
+        faulthandler.enable(file=handle, all_threads=True)
+    except Exception as exc:  # noqa: BLE001 - must never stop a worker starting
+        # Reported, not swallowed: a silent except here hid a NameError and left
+        # every worker running with no crash handler at all.
+        print(f"octree worker: crash logging unavailable ({exc})", flush=True)
+
+
 def _init_octree_worker(
     objects: list["_WorkerMeshPayload"],
     contact_report: ContactReport,
     params: OctreeParams,
     known_materials: set[str],
 ) -> None:
+    # A worker that dies natively -- an access violation inside embreex, say --
+    # takes its Python interpreter with it and reports NOTHING: the parent sees a
+    # closed queue and, if it does not detect the death, simply waits. That is the
+    # failure this build hit. faulthandler installs OS-level handlers so the stack
+    # is written before the process disappears, which is the only evidence this
+    # class of crash ever produces.
+    _enable_worker_faulthandler()
+
     global _TRIMESH_CONTAINS_AVAILABLE
     global _TRIANGLE_CACHE
     global _TRIANGLE_INDEX_CACHE
