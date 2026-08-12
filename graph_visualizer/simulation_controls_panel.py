@@ -483,6 +483,21 @@ class SimulationControlsPanel:
             "Recompute per-node C(T)=m*cp(T) and conduction/contact from NIST cryogenic "
             "curves each step, instead of using constant room-temperature properties."
         )
+        self._add_double(
+            properties_form, "tdep_rebuild_delta_K", "rebuild properties above K", 0.0, 1.0e6, 0.05
+        )
+        self.inputs["tdep_rebuild_delta_K"].setToolTip(
+            "Reuse C(T)/L(T) until the largest per-cell temperature change since the LAST "
+            "REBUILD exceeds this many K. 0 rebuilds every step (the old behaviour).\n\n"
+            "Worth far more than the rebuild's own cost: recomputing the operator also "
+            "invalidates the implicit stepper's stage-matrix cache, so the CG solve restarts "
+            "from scratch every step, and it churns several sparse matrices the size of the "
+            "graph's edge list.\n\n"
+            "This is not new lag. The properties are ALREADY evaluated at the step-start "
+            "temperature (semi-implicit), so this replaces an implicit one-step lag with an "
+            "explicit bounded one. 0.25 K is far inside the uncertainty of the NIST curves "
+            "themselves. Larger is faster and staler."
+        )
         self._add_int(properties_form, "copper_rrr", "Copper RRR", 1, 100000, 10)
         self.inputs["copper_rrr"].setToolTip(
             "Residual resistivity ratio for OFHC copper thermal conductivity k(T). "

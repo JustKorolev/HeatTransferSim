@@ -50,3 +50,15 @@ def test_a_corrupt_file_does_not_block_saving(tmp_path) -> None:
     assert extras == {}
     save_simulation_parameters(path, params, extras)
     assert load_simulation_parameters(path)[0].dt_s == params.dt_s
+
+
+def test_the_rebuild_threshold_has_a_control_and_is_read_back() -> None:
+    """It was added to SimulationParameters with no widget, so the only way to set
+    it was hand-editing JSON. A knob that is documented but unreachable is worse
+    than no knob."""
+    from tests.test_simulation_controls_panel import _build, MODE_HEADLESS
+
+    panel, _form = _build(MODE_HEADLESS)
+    assert "tdep_rebuild_delta_K" in panel.inputs
+    panel.inputs["tdep_rebuild_delta_K"].setValue(0.5)
+    assert panel.read(SimulationParameters()).tdep_rebuild_delta_K == pytest.approx(0.5)
