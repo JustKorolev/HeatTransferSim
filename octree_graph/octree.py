@@ -1972,31 +1972,62 @@ def _sample_points(center_mm: np.ndarray, size_mm: np.ndarray, samples_per_cell:
 
 
 def _triangle_intersects_aabb(triangle: np.ndarray, box_center: np.ndarray, box_half_size: np.ndarray) -> bool:
-    tri = np.asarray(triangle, dtype=float) - box_center
+    """Separating-axis test between a triangle and an axis-aligned box.
+
+    Written in scalar arithmetic rather than numpy vector ops on purpose. This is
+    the voxelizer's innermost loop -- it runs per triangle per candidate cell, tens
+    of millions of times on a real assembly -- and the previous version called
+    np.cross nine times per triangle. Each of those goes through moveaxis and
+    normalize_axis_tuple, so almost all the time went into numpy's dispatch
+    machinery rather than the four multiplies a 3-vector cross product actually is.
+    It was also the frame a Windows access violation landed on during a 10.35M
+    triangle build.
+
+    The maths is unchanged: box-overlap reject, then the triangle plane, then the
+    nine edge/axis cross products. Only the arithmetic is direct.
+    """
+    tri = np.asarray(triangle, dtype=float)
     if tri.shape != (3, 3):
         return False
+    cx, cy, cz = float(box_center[0]), float(box_center[1]), float(box_center[2])
+    hx, hy, hz = float(box_half_size[0]), float(box_half_size[1]), float(box_half_size[2])
+    ax_, ay_, az_ = float(tri[0][0]) - cx, float(tri[0][1]) - cy, float(tri[0][2]) - cz
+    bx_, by_, bz_ = float(tri[1][0]) - cx, float(tri[1][1]) - cy, float(tri[1][2]) - cz
+    gx_, gy_, gz_ = float(tri[2][0]) - cx, float(tri[2][1]) - cy, float(tri[2][2]) - cz
     eps = 1.0e-9
-    tri_min = np.minimum(np.minimum(tri[0], tri[1]), tri[2])
-    tri_max = np.maximum(np.maximum(tri[0], tri[1]), tri[2])
-    upper_miss = tri_min > box_half_size + eps
-    lower_miss = tri_max < -box_half_size - eps
-    if bool(upper_miss[0] or upper_miss[1] or upper_miss[2] or lower_miss[0] or lower_miss[1] or lower_miss[2]):
+
+    # 1. Box overlap on the three coordinate axes.
+    if min(ax_, bx_, gx_) > hx + eps or max(ax_, bx_, gx_) < -hx - eps:
         return False
-    normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
-    if np.linalg.norm(normal) > eps and not _plane_intersects_aabb(normal, tri[0], box_half_size):
+    if min(ay_, by_, gy_) > hy + eps or max(ay_, by_, gy_) < -hy - eps:
         return False
-    axes = [np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0])]
-    edges = [tri[1] - tri[0], tri[2] - tri[1], tri[0] - tri[2]]
-    for edge in edges:
-        for axis in axes:
-            test_axis = np.cross(edge, axis)
-            if np.dot(test_axis, test_axis) <= eps:
+    if min(az_, bz_, gz_) > hz + eps or max(az_, bz_, gz_) < -hz - eps:
+        return False
+
+    # 2. The triangle's own plane.
+    e0x, e0y, e0z = bx_ - ax_, by_ - ay_, bz_ - az_
+    e2x, e2y, e2z = gx_ - ax_, gy_ - ay_, gz_ - az_
+    nx = e0y * e2z - e0z * e2y
+    ny = e0z * e2x - e0x * e2z
+    nz = e0x * e2y - e0y * e2x
+    if nx * nx + ny * ny + nz * nz > eps * eps:
+        radius = hx * abs(nx) + hy * abs(ny) + hz * abs(nz)
+        if abs(nx * ax_ + ny * ay_ + nz * az_) > radius + eps:
+            return False
+
+    # 3. The nine edge x coordinate-axis separating axes. Crossing an edge with a
+    # unit axis just permutes and negates two components, so each is written out.
+    e1x, e1y, e1z = gx_ - bx_, gy_ - by_, gz_ - bz_
+    e2x, e2y, e2z = ax_ - gx_, ay_ - gy_, az_ - gz_
+    for ex, ey, ez in ((e0x, e0y, e0z), (e1x, e1y, e1z), (e2x, e2y, e2z)):
+        for tx, ty, tz in ((0.0, -ez, ey), (ez, 0.0, -ex), (-ey, ex, 0.0)):
+            if tx * tx + ty * ty + tz * tz <= eps:
                 continue
-            projections = tri @ test_axis
-            radius = np.dot(box_half_size, np.abs(test_axis))
-            p_min = min(float(projections[0]), float(projections[1]), float(projections[2]))
-            p_max = max(float(projections[0]), float(projections[1]), float(projections[2]))
-            if p_min > radius + eps or p_max < -radius - eps:
+            p0 = ax_ * tx + ay_ * ty + az_ * tz
+            p1 = bx_ * tx + by_ * ty + bz_ * tz
+            p2 = gx_ * tx + gy_ * ty + gz_ * tz
+            radius = hx * abs(tx) + hy * abs(ty) + hz * abs(tz)
+            if min(p0, p1, p2) > radius + eps or max(p0, p1, p2) < -radius - eps:
                 return False
     return True
 
