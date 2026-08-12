@@ -105,6 +105,20 @@ class SimulationParameters:
     # short of the command. 1.0 absorbs the whole shortfall; 0 disables the
     # correction and lets the integral wind against the actuator bounds.
     mimo_pi_antiwindup_gain: float = 1.0
+    # How much more the allocator dislikes leaving a sensor SHORT of its target than
+    # pushing it past. 1.0 is symmetric (the old behaviour).
+    #
+    # Symmetric is wrong when the plant is strongly coupled and the demands are
+    # unequal: heating the coldest sensor necessarily overshoots a neighbour that is
+    # nearly right, and a symmetric objective scores that overshoot exactly as badly
+    # as the cold it removes. The best non-negative fit then stops early. On
+    # no_mli_high_res every sensor sat below setpoint while the controller used 10 W
+    # of 840 W and left 25 of 28 heaters idle.
+    #
+    # Raising this makes "keep heating until the coldest arrive" optimal, at the
+    # explicit cost of letting better-placed sensors run warm. Set it to 1.0 if
+    # overshoot on any channel is worse than undershoot on the others.
+    mimo_undershoot_weight: float = 4.0
     # Derivative is deliberately absent: the conduction operator is symmetric, so
     # its spectrum is real and has no resonance to damp -- a D term would only
     # amplify sensor noise.

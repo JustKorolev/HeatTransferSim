@@ -1939,6 +1939,7 @@ class PreparedSimulation:
             max_delta_power=max_delta,
             # v_cmd is the steady deviation the plant must HOLD, not a change to it.
             absolute_target=True,
+            undershoot_weight=float(getattr(self.params, "mimo_undershoot_weight", 1.0)),
         )
         u = np.asarray(result.u, dtype=float).reshape(-1)
 

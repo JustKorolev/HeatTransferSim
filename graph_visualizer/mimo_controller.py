@@ -48,6 +48,7 @@ def allocate_thermal_rate_qp(
     # Keyword-only on purpose: existing callers pass max_delta_power and u_ref
     # POSITIONALLY, so a new positional parameter would silently land in u_ref's slot.
     absolute_target: bool = False,
+    undershoot_weight: float = 1.0,
 ) -> AllocationResult:
     raw_B = np.asarray(B_dyn, dtype=float)
     if raw_B.ndim != 2:
@@ -162,6 +163,7 @@ def allocate_thermal_rate_qp(
 
     sqrt_weights = np.sqrt(q)
     A_parts = [sqrt_weights[:, None] * B]
+    _ = A_parts  # rebuilt per reweighting pass below
     # Two different contracts, and they are not interchangeable.
     #
     # Incremental (the default, and what the rate-based PID+QP needed): command is
@@ -188,13 +190,51 @@ def allocate_thermal_rate_qp(
         scale = float(np.sqrt(rho))
         A_parts.append(scale * np.eye(nh))
         b_parts.append(scale * previous)
-    A = np.vstack(A_parts)
-    b = np.concatenate(b_parts)
     lower_bounds = np.maximum(np.zeros(nh, dtype=float), previous - delta_limit)
     upper_bounds = np.minimum(maxima, previous + delta_limit)
     lower_bounds = np.minimum(lower_bounds, upper_bounds)
+
+    target = command - drift + anchor
+    asym = max(1.0, float(undershoot_weight))
+
+    def _assemble(channel_weights):
+        root = np.sqrt(channel_weights)
+        parts_a = [root[:, None] * B]
+        parts_b = [root * target]
+        if lam > 0.0:
+            scale = float(np.sqrt(lam))
+            parts_a.append(scale * np.eye(nh))
+            parts_b.append(scale * reference)
+        if rho > 0.0:
+            scale = float(np.sqrt(rho))
+            parts_a.append(scale * np.eye(nh))
+            parts_b.append(scale * previous)
+        return np.vstack(parts_a), np.concatenate(parts_b)
+
+    A, b = _assemble(q)
     try:
         result = lsq_linear(A, b, bounds=(lower_bounds, upper_bounds), method="trf", lsmr_tol="auto")
+        # Asymmetric residual penalty, by iterative reweighting.
+        #
+        # A symmetric objective treats overshooting a sensor that is STILL too cold
+        # as exactly as bad as leaving it cold, so with strong coupling and unequal
+        # demands the best non-negative fit stops early and stays sparse: on
+        # no_mli_high_res every sensor sat below setpoint while the controller used
+        # 10 W of 840 W and left 25 of 28 heaters at zero.
+        #
+        # Weighting the UNDER-served channels more makes "keep heating until the
+        # coldest ones arrive" the optimal answer. The weight depends on the sign of
+        # the residual, which depends on the solution, so it is applied by
+        # reweighting from the previous pass -- a couple of passes is plenty, and
+        # each one is a bounded least-squares solve that is already cheap.
+        if asym > 1.0:
+            for _pass in range(2):
+                residual = B @ np.asarray(result.x, dtype=float) - target
+                reweighted = np.where(residual < 0.0, q * asym, q)
+                A, b = _assemble(reweighted)
+                result = lsq_linear(
+                    A, b, bounds=(lower_bounds, upper_bounds), method="trf", lsmr_tol="auto"
+                )
     except Exception as exc:
         warnings.append(f"MIMO bounded allocation failed safely: {exc}")
         return AllocationResult(

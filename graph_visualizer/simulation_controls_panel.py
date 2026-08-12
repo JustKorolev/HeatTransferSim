@@ -591,6 +591,21 @@ class SimulationControlsPanel:
             ("mimo_heater_slew_rate_W_per_s", "hard slew W/s (all heaters)", 0.0, 1.0e9, 1.0),
         ):
             self._add_double(controller_form, name, label, minimum, maximum, step)
+        self._add_double(
+            controller_form, "mimo_undershoot_weight", "undershoot weight", 1.0, 1.0e6, 1.0
+        )
+        self.inputs["mimo_undershoot_weight"].setToolTip(
+            "How much more the allocator dislikes leaving a sensor SHORT of its target "
+            "than pushing it past. 1.0 is symmetric.\n\n"
+            "Symmetric is wrong on a strongly coupled plant with unequal demands: "
+            "heating the coldest sensor necessarily overshoots a neighbour that is "
+            "nearly right, and a symmetric objective scores that overshoot as badly as "
+            "the cold it removes, so the best feasible command stops early and stays "
+            "sparse.\n\n"
+            "Raising this buys heat for the coldest channels by letting better-placed "
+            "ones run warm. Set it to 1.0 if overshoot anywhere is worse than "
+            "undershoot everywhere."
+        )
         self.inputs["mimo_default_heater_max_power_W"].setToolTip(
             "Max power for heaters that do NOT set their own. A heater with a non-zero "
             "max power in the per-node Parameters editor uses that value and ignores "

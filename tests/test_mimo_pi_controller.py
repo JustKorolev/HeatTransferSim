@@ -517,3 +517,67 @@ def test_incremental_mode_is_unchanged_for_other_callers() -> None:
         allocate_thermal_rate_qp(G, np.zeros(3), v, np.ones(3), umax, prev, 1e-3, 0.0).u
     ).reshape(-1)
     assert np.allclose(G @ (u - prev), v, atol=2e-2), "default stays incremental"
+
+
+# --- asymmetric residual weighting --------------------------------------------- #
+def _coupled_pair():
+    """Two sensors sharing almost all of each heater's influence -- the structure
+    that makes an all-positive demand need negative power."""
+    return np.array([[1.0, 0.9], [0.9, 1.0]])
+
+
+def _allocate(v, weight):
+    from graph_visualizer.mimo_controller import allocate_thermal_rate_qp
+
+    G = _coupled_pair()
+    result = allocate_thermal_rate_qp(
+        G, np.zeros(2), np.asarray(v, float), np.ones(2), np.full(2, 30.0), np.zeros(2),
+        1e-3, 0.0, absolute_target=True, undershoot_weight=weight,
+    )
+    return np.asarray(result.u).reshape(-1)
+
+
+def test_symmetric_weighting_leaves_cold_sensors_cold() -> None:
+    """The failure being fixed: both sensors below setpoint, 60 W available, and the
+    best symmetric fit commands under 3 W because overshooting the nearly-correct
+    sensor scores as badly as the cold it removes."""
+    u = _allocate([4.30, 0.52], 1.0)
+    assert u.sum() < 3.0, u
+    assert (u < 1e-9).any(), "and it goes sparse"
+
+
+def test_weighting_undershoot_buys_the_cold_sensor_more_heat() -> None:
+    total = [_allocate([4.30, 0.52], w).sum() for w in (1.0, 2.0, 4.0, 10.0)]
+    assert total == sorted(total), total
+    assert total[-1] > 1.5 * total[0], total
+
+
+def test_the_cold_channel_gets_closer_to_its_target() -> None:
+    """More power is only worth having if it lands where the deficit is."""
+    G = _coupled_pair()
+    want = np.array([4.30, 0.52])
+    short_sym = want[0] - (G @ _allocate(want, 1.0))[0]
+    short_asym = want[0] - (G @ _allocate(want, 10.0))[0]
+    assert short_asym < short_sym
+    assert short_asym < 0.35 * short_sym, (short_sym, short_asym)
+
+
+def test_one_is_still_the_symmetric_solver() -> None:
+    """The knob must be able to restore the old behaviour exactly."""
+    from graph_visualizer.mimo_controller import allocate_thermal_rate_qp
+
+    G = _coupled_pair()
+    v = np.array([4.30, 0.52])
+    base = allocate_thermal_rate_qp(
+        G, np.zeros(2), v, np.ones(2), np.full(2, 30.0), np.zeros(2), 1e-3, 0.0,
+        absolute_target=True,
+    )
+    assert np.allclose(np.asarray(base.u).reshape(-1), _allocate(v, 1.0))
+
+
+def test_it_does_not_disturb_an_already_reachable_demand() -> None:
+    """When the demand IS reachable with non-negative power, the symmetric answer is
+    already right and asymmetry must not inflate it."""
+    want = np.array([2.0, 2.0])          # uniform: no sign conflict
+    sym, asym = _allocate(want, 1.0), _allocate(want, 10.0)
+    assert np.allclose(sym, asym, atol=1e-3), (sym, asym)
