@@ -390,6 +390,21 @@ class SimulationRunner:
         self._apply_setpoints(model, sensors)
 
         params = self._resolve_params(has_controller, controller_path)
+        # The launcher writes its pre-resolution copy here; overwrite it with what the
+        # run actually used. _resolve_params rewrites dt, duration, input mode, the
+        # controller wiring and the history limit from CLI flags, so the launcher's
+        # copy is not what ran -- and a run whose recorded settings differ from its
+        # real ones is worse than no record at all.
+        try:
+            from .simulation_parameters import save_simulation_parameters
+
+            save_simulation_parameters(self.out_dir / "simulation_parameters.json", params)
+        except Exception as exc:  # noqa: BLE001 - never fail a run over bookkeeping
+            self._log_event("parameters_not_recorded", str(exc))
+        else:
+            self._log_event(
+                "parameters", "recorded the resolved simulation_parameters.json for this run"
+            )
         prepared = simulation_model.prepare_simulation(model, matrices, params)
 
         # Override the starting temperatures with the caller's in-memory state (or a
@@ -1488,11 +1503,14 @@ class SimulationRunner:
             for i in range(n):
                 w.writerow([f"{arrs[k][i]:.6g}" if i < len(arrs[k]) else "" for k in keys])
 
-    def _write_plots_and_report(self) -> None:
+    def _write_plots(self) -> list[str]:
+        """Render every figure from self._series. Split out of the report so a
+        finished run can regenerate its plots without re-running the simulation
+        (see regenerate_plots) -- the figures then come from exactly this code
+        rather than a second, drifting copy of it."""
         series = self._series
-        summary = self._summary_metrics()
-        # plots (optional -- guarded so a missing matplotlib never kills a run)
         plotted: list[str] = []
+        # plots (optional -- guarded so a missing matplotlib never kills a run)
         try:
             import matplotlib
 
@@ -1580,6 +1598,12 @@ class SimulationRunner:
         except Exception as exc:  # noqa: BLE001
             self._log_event("plot_skipped", str(exc))
 
+        return plotted
+
+    def _write_plots_and_report(self) -> None:
+        plotted = self._write_plots()
+        series = self._series
+        summary = self._summary_metrics()
         # report
         lines = [
             f"# Simulation report — {self.graph_name}",
@@ -1622,6 +1646,43 @@ class SimulationRunner:
                 out["peak_heater_undelivered_W"] = max(finite)
         return out
 
+
+
+def regenerate_plots(run_dir) -> list[str]:
+    """Redraw a finished run's plots from its timeseries.npz.
+
+    Reuses SimulationRunner._write_plots rather than reimplementing it, so a
+    regenerated figure is identical to the one the run produced -- a second copy of
+    the plotting code would drift from the first the moment either changed.
+
+    Returns the filenames written. Raises FileNotFoundError if the run has no
+    timeseries (a run that died before its first sample).
+    """
+    run_dir = Path(run_dir)
+    npz = run_dir / "timeseries.npz"
+    if not npz.is_file():
+        raise FileNotFoundError(f"{npz} not found; this run wrote no timeseries.")
+    with np.load(npz) as data:
+        series = {key: np.asarray(data[key]).tolist() for key in data.files}
+
+    # Which sensors were controlled, so the plots keep showing only those. Older runs
+    # have no sensors.csv; then plot whatever series exist rather than nothing.
+    controlled: set[str] = set()
+    manifest = run_dir / "sensors.csv"
+    if manifest.is_file():
+        with manifest.open(newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if str(row.get("monitor_only", "")).strip().lower() == "false":
+                    controlled.add(f"{row.get('series', '')}_K")
+
+    runner = object.__new__(SimulationRunner)
+    runner._series = series
+    runner.out_dir = run_dir
+    runner.plots_dir = run_dir / "plots"
+    runner.plots_dir.mkdir(parents=True, exist_ok=True)
+    runner._controlled_series_keys = controlled or None
+    runner._log_event = lambda kind, message: None
+    return runner._write_plots()
 
 
 def _physical_memory_gib() -> float:

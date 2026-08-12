@@ -135,9 +135,23 @@ class HeadlessRunTab:
         resume_refresh = self.QtWidgets.QPushButton("Refresh")
         resume_refresh.setMaximumWidth(80)
         resume_refresh.clicked.connect(self.refresh_resume_runs)
+        # Redraw a finished run's figures without re-running it -- useful when the
+        # plotting itself changed (the controlled-sensor filter, say), since the
+        # timeseries is already on disk and the plots are the only stale part.
+        self.replot_button = self.QtWidgets.QPushButton("Generate plots")
+        self.replot_button.setMaximumWidth(130)
+        self.replot_button.setToolTip(
+            "Redraw plots/ for the run selected above, from its saved timeseries.npz.\n"
+            "Does not re-run the simulation and does not touch its data -- only the "
+            "figures are rewritten."
+        )
+        self.replot_button.clicked.connect(self.regenerate_run_plots)
         resume_row.addWidget(self.resume_combo, 1)
         resume_row.addWidget(resume_refresh)
+        resume_row.addWidget(self.replot_button)
         form.addRow("resume", resume_row)
+        self.resume_combo.currentIndexChanged.connect(self._sync_replot_enabled)
+        self._sync_replot_enabled()
         # MIMO PI needs one object: the plant's DC gain. In simulation that is an
         # exact solve of L T = P, not a step-test campaign -- 74.3% of G lives in
         # modes slower than 10,000 s here, so a short identification understates it
@@ -937,6 +951,29 @@ class HeadlessRunTab:
             index = combo.findData(previous)
             if index >= 0:
                 combo.setCurrentIndex(index)
+
+    def _sync_replot_enabled(self, *_: Any) -> None:
+        """The button only means anything with a run selected."""
+        button = getattr(self, "replot_button", None)
+        if button is not None:
+            button.setEnabled(self.selected_resume_dir() is not None)
+
+    def regenerate_run_plots(self) -> None:
+        run_dir = self.selected_resume_dir()
+        if run_dir is None:
+            self._status("Select a run in the resume row first.", True)
+            return
+        try:
+            from .simulation_runner import regenerate_plots
+
+            written = regenerate_plots(run_dir)
+        except FileNotFoundError as exc:
+            self._status(str(exc), True)
+            return
+        except Exception as exc:  # noqa: BLE001 - report rather than kill the tab
+            self._status(f"Could not regenerate plots: {exc}", True)
+            return
+        self._status(f"Rewrote {len(written)} plot(s) in {run_dir / 'plots'}.")
 
     def selected_resume_dir(self) -> Path | None:
         combo = getattr(self, "resume_combo", None)
