@@ -545,7 +545,6 @@ def test_live_mode_hides_only_the_headless_extras():
     assert hidden == {
         "snapshot_interval_s",
         "checkpoint_interval_s",
-        "run_setpoint_K",
         "run_initial_temperature_K",
         "open_output",
         # The Solver section and everything in it.
@@ -752,9 +751,8 @@ def test_every_input_maps_to_a_real_parameter(mode):
     assert unknown == []
 
 
-@pytest.mark.parametrize("mode", [MODE_LIVE, MODE_HEADLESS])
-def test_readout_editor_builds_the_same_heater_sensor_options(mode):
-    panel, _form = _build(mode)
+def test_readout_editor_builds_the_heater_sensor_options():
+    panel, _form = _build(MODE_LIVE)
     panel.build_readout_editor()
     # setpoint, heater power and cryocooler options exist in both tabs.
     for field in (
@@ -773,9 +771,9 @@ def test_readout_editor_builds_the_same_heater_sensor_options(mode):
 
 
 def test_readout_editor_seeds_model_heater_defaults():
-    # Headless has no graph to read, so the editor must still show reasonable
-    # presets (the model's own heater/sensor defaults), not zeros.
-    panel, _form = _build(MODE_HEADLESS)
+    # Until a readout row is selected the editor shows the model's own heater/sensor
+    # defaults, not zeros.
+    panel, _form = _build(MODE_LIVE)
     panel.build_readout_editor()
     assert panel.readout_editor_inputs["heater_max_power_W"].value() == pytest.approx(30.0)
     assert panel.readout_editor_inputs["heater_efficiency"].value() == pytest.approx(1.0)
@@ -795,18 +793,23 @@ def test_readout_editor_change_routes_to_the_owner_action():
     assert seen == ["heater_max_power_W"]
 
 
-def test_headless_randomize_and_set_all_drive_the_whole_run_fields(tmp_path):
+def test_headless_set_all_drives_the_whole_run_initial_temperature(tmp_path):
     tab = _headless_tab(tmp_path / "graphs")
     tab.initial_temperature_all_spin.setValue(77.0)
     tab._set_all_initial_temperatures()
     assert tab.initial_spin.value() == pytest.approx(77.0)
     assert tab.use_initial.isChecked() is True
 
-    tab.sensor_random_center_spin.setValue(50.0)
-    tab.sensor_random_spread_mK_spin.setValue(0.0)  # zero spread -> deterministic
-    tab._randomize_setpoints()
-    assert tab.setpoint_spin.value() == pytest.approx(50.0)
-    assert tab.use_setpoint.isChecked() is True
+
+def test_the_parameters_editor_is_not_shown_in_the_headless_tab(tmp_path):
+    """Every field in it was inert without a model (the heater-id combo had nothing
+    to offer), duplicated by the panel's own sections (cryocooler), or actively
+    misleading (a 'default setpoint K' of 293.15 beside a 50 K run)."""
+    tab = _headless_tab(tmp_path / "graphs")
+    assert not hasattr(tab, "readout_editor_box")
+    assert not hasattr(tab.panel, "readout_editor_box")
+    # The one per-heater thing it could really do lives in the override table now.
+    assert tab.heater_table is not None
 
 
 # --- the headless tab, built on the same stubs ----------------------------- #
@@ -826,8 +829,6 @@ def test_headless_tab_builds_and_uses_the_shared_panel(tmp_path):
     for name in (
         "snapshot_spin",
         "checkpoint_spin",
-        "setpoint_spin",
-        "use_setpoint",
         "initial_spin",
         "use_initial",
         "run_headless_button",

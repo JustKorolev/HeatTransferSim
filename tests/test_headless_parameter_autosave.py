@@ -56,7 +56,7 @@ def test_the_rebuild_threshold_has_a_control_and_is_read_back() -> None:
     """It was added to SimulationParameters with no widget, so the only way to set
     it was hand-editing JSON. A knob that is documented but unreachable is worse
     than no knob."""
-    from tests.test_simulation_controls_panel import _build, MODE_HEADLESS
+    from test_simulation_controls_panel import _build, MODE_HEADLESS
 
     panel, _form = _build(MODE_HEADLESS)
     assert "tdep_rebuild_delta_K" in panel.inputs
@@ -64,11 +64,14 @@ def test_the_rebuild_threshold_has_a_control_and_is_read_back() -> None:
     assert panel.read(SimulationParameters()).tdep_rebuild_delta_K == pytest.approx(0.5)
 
 
-# --- heater id picker ---------------------------------------------------------- #
+# --- heater id picker (simulation tab) ------------------------------------------ #
+# The headless tab no longer shows this editor at all -- it had no graph to offer
+# heaters from, so the combo was always empty there. Per-heater limits are set from
+# its override table instead; this is the live tab's row-selection editor.
 def _heater_widget():
-    from tests.test_simulation_controls_panel import _build, MODE_HEADLESS
+    from test_simulation_controls_panel import _build, MODE_LIVE
 
-    panel, _form = _build(MODE_HEADLESS)
+    panel, _form = _build(MODE_LIVE)
     panel.build_readout_editor()
     return panel, panel.readout_editor_inputs["heater_id"]
 

@@ -83,6 +83,10 @@ class RunConfig:
     allow_no_controller: bool = False  # must be True to run without a controller
     setpoints_K: dict[int, float] = field(default_factory=dict)  # sensor node id -> target
     global_setpoint_K: float | None = None  # applied to every sensor if set
+    # Per-heater limit overrides: {heater node id: {heater_max_power_W /
+    # heater_slew_rate_W_per_s / heater_efficiency: value}}. Only the fields given
+    # are written; a heater absent here keeps the controller defaults from params.
+    heater_overrides: dict[int, dict[str, float]] = field(default_factory=dict)
     # Guard against silently running at NodeProperties' 293.15 K default; set True
     # only when room temperature really is the intended target.
     allow_default_setpoint: bool = False
@@ -416,6 +420,7 @@ class SimulationRunner:
         # Apply constant setpoints onto the sensor nodes the controller reads.
         sensors = [int(nid) for nid, n in model.nodes.items() if getattr(n, "is_sensor", False)]
         self._apply_setpoints(model, sensors)
+        self._apply_heater_overrides(model)
 
         params = self._resolve_params(has_controller, controller_path)
         # The launcher writes its pre-resolution copy here; overwrite it with what the
@@ -675,6 +680,46 @@ class SimulationRunner:
         for sid, target in (self.cfg.setpoints_K or {}).items():
             if int(sid) in model.nodes:
                 model.nodes[int(sid)].controller_setpoint_K = float(target)
+
+    _HEATER_OVERRIDE_FIELDS = (
+        "heater_max_power_W",
+        "heater_slew_rate_W_per_s",
+        "heater_efficiency",
+    )
+
+    def _apply_heater_overrides(self, model) -> None:
+        """Write per-heater limit overrides onto the heater nodes.
+
+        A heater not named here keeps the controller defaults, and a named heater
+        keeps them for every field left out -- so this is strictly additive to the
+        Controller section's single default. Both control schemes read these values
+        per heater when they build u_max and the slew vector.
+        """
+        overrides = self.cfg.heater_overrides or {}
+        if not overrides:
+            return
+        applied = 0
+        missing: list[int] = []
+        for raw_id, fields in overrides.items():
+            node = model.nodes.get(int(raw_id))
+            heater = getattr(node, "heater", None) if node is not None else None
+            if heater is None:
+                missing.append(int(raw_id))
+                continue
+            for name in self._HEATER_OVERRIDE_FIELDS:
+                if name in fields:
+                    setattr(heater, name, float(fields[name]))
+            applied += 1
+        if applied:
+            self._log_event("heater_overrides", f"{applied} heater(s) given explicit limits")
+        if missing:
+            # Silently ignoring these would run the whole night on default limits
+            # while the user believes a heater was capped.
+            self._log_event(
+                "heater_overrides",
+                f"WARNING: {len(missing)} override(s) name a node this graph has no heater "
+                f"for and were NOT applied: {sorted(missing)[:10]}",
+            )
 
     def _resolve_params(self, has_controller: bool, controller_path: str | None) -> SimulationParameters:
         """The parameters the run uses. When the caller supplied a full

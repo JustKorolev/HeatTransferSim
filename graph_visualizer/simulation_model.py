@@ -1634,9 +1634,12 @@ class PreparedSimulation:
             [float(self.controller_last_power_by_heater.get(int(h), 0.0)) for h in heater_ids],
             dtype=float,
         )
-        slew = max(0.0, float(getattr(self.params, "mimo_heater_slew_rate_W_per_s", 0.0)))
-        if slew > 0.0:
-            max_delta = slew * dt
+        # Per heater: an explicit heater_slew_rate_W_per_s wins, else the global
+        # rate. A heater whose resolved rate is 0 is left unlimited, exactly as a
+        # global rate of 0 always meant.
+        slew = _controller_slew_limits(model, heater_ids, self.params)
+        if np.any(slew > 0.0):
+            max_delta = np.where(slew > 0.0, slew * dt, np.inf)
             u = np.clip(u_cmd, u_prev - max_delta, u_prev + max_delta)
             u = np.clip(u, 0.0, u_max)
         else:
@@ -1648,7 +1651,7 @@ class PreparedSimulation:
             "reduced_order": int(mc["K"].shape[1]),
             "active_sensor_count": int(len(ctrl)),
             "rate_command_norm": 0.0,
-            "slew_rate_limit_W_per_s": float(slew),
+            "slew_rate_limit_W_per_s": [float(v) for v in slew],
             "heater_max_power_W": [float(v) for v in u_max],
             "adaptive_ff_enabled": bool(adaptive_ff),
             "adaptive_ff_correction_norm": float(np.linalg.norm(dM)),
@@ -1957,8 +1960,11 @@ class PreparedSimulation:
             [float(self.controller_last_power_by_heater.get(int(h), 0.0)) for h in heater_ids],
             dtype=float,
         )
-        slew = max(0.0, float(getattr(self.params, "mimo_heater_slew_rate_W_per_s", 0.0)))
-        max_delta = np.full(len(heater_ids), slew * dt, dtype=float) if slew > 0.0 else None
+        # Per heater: an explicit heater_slew_rate_W_per_s wins, else the global
+        # rate. The allocator already reads this as a vector and treats a
+        # non-finite entry as unbounded, so a heater with no limit stays free.
+        slew = _controller_slew_limits(model, heater_ids, self.params)
+        max_delta = np.where(slew > 0.0, slew * dt, np.inf) if np.any(slew > 0.0) else None
         weights = np.where(valid, 1.0, 0.0)
         result = allocate_thermal_rate_qp(
             G,                                   # K/W, so "rate" is a temperature here
@@ -1987,7 +1993,7 @@ class PreparedSimulation:
             # maxima > 0 guard a heater bounded to 0 W (disabled, or with no power
             # configured) reads as both saturated low and saturated high.
             "saturated_high": int(np.count_nonzero((maxima > 0.0) & (u >= maxima - 1.0e-9))),
-            "slew_rate_limit_W_per_s": float(slew),
+            "slew_rate_limit_W_per_s": [float(v) for v in slew],
             "cond_G": float(np.linalg.cond(G)),
             # The held (r - y_passive) reference, so a run's feedforward can be
             # checked after the fact rather than inferred from the commands.
@@ -3271,6 +3277,30 @@ def _controller_heater_max_power(node: Any, params: SimulationParameters) -> flo
     if max_power <= 0.0:
         max_power = float(params.mimo_default_heater_max_power_W)
     return max(0.0, max_power)
+
+
+def _controller_heater_slew_rate(node: Any, params: SimulationParameters) -> float:
+    """This heater's command slew limit (W/s), falling back to the global default.
+
+    Mirrors _controller_heater_max_power: a per-heater value wins, 0 (the default)
+    means "no override, use the run's mimo_heater_slew_rate_W_per_s". A driver ramp
+    is a property of the hardware, so heaters on different drivers can differ, and
+    both control schemes already apply the limit per heater.
+    """
+    heater = getattr(node, "heater", None)
+    rate = float(getattr(heater, "heater_slew_rate_W_per_s", 0.0) or 0.0)
+    if rate <= 0.0:
+        rate = float(getattr(params, "mimo_heater_slew_rate_W_per_s", 0.0) or 0.0)
+    return max(0.0, rate)
+
+
+def _controller_slew_limits(model: Any, heater_ids: Any, params: SimulationParameters) -> np.ndarray:
+    """Per-heater slew rate (W/s) aligned with ``heater_ids``."""
+    nodes = getattr(model, "nodes", {}) or {}
+    return np.array(
+        [_controller_heater_slew_rate(nodes.get(int(h)), params) for h in heater_ids],
+        dtype=float,
+    )
 
 
 def _enabled_node_id_set(raw_ids: tuple[int, ...] | list[int] | set[int] | None) -> set[int] | None:

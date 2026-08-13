@@ -76,7 +76,6 @@ _LIVE_HIDDEN_ROWS = frozenset(
     {
         "snapshot_interval_s",
         "checkpoint_interval_s",
-        "run_setpoint_K",
         "run_initial_temperature_K",
         "open_output",
     }
@@ -138,8 +137,6 @@ _EXPORTED_SHARED = (
     "open_output_button",
     "snapshot_spin",
     "checkpoint_spin",
-    "setpoint_spin",
-    "use_setpoint",
     "initial_spin",
     "use_initial",
 )
@@ -498,21 +495,12 @@ class SimulationControlsPanel:
             ),
             "randomize setpoints",
         )
-        # Headless equivalents of the two rows above: they apply to the whole run
-        # rather than to a graph held in this process.
-        self.setpoint_spin = self.double_spin(0.0, 1.0e6, 293.15, 1.0)
-        self.use_setpoint = self.QtWidgets.QCheckBox("use setpoint")
-        self.use_setpoint.setChecked(True)
-        self.setpoint_spin.setToolTip(
-            "Constant setpoint applied to EVERY sensor. Leave the 'use setpoint' box "
-            "unchecked to keep whatever the graph already has."
-        )
-        self._row(
-            environment_form,
-            "run_setpoint_K",
-            self._hrow(self.setpoint_spin, self.use_setpoint),
-            "setpoint K",
-        )
+        # There is deliberately no global run setpoint here. It used to be the
+        # baseline every sensor inherited, with the per-sensor table holding only
+        # overrides -- two places to look for one sensor's target, and a blank row
+        # that silently meant something. The headless tab's per-sensor table is now
+        # the only source: it is prefilled with the default for every sensor the
+        # build knows about, and edited (or randomized) from there.
         self.initial_spin = self.double_spin(0.0, 1.0e6, 293.15, 1.0)
         self.use_initial = self.QtWidgets.QCheckBox("override")
         self.initial_spin.setToolTip(
@@ -1036,17 +1024,22 @@ class SimulationControlsPanel:
     def build_readout_editor(self) -> Any:
         """Build the per-heater/sensor/cryocooler "Parameters" box.
 
-        This is the sim tab's heater/sensor editor (setpoint K, heater mode /
-        power / efficiency / PID, cryocooler). It sits beside the viewer in the
-        live tab and beside the log in the headless tab, so both tabs offer the
-        same heater/sensor options. Its ``valueChanged`` slots call back into the
-        owning tab via the ``readout_*_change`` actions; the headless tab, which
-        has no per-node model to write to, simply passes no such actions.
+        This is the LIVE tab's heater/sensor editor (setpoint K, heater mode /
+        power / efficiency / PID, cryocooler), driven by selecting a readout row.
+        Its ``valueChanged`` slots call back into the owning tab via the
+        ``readout_*_change`` actions.
 
-        Field initial values are the model's own heater/sensor defaults, so the
-        headless tab (which can't read a graph) still shows sensible presets. The
-        live tab overwrites them from the selected node on every row selection, so
-        these seeds only surface where there is no graph to read.
+        The headless tab used to show it too, as a static defaults block. It no
+        longer does: with no readout tables and no model to write to, every field
+        was either inert (the heater-id combo had nothing to offer without a
+        graph), duplicated elsewhere (the cryocooler rows are in the panel's own
+        Cryocooler section), or misleading -- the "default setpoint K" field sat at
+        293.15 while the run tracked something else entirely. Its one genuinely
+        per-heater use, overriding a heater's limits, is now the headless tab's
+        per-heater override table, which can name every heater at once.
+
+        Field initial values are the model's own heater/sensor defaults; the live
+        tab overwrites them from the selected node on every row selection.
         """
         node_defaults, heater_defaults = self._readout_field_defaults()
         box = self.QtWidgets.QGroupBox("Parameters")
@@ -1132,15 +1125,8 @@ class SimulationControlsPanel:
         layout.addWidget(self.readout_cooling_editor)
         layout.addStretch(1)
 
-        if self.mode == MODE_HEADLESS:
-            # No readout tables to select a row from, so show the whole editor as a
-            # static defaults block rather than hiding it until a selection.
-            self.readout_editor_title.setText(
-                "Heater / sensor / cryocooler defaults (applied to the run's graph)."
-            )
-        else:
-            # Live tab drives it from readout-row selection; hidden until then.
-            box.setVisible(False)
+        # Driven by readout-row selection, so it stays hidden until there is one.
+        box.setVisible(False)
         return box
 
     # -- mode ---------------------------------------------------------------- #

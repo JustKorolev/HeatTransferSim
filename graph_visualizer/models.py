@@ -39,6 +39,11 @@ class HeaterProperties:
     heater_min_power_W: float = 0.0
     heater_max_power_W: float = 30.0
     heater_efficiency: float = 1.0
+    # Per-heater override of the driver's command slew rate (W/s). 0.0 means "use
+    # the global mimo_heater_slew_rate_W_per_s", which is the case for every heater
+    # unless one is set explicitly -- a real driver limit belongs to the hardware,
+    # not to the run, so it lives with the heater the way max power does.
+    heater_slew_rate_W_per_s: float = 0.0
 
 
 @dataclass

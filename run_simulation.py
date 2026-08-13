@@ -54,6 +54,11 @@ def main() -> None:
                    help="JSON {sensor_node_id: setpoint_K} of PER-SENSOR targets. Applied on top "
                         "of --setpoint, so --setpoint sets the baseline and this overrides "
                         "individual sensors.")
+    p.add_argument("--heater-overrides-json", default=None,
+                   help="JSON {heater_node_id: {heater_max_power_W, heater_slew_rate_W_per_s, "
+                        "heater_efficiency}} of PER-HEATER limit overrides. Any field omitted "
+                        "keeps the run's controller defaults, and a heater not named here is "
+                        "untouched.")
     p.add_argument("--initial-temp", type=float, default=None,
                    help="uniform initial temperature [K] for every node (overrides the graph's saved temps)")
     p.add_argument("--dt", type=float, default=1.0)
@@ -96,6 +101,30 @@ def main() -> None:
                 raise SystemExit(f"--setpoints-json has a bad entry: {node_id!r}: {target!r}")
         print(f"Per-sensor setpoints: {len(per_sensor_setpoints)} sensor(s) from {setpoints_path}")
 
+    # Per-heater limit overrides: {node_id: {field: value}}. Only the fields present
+    # are applied, so a heater given a slew rate keeps the default max power.
+    heater_overrides: dict[int, dict[str, float]] = {}
+    if args.heater_overrides_json:
+        overrides_path = Path(args.heater_overrides_json)
+        if not overrides_path.is_file():
+            raise SystemExit(f"--heater-overrides-json not found: {overrides_path}")
+        with overrides_path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if not isinstance(raw, dict):
+            raise SystemExit(
+                "--heater-overrides-json must contain a JSON object {node_id: {field: value}}."
+            )
+        for node_id, fields in raw.items():
+            if not isinstance(fields, dict):
+                raise SystemExit(f"--heater-overrides-json has a bad entry: {node_id!r}: {fields!r}")
+            try:
+                heater_overrides[int(node_id)] = {
+                    str(name): float(value) for name, value in fields.items()
+                }
+            except (TypeError, ValueError):
+                raise SystemExit(f"--heater-overrides-json has a bad entry: {node_id!r}: {fields!r}")
+        print(f"Per-heater overrides: {len(heater_overrides)} heater(s) from {overrides_path}")
+
     cfg = RunConfig(
         graph_folder=str(Path(args.graph)),
         output_root=args.output_root,
@@ -104,6 +133,7 @@ def main() -> None:
         allow_no_controller=bool(args.allow_no_controller),
         global_setpoint_K=args.setpoint,
         setpoints_K=per_sensor_setpoints,
+        heater_overrides=heater_overrides,
         initial_temperature_uniform_K=args.initial_temp,
         dt_s=args.dt,
         t_final_s=args.duration,

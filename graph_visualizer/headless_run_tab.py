@@ -29,14 +29,20 @@ import os
 import random
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from .diagnostics import log_event
+from .graph_roles import load_role_manifest
 from .modal_reduction import list_modal_artifacts
 from .simulation_controls_panel import MODE_HEADLESS, PID_QP_LABEL, SimulationControlsPanel
 from .simulation_runner import STOP_REQUEST_FILENAME
+
+# What every sensor's target starts at. Matches NodeProperties' own default, so a
+# prefilled table asks for exactly what an untouched graph would have run anyway.
+DEFAULT_SETPOINT_K = 293.15
 
 
 class HeadlessRunTab:
@@ -198,26 +204,31 @@ class HeadlessRunTab:
             on_parameter_change=self._handle_parameter_change,
         )
         self.panel.build(form)
-        # The same per-heater/sensor/cryocooler "Parameters" editor the simulation
-        # tab shows beside its viewer. No readout tables here to drive per-row
-        # selection, so the shared panel shows it as a static defaults block.
-        self.panel.build_readout_editor()
+        # The simulation tab's per-node "Parameters" editor is deliberately NOT
+        # built here (see build_readout_editor): without a model to write to every
+        # field was inert or duplicated the sections above. Per-heater limits are
+        # the one thing that was genuinely per-node, and they now live in the
+        # override table below, which can show every heater at once.
         self.panel.export_to(self)
         # controls_scroll is NOT added here: app.py puts it in the window's shared
         # side-panel stack, exactly as it does for the simulation tab. The tab body
-        # holds only what sits beside the viewer there -- the "Parameters" editor
-        # and, in place of the 3D viewer, the run's progress / status / log.
-        # Per-sensor setpoints, beside the shared "Parameters" editor. The
-        # simulation tab edits these through its readout tables, which need a loaded
-        # graph; here the sensor list comes from the manifest a previous run wrote,
-        # so the graph still never enters this process. Blank = use the global
-        # setpoint above, so the common "one target for everything" case is
-        # unchanged and only edited rows become overrides.
+        # holds the per-role tables (setpoints, heater overrides, PI gains) and, in
+        # place of the 3D viewer, the run's progress / status / log.
+        # Per-sensor setpoints. The simulation tab edits these through its readout
+        # tables, which need a loaded graph; here the sensor list comes from the
+        # build's own nodes.csv (see graph_roles), so the graph still never enters
+        # this process and the list exists before the first run has ever happened.
+        #
+        # This table is the ONLY source of setpoints for the run: every row is
+        # prefilled with the default, and Randomize / Set all / hand-editing all
+        # work on top of that. There is no global setpoint to fall back to, so a
+        # row's value is the whole answer for that sensor.
         setpoint_box = self.QtWidgets.QGroupBox("Per-sensor setpoints")
         setpoint_layout = self.QtWidgets.QVBoxLayout(setpoint_box)
         setpoint_help = self.QtWidgets.QLabel(
-            "Blank uses the global setpoint. Fill a row to give that sensor its own "
-            "target. The list comes from the last run's sensors.csv."
+            f"Every sensor the graph declares, prefilled at {DEFAULT_SETPOINT_K:g} K. Edit a "
+            "row to give that sensor its own target, or use Randomize / Set all. A row left "
+            "blank keeps whatever setpoint the graph itself holds."
         )
         setpoint_help.setWordWrap(True)
         setpoint_layout.addWidget(setpoint_help)
@@ -227,6 +238,10 @@ class HeadlessRunTab:
         self.setpoint_table.setMinimumHeight(200)
         setpoint_layout.addWidget(self.setpoint_table, 1)
         setpoint_buttons = self.QtWidgets.QHBoxLayout()
+        # "Set all" needs its own value now that there is no global setpoint row.
+        self.setpoint_all_spin = self.panel.double_spin(0.0, 1.0e6, DEFAULT_SETPOINT_K, 1.0)
+        self.setpoint_all_spin.setToolTip("The value 'Set all' writes into every sensor row.")
+        setpoint_buttons.addWidget(self.setpoint_all_spin)
         for label, slot in (
             ("Load sensors", lambda: self.load_sensor_setpoints(announce=True)),
             ("Set all", self.apply_setpoint_to_all_sensors),
@@ -266,11 +281,41 @@ class HeadlessRunTab:
             gain_buttons.addWidget(button)
         gain_layout.addLayout(gain_buttons)
 
+        # Per-heater limit overrides. Every heater runs on the Controller section's
+        # defaults (default max heater power, slew rate) unless it is given its own
+        # value here -- a driver limit belongs to the hardware, so heaters on
+        # different drivers can differ, while the common case stays one number on
+        # the left. Blank = use the default; only filled cells are sent.
+        heater_box = self.QtWidgets.QGroupBox("Per-heater overrides")
+        heater_layout = self.QtWidgets.QVBoxLayout(heater_box)
+        heater_help = self.QtWidgets.QLabel(
+            "Every heater uses the Controller defaults on the left. Fill a cell to "
+            "override that heater's own limit; blank leaves it on the default."
+        )
+        heater_help.setWordWrap(True)
+        heater_layout.addWidget(heater_help)
+        self.heater_table = self.QtWidgets.QTableWidget(0, 4)
+        self.heater_table.setHorizontalHeaderLabels(
+            ["heater", "max power W", "slew W/s", "efficiency"]
+        )
+        self.heater_table.horizontalHeader().setStretchLastSection(True)
+        self.heater_table.setMinimumHeight(180)
+        heater_layout.addWidget(self.heater_table, 1)
+        heater_buttons = self.QtWidgets.QHBoxLayout()
+        for label, slot in (
+            ("Load heaters", lambda: self.load_heaters(announce=True)),
+            ("Clear", self.clear_heater_overrides),
+        ):
+            button = self.QtWidgets.QPushButton(label)
+            button.clicked.connect(slot)
+            heater_buttons.addWidget(button)
+        heater_layout.addLayout(heater_buttons)
+
         editor_column = self.QtWidgets.QWidget()
         editor_layout = self.QtWidgets.QVBoxLayout(editor_column)
         editor_layout.setContentsMargins(0, 0, 0, 0)
-        editor_layout.addWidget(self.readout_editor_box)
         editor_layout.addWidget(setpoint_box, 1)
+        editor_layout.addWidget(heater_box, 1)
         editor_layout.addWidget(gain_box, 1)
         outer.addWidget(editor_column, 0, self.QtCore.Qt.AlignTop)
 
@@ -369,38 +414,32 @@ class HeadlessRunTab:
         model. Here the draw fills the per-sensor table, so each sensor gets an
         INDEPENDENT value rather than the whole run sharing one -- the point of
         randomizing is the spread between sensors, and a single shared value has
-        none. The global setpoint is set to the centre so any sensor missing from
-        the table still has a sensible baseline.
+        none.
 
-        With no sensor manifest loaded there is nothing to spread across, so it
-        falls back to one drawn value for the run and says so.
+        With no sensor rows there is nothing to spread across, and (since the global
+        setpoint row was removed) nowhere else to put a value, so it says so instead
+        of silently doing nothing.
         """
         center = float(self.sensor_random_center_spin.value())
         spread_K = float(self.sensor_random_spread_mK_spin.value()) * 1.0e-3
         table = getattr(self, "setpoint_table", None)
         rows = getattr(self, "_sensor_rows_manifest", None) or []
-        if table is not None and rows:
-            drawn: list[float] = []
-            for index in range(len(rows)):
-                value = center + random.uniform(-spread_K, spread_K)
-                drawn.append(value)
-                table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(f"{value:.6g}"))
-            self.setpoint_spin.setValue(center)
-            self.use_setpoint.setChecked(True)
+        if table is None or not rows:
             self._status(
-                f"Randomized {len(drawn)} sensor setpoints around {center:g} K "
-                f"+/- {spread_K * 1.0e3:g} mK "
-                f"(actual span {min(drawn):g} to {max(drawn):g} K).",
-                False,
+                "No sensors to randomize. Press 'Load sensors' first; if the list stays "
+                "empty this graph's nodes.csv declares no sensors.",
+                True,
             )
             return
-        value = center + random.uniform(-spread_K, spread_K)
-        self.setpoint_spin.setValue(value)
-        self.use_setpoint.setChecked(True)
+        drawn: list[float] = []
+        for index in range(len(rows)):
+            value = center + random.uniform(-spread_K, spread_K)
+            drawn.append(value)
+            table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(f"{value:.6g}"))
         self._status(
-            f"Run setpoint randomized to {value:g} K -- one value for the whole run, "
-            "because no sensor list is loaded. Press 'Load sensors' to randomize each "
-            "sensor separately.",
+            f"Randomized {len(drawn)} sensor setpoints around {center:g} K "
+            f"+/- {spread_K * 1.0e3:g} mK "
+            f"(actual span {min(drawn):g} to {max(drawn):g} K).",
             False,
         )
 
@@ -432,7 +471,13 @@ class HeadlessRunTab:
         else:
             base = SimulationParameters()
         # Widgets win; fields without a widget keep the graph's saved value.
-        return self.panel.read(base)
+        params = self.panel.read(base)
+        # Except this one. The enabled-I/O table is a LIVE tab control (its section
+        # is hidden here), so an unticked heater there would ride into an overnight
+        # run through the saved file with nothing in this tab to show it -- the run
+        # would quietly drive fewer heaters than the controller was designed for.
+        # Every heater runs headless; None is the "no filter" convention.
+        return replace(params, enabled_heater_node_ids=None)
 
     def persist_parameters(self) -> bool:
         """Write the current form back to <graph>/simulation_parameters.json.
@@ -542,6 +587,7 @@ class HeadlessRunTab:
         self._load_parameters_for_graph(folder)
         self.refresh_resume_runs()
         self.load_sensor_setpoints()
+        self.load_heaters()
         self.load_pi_gains()
         # Say plainly whether the run will take the fast path and whether the edge
         # data is there. Without edges.npz, temperature-dependent properties would
@@ -690,28 +736,59 @@ class HeadlessRunTab:
 
     # -- per-sensor setpoints ------------------------------------------------ #
     def sensor_manifest(self, graph_name: str) -> list[dict[str, str]]:
-        """Sensor rows (node_id, component, setpoint, ...) for ``graph_name``.
+        """Sensor rows (node_id, component_name, monitor_only) for ``graph_name``.
 
-        This tab never loads the graph, so the sensor list comes from the manifest
-        the runner writes at prepare time (``sensors.csv``) in that graph's most
-        recent run that has one. Scanning the graph's own multi-hundred-MB
-        nodes.csv in the GUI process would stall the window for the same data.
+        Primary source is the BUILD: nodes.csv's is_sensor column, via graph_roles,
+        which caches the scan beside the graph. That matters because this table is
+        now the only place a run's setpoints come from -- taking the list from a
+        previous run's sensors.csv meant a graph that had never been run had no
+        sensors to target, and no way to get any.
+
+        Falls back to the newest run's sensors.csv, which covers a graph whose
+        nodes.csv predates those columns, and a sensor assigned in the app after the
+        build (those edits live in graph.json, not nodes.csv).
         """
+        folder = Path(self._graphs_root()) / graph_name
+        manifest = load_role_manifest(folder)
+        if manifest.sensors:
+            return [
+                {
+                    "node_id": str(row.node_id),
+                    "component_name": row.component_name,
+                    "monitor_only": "true" if row.monitor_only else "false",
+                }
+                for row in manifest.sensors
+            ]
         root = self.simulations_root() / graph_name
         if not root.is_dir():
             return []
         for run_dir in sorted(root.iterdir(), reverse=True):
-            manifest = run_dir / "sensors.csv"
-            if not manifest.is_file():
+            csv_path = run_dir / "sensors.csv"
+            if not csv_path.is_file():
                 continue
             try:
-                with manifest.open("r", newline="", encoding="utf-8") as handle:
+                with csv_path.open("r", newline="", encoding="utf-8") as handle:
                     rows = [row for row in csv.DictReader(handle) if row.get("node_id")]
             except OSError:
                 continue
             if rows:
                 return rows
         return []
+
+    def heater_manifest(self, graph_name: str) -> list[dict[str, str]]:
+        """Heater rows (node_id, component_name) for ``graph_name``.
+
+        Same build-time source as the sensors. Deliberately NOT the selected
+        controller artifact's heater_ids: that would show only the heaters the
+        current scheme's matrix happens to cover, and the point of this table is
+        every heater the run will actually drive.
+        """
+        folder = Path(self._graphs_root()) / graph_name
+        manifest = load_role_manifest(folder)
+        return [
+            {"node_id": str(row.node_id), "component_name": row.component_name}
+            for row in manifest.heaters
+        ]
 
     def load_sensor_setpoints(self, announce: bool = False) -> None:
         """Fill the table from the newest run's sensor manifest.
@@ -736,14 +813,82 @@ class HeadlessRunTab:
             item = self.QtWidgets.QTableWidgetItem(label)
             item.setFlags(self.QtCore.Qt.ItemIsEnabled)
             table.setItem(index, 0, item)
-            # Blank means "use the global setpoint"; only edited rows override.
-            table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(""))
+            # Prefilled, not blank: this table is the run's only source of
+            # setpoints, so an unedited row still has to say what it wants.
+            table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(f"{DEFAULT_SETPOINT_K:g}"))
         if announce and not rows and folder is not None:
             self._status(
-                f"No sensor manifest found for {folder.name}. Run once (any duration) so "
-                "the run writes sensors.csv, then load again.",
+                f"{folder.name} declares no sensors: its nodes.csv has no is_sensor rows "
+                "and no previous run wrote a sensors.csv.",
                 True,
             )
+
+    # -- per-heater overrides ------------------------------------------------- #
+    def load_heaters(self, announce: bool = False) -> None:
+        """Fill the heater table from the graph's build-time heater list.
+
+        Values start blank -- blank means "use the Controller section's defaults",
+        which is what every heater does unless the user says otherwise.
+        """
+        table = getattr(self, "heater_table", None)
+        if table is None:
+            return
+        folder = self._selected_folder()
+        rows = self.heater_manifest(folder.name) if folder is not None else []
+        table.setRowCount(len(rows))
+        self._heater_rows_manifest = rows
+        for index, row in enumerate(rows):
+            label = f"{row.get('node_id', '')}  {row.get('component_name', '')}".strip()
+            item = self.QtWidgets.QTableWidgetItem(label)
+            item.setFlags(self.QtCore.Qt.ItemIsEnabled)
+            table.setItem(index, 0, item)
+            for column in (1, 2, 3):
+                table.setItem(index, column, self.QtWidgets.QTableWidgetItem(""))
+        if announce and not rows and folder is not None:
+            self._status(f"{folder.name} declares no heaters in its nodes.csv.", True)
+
+    def collect_heater_overrides(self) -> dict[int, dict[str, float]]:
+        """{node_id: {field: value}} for the cells the user actually filled.
+
+        A heater with no filled cell is absent entirely, so the run applies the
+        Controller defaults to it exactly as before this table existed.
+        """
+        table = getattr(self, "heater_table", None)
+        rows = getattr(self, "_heater_rows_manifest", None) or []
+        overrides: dict[int, dict[str, float]] = {}
+        if table is None:
+            return overrides
+        columns = (
+            (1, "heater_max_power_W"),
+            (2, "heater_slew_rate_W_per_s"),
+            (3, "heater_efficiency"),
+        )
+        for index, row in enumerate(rows):
+            try:
+                node_id = int(row["node_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            fields: dict[str, float] = {}
+            for column, name in columns:
+                cell = table.item(index, column)
+                text = (cell.text() if cell is not None else "").strip()
+                if not text:
+                    continue
+                try:
+                    fields[name] = float(text)
+                except (TypeError, ValueError):
+                    continue
+            if fields:
+                overrides[node_id] = fields
+        return overrides
+
+    def clear_heater_overrides(self) -> None:
+        table = getattr(self, "heater_table", None)
+        if table is None:
+            return
+        for index in range(table.rowCount()):
+            for column in (1, 2, 3):
+                table.setItem(index, column, self.QtWidgets.QTableWidgetItem(""))
 
     def collect_setpoint_overrides(self) -> dict[int, float]:
         """{node_id: setpoint_K} for rows the user actually filled in."""
@@ -764,11 +909,11 @@ class HeadlessRunTab:
         return overrides
 
     def apply_setpoint_to_all_sensors(self) -> None:
-        """Write the global setpoint into every row, as a starting point to edit."""
+        """Write the 'set all' value into every row, as a starting point to edit."""
         table = getattr(self, "setpoint_table", None)
         if table is None:
             return
-        value = f"{self.setpoint_spin.value():g}"
+        value = f"{self.setpoint_all_spin.value():g}"
         for index in range(table.rowCount()):
             table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(value))
 
@@ -1086,11 +1231,10 @@ class HeadlessRunTab:
             command.append("--allow-no-controller")
         else:
             command += ["--controller", artifact]
-        if self.use_setpoint.isChecked():
-            command += ["--setpoint", f"{self.setpoint_spin.value():g}"]
-        # Per-sensor targets layer on top of the global one, so only edited rows are
-        # written. Saved beside the run so the file records what was actually asked
-        # for, the same way simulation_parameters.json does.
+        # The per-sensor table is the run's only source of setpoints -- there is no
+        # global to fall back on -- so every filled row is written. Saved beside the
+        # run so the file records what was actually asked for, the same way
+        # simulation_parameters.json does.
         overrides = self.collect_setpoint_overrides()
         if overrides:
             overrides_path = run_dir / "setpoints.json"
@@ -1103,6 +1247,22 @@ class HeadlessRunTab:
                 self._status(f"Could not write per-sensor setpoints: {exc}", True)
                 return
             command += ["--setpoints-json", str(overrides_path)]
+        # Per-heater limit overrides, same idea: only heaters the user actually gave
+        # a value are named, and the rest run on the Controller section's defaults.
+        heater_overrides = self.collect_heater_overrides()
+        if heater_overrides:
+            heater_path = run_dir / "heater_overrides.json"
+            try:
+                heater_path.write_text(
+                    json.dumps(
+                        {str(k): v for k, v in sorted(heater_overrides.items())}, indent=2
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                self._status(f"Could not write per-heater overrides: {exc}", True)
+                return
+            command += ["--heater-overrides-json", str(heater_path)]
         if self.use_initial.isChecked() and resume_dir is None:
             command += ["--initial-temp", f"{self.initial_spin.value():g}"]
         elif self.use_initial.isChecked():
