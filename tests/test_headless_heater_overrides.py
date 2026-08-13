@@ -306,3 +306,39 @@ def test_a_headless_run_drives_every_heater(tmp_path, monkeypatch) -> None:
         SimulationParameters(enabled_heater_node_ids=(11,)),
     )
     assert tab._collect_parameters().enabled_heater_node_ids is None
+
+
+def test_the_graph_line_says_how_many_roles_were_found(tmp_path, monkeypatch) -> None:
+    """When both tables come up empty, this line is the difference between "this
+    graph declares no roles" and "its nodes.csv could not be read"."""
+    tab = _tab(tmp_path, monkeypatch, [(10, "A")], sensors=[20])
+    assert "1 heater(s), 1 sensor(s)" in tab.graph_info.text()
+
+
+def test_a_graph_with_no_role_columns_says_so_rather_than_looking_empty(tmp_path, monkeypatch) -> None:
+    import test_simulation_controls_panel as panel_stubs
+
+    folder = tmp_path / "graphs" / "g"
+    folder.mkdir(parents=True)
+    (folder / "node_ids.npy").write_bytes(b"")
+    (folder / "nodes.csv").write_text("node_id,component_name\n1,A\n", encoding="utf-8")
+    monkeypatch.setattr(HeadlessRunTab, "simulations_root", lambda self: tmp_path / "simulations")
+    tab = HeadlessRunTab(panel_stubs._QtStub, None, graphs_root=lambda: tmp_path / "graphs")
+    assert "is_heater" in tab.graph_info.text(), tab.graph_info.text()
+
+
+def test_a_failing_loader_does_not_blank_the_rest_of_the_tab(tmp_path, monkeypatch) -> None:
+    """The three tables refresh together; one bad file used to abort the refresh
+    before the graph info line was written, leaving stale text beside empty tables."""
+    said: list[tuple[str, bool]] = []
+    tab = _tab(tmp_path, monkeypatch, [(10, "A")], sensors=[20])
+    monkeypatch.setattr(
+        HeadlessRunTab, "load_sensor_setpoints",
+        lambda self, announce=False: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    tab.on_status = lambda message, is_error: said.append((message, is_error))
+    tab._populate_from_graph()
+
+    assert any("boom" in message for message, _ in said), said
+    assert tab.heater_table.rowCount() == 1, "the heater table still loaded"
+    assert "roles:" in tab.graph_info.text(), "the info line was still written"

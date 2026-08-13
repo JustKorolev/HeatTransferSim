@@ -586,9 +586,18 @@ class HeadlessRunTab:
             self.controller_scheme_combo.setCurrentIndex(1)
         self._load_parameters_for_graph(folder)
         self.refresh_resume_runs()
-        self.load_sensor_setpoints()
-        self.load_heaters()
-        self.load_pi_gains()
+        # Each loader is isolated: one that fails must not take the rest of the
+        # refresh -- and the graph info line -- with it. An empty table with a stale
+        # header is indistinguishable from "this graph has no sensors".
+        for name, loader in (
+            ("sensor setpoints", self.load_sensor_setpoints),
+            ("heaters", self.load_heaters),
+            ("PI gains", self.load_pi_gains),
+        ):
+            try:
+                loader()
+            except Exception as exc:  # noqa: BLE001 - a bad file must not blank the tab
+                self._status(f"Could not load {name} for {folder.name}: {exc}", True)
         # Say plainly whether the run will take the fast path and whether the edge
         # data is there. Without edges.npz, temperature-dependent properties would
         # have to fall back to constant properties (L(T) is rebuilt from the edges),
@@ -597,8 +606,29 @@ class HeadlessRunTab:
         self.graph_info.setText(
             f"{node_count} nodes • {len(artifacts)} controller artifact(s) • {folder}\n"
             f"parameters: {self._params_source}\n"
+            f"roles: {self._role_status(folder)}\n"
             f"{self._fast_load_status(folder)}"
         )
+
+    def _role_status(self, folder: Path) -> str:
+        """How many heaters/sensors the tables found, and where they came from.
+
+        Both tables are fed from one place, so when they come up empty this line is
+        the difference between "this graph declares no roles", "its nodes.csv is too
+        old to say" and "the file could not be read at all".
+        """
+        try:
+            manifest = load_role_manifest(folder)
+        except Exception as exc:  # noqa: BLE001
+            return f"could not read roles: {exc}"
+        heaters, sensors = len(manifest.heaters), len(manifest.sensors)
+        if heaters or sensors:
+            return f"{heaters} heater(s), {sensors} sensor(s) from {manifest.source}"
+        fallback = len(getattr(self, "_sensor_rows_manifest", None) or [])
+        detail = f"{manifest.source}"
+        if fallback:
+            return f"0 from {detail}; {fallback} sensor(s) from the last run's sensors.csv"
+        return f"no heaters or sensors found ({detail})"
 
     # -- modal controller build (separate process, no graph in this window) --- #
     def build_modal_controller(self) -> None:

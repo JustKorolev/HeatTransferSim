@@ -68,7 +68,7 @@ def test_the_scan_is_cached_beside_the_graph(tmp_path):
     _nodes_csv(tmp_path, [_row(20, "h1", heater=True)])
     assert load_role_manifest(tmp_path).source == "nodes.csv"
     assert (tmp_path / ROLE_CACHE_FILENAME).is_file()
-    assert load_role_manifest(tmp_path).source == "cache"
+    assert load_role_manifest(tmp_path).source == "nodes.csv (cached)"
     assert load_role_manifest(tmp_path).heater_ids == [20]
 
 
@@ -117,6 +117,8 @@ def test_a_build_too_old_to_record_roles_says_so(tmp_path):
     manifest = load_role_manifest(tmp_path)
     assert manifest.heaters == [] and manifest.sensors == []
     assert "is_heater" in manifest.source
+    # And again from the cache: an empty result still has to say WHY it is empty.
+    assert "is_heater" in load_role_manifest(tmp_path).source
 
 
 def test_a_component_name_with_a_comma_survives(tmp_path):
@@ -132,3 +134,15 @@ def test_a_component_name_with_a_comma_survives(tmp_path):
 def test_an_empty_file_is_not_fatal(tmp_path):
     (tmp_path / "nodes.csv").write_text("", encoding="utf-8")
     assert load_role_manifest(tmp_path).heaters == []
+
+
+def test_a_file_that_is_not_utf8_reports_why_instead_of_raising(tmp_path):
+    """This feeds two GUI tables. An exception here blanks the whole tab, and an
+    empty table with no reason is indistinguishable from a graph with no roles."""
+    (tmp_path / "nodes.csv").write_bytes(
+        b"node_id,component_name,is_heater,is_sensor,sensor_monitor_only\n"
+        b"7,H\xff\xfeTR,True,False,False\n"
+    )
+    manifest = load_role_manifest(tmp_path)
+    assert manifest.heaters == []
+    assert "could not read" in manifest.source and "Error" in manifest.source

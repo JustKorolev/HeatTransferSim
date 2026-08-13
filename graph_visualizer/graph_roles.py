@@ -97,16 +97,22 @@ def _read_cache(folder: Path, nodes_csv: Path) -> RoleManifest | None:
         return None
     if not isinstance(payload, dict) or payload.get("source_key") != _cache_key(nodes_csv):
         return None  # rebuilt (or truncated) since: rescan rather than serve stale roles
+    # The scan's own source text is stored and replayed. A cached EMPTY result still
+    # has to say why it is empty ("nodes.csv has no is_heater/is_sensor columns");
+    # reporting a bare "cache" turned the one line that explains an empty table into
+    # the one line that explains nothing.
+    origin = str(payload.get("source") or NODES_CSV)
     return RoleManifest(
         heaters=_rows_from_payload(payload.get("heaters", [])),
         sensors=_rows_from_payload(payload.get("sensors", [])),
-        source="cache",
+        source=f"{origin} (cached)",
     )
 
 
 def _write_cache(folder: Path, nodes_csv: Path, manifest: RoleManifest) -> None:
     payload = {
         "source_key": _cache_key(nodes_csv),
+        "source": manifest.source,
         "heaters": [row.as_dict() for row in manifest.heaters],
         "sensors": [row.as_dict() for row in manifest.sensors],
     }
@@ -199,7 +205,10 @@ def load_role_manifest(folder: str | Path, *, refresh: bool = False) -> RoleMani
             return cached
     try:
         manifest = scan_nodes_csv(nodes_csv)
-    except (OSError, csv.Error) as exc:
-        return RoleManifest(source=f"could not read {NODES_CSV}: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        # Deliberately broad: this feeds two GUI tables, and a nodes.csv with one
+        # bad byte (UnicodeDecodeError, not OSError) must come back as "here is why
+        # the list is empty" rather than as an exception that blanks the tab.
+        return RoleManifest(source=f"could not read {NODES_CSV}: {type(exc).__name__}: {exc}")
     _write_cache(folder, nodes_csv, manifest)
     return manifest
