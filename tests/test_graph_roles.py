@@ -146,3 +146,73 @@ def test_a_file_that_is_not_utf8_reports_why_instead_of_raising(tmp_path):
     manifest = load_role_manifest(tmp_path)
     assert manifest.heaters == []
     assert "could not read" in manifest.source and "Error" in manifest.source
+
+
+# --- the "Update graph" layout --------------------------------------------------- #
+# graph_io._write_nodes_csv writes a FIXED 18-column set with extrasaction="ignore"
+# and puts each role node's whole dict in role_json -- there is no is_heater or
+# is_sensor column in that file. Reading only the flat columns made every refreshed
+# graph report zero heaters and zero sensors, while the G-matrix build (which goes
+# through fast_graph_io, and does read role_json) saw them all.
+def _refreshed_nodes_csv(folder, roles):
+    folder.mkdir(parents=True, exist_ok=True)
+    with (folder / "nodes.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["node_id", "cell_id", "component_name", "C_J_K", "role_json"],
+        )
+        writer.writeheader()
+        for node_id, name, payload in roles:
+            writer.writerow({
+                "node_id": node_id, "cell_id": f"cell_{node_id}", "component_name": name,
+                "C_J_K": "1.0",
+                "role_json": json.dumps(payload, separators=(",", ":")) if payload else "",
+            })
+
+
+def test_roles_are_read_from_role_json(tmp_path):
+    _refreshed_nodes_csv(tmp_path, [
+        (10, "HTR_A", {"node_id": 10, "is_heater": True}),
+        (11, "plain", None),
+        (20, "SEN_A", {"node_id": 20, "is_sensor": True, "sensor_monitor_only": True}),
+    ])
+    manifest = load_role_manifest(tmp_path)
+    assert manifest.heater_ids == [10]
+    assert manifest.sensor_ids == [20]
+    assert manifest.sensors[0].monitor_only is True
+    assert manifest.heaters[0].component_name == "HTR_A"
+
+
+def test_role_json_wins_over_the_flat_columns(tmp_path):
+    """fast_graph_io treats role_json as authoritative; disagreeing with the loader
+    about which nodes are heaters is worse than either answer alone."""
+    _nodes_csv(tmp_path, [_row(10, "A", heater=False, sensor=False)])
+    text = (tmp_path / "nodes.csv").read_text(encoding="utf-8").splitlines()
+    text[0] += ",role_json"
+    text[1] += ',"{""is_heater"": true}"'
+    (tmp_path / "nodes.csv").write_text("\n".join(text) + "\n", encoding="utf-8")
+    assert load_role_manifest(tmp_path).heater_ids == [10]
+
+
+def test_a_malformed_role_cell_falls_back_to_the_flat_columns(tmp_path):
+    _nodes_csv(tmp_path, [_row(10, "A", heater=True)])
+    text = (tmp_path / "nodes.csv").read_text(encoding="utf-8").splitlines()
+    text[0] += ",role_json"
+    text[1] += ",{not json"
+    (tmp_path / "nodes.csv").write_text("\n".join(text) + "\n", encoding="utf-8")
+    assert load_role_manifest(tmp_path).heater_ids == [10]
+
+
+def test_a_stale_v1_cache_is_not_served(tmp_path):
+    """v1 cached "no roles" for every refreshed graph. Serving that would keep the
+    tables empty until the graph was rebuilt."""
+    _refreshed_nodes_csv(tmp_path, [(10, "HTR_A", {"node_id": 10, "is_heater": True})])
+    stat = (tmp_path / "nodes.csv").stat()
+    (tmp_path / ROLE_CACHE_FILENAME).write_text(
+        json.dumps({
+            "source_key": {"version": 1, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns},
+            "heaters": [], "sensors": [],
+        }),
+        encoding="utf-8",
+    )
+    assert load_role_manifest(tmp_path).heater_ids == [10]
