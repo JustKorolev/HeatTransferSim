@@ -47,15 +47,26 @@ class FailureThresholds:
 
     max_temperature_K: float = 1.0e4  # hard: divergence / non-physical high
     min_temperature_K: float = 0.0  # hard: below absolute zero => broken
-    max_temperature_rate_K_per_s: float = 500.0  # hard: runaway (per accepted step)
+    # Hard runaway guard. NOT a step-reject: halving dt only raises rate = dT/dt,
+    # so rejecting on it doom-loops (see _step_is_bad). It aborts the run instead,
+    # after this many consecutive steps over the limit -- the same shape as the
+    # drift guard below. Previously this was logged as a soft warning and nothing
+    # acted on it, so a run that hit 601 K/s carried on for another 8 minutes.
+    max_temperature_rate_K_per_s: float = 500.0
+    max_temperature_rate_abort_steps: int = 3  # 0 disables the abort (still logged)
     energy_drift_rel_tol: float = 0.10  # soft: |net_W - dU/dt| / scale (implicit disc. residual is a few %)
     # Hard divergence guard: if the solve stops conserving energy this badly for
     # this many consecutive steps, the run is producing garbage (the 3443 K / drift
     # ~1.0 case) -- abort with a clear reason instead of burning hours, still
     # finalizing plots. High threshold + sustained count so a real transient never
     # trips it. 0 steps disables it.
+    #
+    # The count is deliberately small. At 20 it could not fire on a large graph at
+    # all: a 3M-node run took ~100 s/step, so 20 consecutive gross-drift steps is
+    # over half an hour of solving known garbage, and a run stopped by hand before
+    # then recorded drift > 1.0 for its last three steps without ever aborting.
     energy_drift_abort_rel: float = 0.9
-    energy_drift_abort_steps: int = 20
+    energy_drift_abort_steps: int = 3
     forbid_negative_heater_power: bool = True  # soft: controller commanded cooling
     max_dt_retries: int = 6  # step-back halvings before giving up (hard)
     step_wall_timeout_s: float = 0.0  # 0 = disabled watchdog
@@ -285,6 +296,7 @@ class SimulationRunner:
         self._exit_status = "running"
         self._last_step_profile: dict[str, float] = {}
         self._consecutive_high_drift = 0
+        self._consecutive_high_rate = 0
         self._start_wall = time.time()
 
     # -- lifecycle ---------------------------------------------------------- #
@@ -910,6 +922,21 @@ class SimulationRunner:
             # is worthless. _finalize still runs (via run()'s finally), so the partial
             # plots/report survive and show the divergence.
             if (
+                thr.max_temperature_rate_abort_steps > 0
+                and self._consecutive_high_rate >= thr.max_temperature_rate_abort_steps
+            ):
+                self._checkpoint(prepared, state, step)
+                raise _HardFailure(
+                    f"max |dT/dt| exceeded {thr.max_temperature_rate_K_per_s:g} K/s for "
+                    f"{self._consecutive_high_rate} consecutive steps at t={state.time_s:.1f}s "
+                    f"(max T={float(np.max(temps)):.3g} K): the solve is running away. Halving dt "
+                    "cannot fix a high RATE (it raises dT/dt), so this aborts rather than "
+                    "retrying. Likely causes: dt far larger than the graph's fastest thermal "
+                    "time constant, degenerate near-zero node capacitances, or a linear solver "
+                    "returning converged-but-wrong steps. Aborting so the run does not waste "
+                    "further time."
+                )
+            if (
                 thr.energy_drift_abort_steps > 0
                 and self._consecutive_high_drift >= thr.energy_drift_abort_steps
             ):
@@ -1251,7 +1278,9 @@ class SimulationRunner:
         s.setdefault("avg_temp_K", []).append(float(np.mean(live)))
         s.setdefault("max_temp_K", []).append(float(np.max(live)))
         s.setdefault("min_temp_K", []).append(float(np.min(live)))
-        # Max temperature rate -- soft divergence indicator (logged, not fatal).
+        # Max temperature rate -- a divergence indicator, not a solver failure, so
+        # it counts consecutive violations for the run loop's abort rather than
+        # rejecting the step (halving dt raises dT/dt; see _step_is_bad).
         if dt > 0 and prev.shape == temps.shape:
             delta = np.abs(temps - prev)
             mask = getattr(prepared, "inert_cell_mask", None)
@@ -1260,7 +1289,14 @@ class SimulationRunner:
             rate = float(np.max(delta)) / dt if delta.size else 0.0
             s.setdefault("max_temp_rate_K_per_s", []).append(rate)
             if rate > thr.max_temperature_rate_K_per_s:
-                self._log_event("high_temp_rate", f"t={state.time_s:.1f}s max|dT/dt|={rate:.3g}K/s (soft)")
+                self._consecutive_high_rate += 1
+                self._log_event(
+                    "high_temp_rate",
+                    f"t={state.time_s:.1f}s max|dT/dt|={rate:.3g}K/s "
+                    f"({self._consecutive_high_rate} consecutive)",
+                )
+            else:
+                self._consecutive_high_rate = 0
         # sensor temps + tracking error
         if sensor_ix:
             # Report the READOUT temperature -- the weighted mean over the sensor's

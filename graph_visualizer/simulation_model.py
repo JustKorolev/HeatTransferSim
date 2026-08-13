@@ -999,11 +999,55 @@ class PreparedSimulation:
         self._physical_step_mask_cache = mask
         return mask
 
+    # Bound on how far a single accepted step may move a real body cell. A flat
+    # 10,000 K bound was far too loose to catch what actually detonates a stiff
+    # cryogenic run: a CG solve that reports convergence and hands back a state
+    # 6,000 K hot slipped straight through it. Scale the bound to how far the LAST
+    # accepted step actually moved, so the check tightens as a run settles:
+    #   limit = clamp(FACTOR * last accepted delta, FLOOR, CEILING)
+    # The floor keeps a cold start -- no history, and legitimately fast-moving --
+    # from being rejected; the ceiling is the old absolute bound, so this is never
+    # looser than what it replaced.
+    _STEP_DELTA_LIMIT_FACTOR = 10.0
+    _STEP_DELTA_LIMIT_FLOOR_K = 500.0
+    _STEP_DELTA_LIMIT_CEILING_K = 1.0e4
+
+    def _physical_step_delta_limit_K(self) -> float:
+        reference = float(getattr(self, "_last_accepted_delta_K", 0.0) or 0.0)
+        if not np.isfinite(reference) or reference < 0.0:
+            reference = 0.0
+        return min(
+            float(self._STEP_DELTA_LIMIT_CEILING_K),
+            max(float(self._STEP_DELTA_LIMIT_FLOOR_K), float(self._STEP_DELTA_LIMIT_FACTOR) * reference),
+        )
+
     @staticmethod
-    def _implicit_step_is_physical(previous: np.ndarray, result: Any, mask: np.ndarray | None = None) -> bool:
+    def _masked_max_delta_K(previous: np.ndarray, result: Any, mask: np.ndarray | None = None) -> float:
+        """Largest per-cell temperature change over the policed (real body) cells.
+        NaN when the result cannot be compared to the previous state."""
+        if result is None:
+            return float("nan")
+        candidate = np.asarray(result, dtype=float).reshape(-1)
+        reference = np.asarray(previous, dtype=float).reshape(-1)
+        if candidate.shape != reference.shape:
+            return float("nan")
+        if mask is not None and mask.shape == candidate.shape:
+            candidate = candidate[mask]
+            reference = reference[mask]
+        if candidate.size == 0:
+            return 0.0
+        return float(np.max(np.abs(candidate - reference)))
+
+    @staticmethod
+    def _implicit_step_is_physical(
+        previous: np.ndarray,
+        result: Any,
+        mask: np.ndarray | None = None,
+        max_delta_K: float = _STEP_DELTA_LIMIT_CEILING_K,
+    ) -> bool:
         """Reject a step whose result is non-finite, drives an (absolute) temperature
-        negative, or changes any cell by an implausibly large amount. Catches the
-        case where the linear solver reports convergence on the residual but the
+        negative, or changes any cell by more than ``max_delta_K``. Catches the case
+        where the linear solver reports convergence on the residual but the
         ill-conditioned stage matrix yields a solution with enormous error. Only the
         masked (real body) cells are policed -- heater/marker nodes are ignored."""
         if result is None:
@@ -1014,15 +1058,14 @@ class PreparedSimulation:
             return False
         if mask is not None and mask.shape == candidate.shape:
             candidate = candidate[mask]
-            reference = reference[mask]
         if candidate.size == 0:
             return bool(np.all(np.isfinite(candidate)))
         if not bool(np.all(np.isfinite(candidate))):
             return False
         if float(np.min(candidate)) < -1.0:  # absolute temperature cannot go negative
             return False
-        # Nothing physical moves by 10,000 K in a single step; larger => solver garbage.
-        return float(np.max(np.abs(candidate - reference))) < 1.0e4
+        delta = PreparedSimulation._masked_max_delta_K(previous, result, mask)
+        return bool(np.isfinite(delta)) and delta < float(max_delta_K)
 
     def _run_implicit_step(
         self,
@@ -1040,12 +1083,14 @@ class PreparedSimulation:
         the stage matrix approaches the well-conditioned diag(C)) and retry with
         more substeps, up to _MAX_STEP_SUBDIVISIONS doublings."""
         mask = self._physical_step_check_mask()
+        delta_limit_K = self._physical_step_delta_limit_K()
         temp_floor = float(getattr(self.params, "implicit_temperature_floor_K", 0.0) or 0.0)
         temp_ceiling = float(getattr(self.params, "implicit_temperature_ceiling_K", 0.0) or 0.0)
         min_substeps = 1
         last_error: Exception | None = None
         best_finite: np.ndarray | None = None  # finest finite attempt, for best-effort fallback
         best_backend: tuple[SparseImplicitStepper, str] | None = None
+        previous_floor_clamped = -1  # cells the floor clamped on the previous attempt
         for attempt in range(int(self._MAX_STEP_SUBDIVISIONS) + 1):
             result: np.ndarray | None = None
             backend_stepper: SparseImplicitStepper | None = None
@@ -1068,25 +1113,24 @@ class PreparedSimulation:
                     last_error = exc
                     result = None
             # Positivity clamp: a residual solver error on the ill-conditioned stiff
-            # system can drive cells below zero (unphysical). Clamp up to the floor
-            # BEFORE the physical check so the common cryo over-cool overshoot is
-            # neutralized cheaply here, rather than doom-looping the substep retry
-            # (which cannot help a constant cooling source anyway). A genuine
-            # positive runaway (huge upward jump) still fails the check and subdivides.
+            # system can drive cells below zero (unphysical). Clamp up to the floor,
+            # but REMEMBER that it bound -- a clamped step is a wrong step, not a
+            # rounded one, and it is rejected below rather than accepted silently.
             #
             # Both clamps DESTROY ENERGY where they bind, so they must never act
             # silently: a run whose temperatures are being quietly rewritten looks
             # healthy (energy drift stays small) while modelling something else
             # entirely. Count the cells each clamp touches and surface it.
+            floor_clamped = 0
             if result is not None and temp_floor > 0.0:
                 values = np.asarray(result, dtype=float)
-                clamped = int(np.count_nonzero(values < temp_floor))
-                if clamped:
+                floor_clamped = int(np.count_nonzero(values < temp_floor))
+                if floor_clamped:
                     self.clamped_below_floor_cells = (
-                        getattr(self, "clamped_below_floor_cells", 0) + clamped
+                        getattr(self, "clamped_below_floor_cells", 0) + floor_clamped
                     )
                     self._warn_once(
-                        f"Temperature floor clamped {clamped} cell(s) up to {temp_floor:g} K; "
+                        f"Temperature floor clamped {floor_clamped} cell(s) up to {temp_floor:g} K; "
                         "energy is not conserved where this binds."
                     )
                 result = np.maximum(values, temp_floor)
@@ -1105,7 +1149,25 @@ class PreparedSimulation:
             if result is not None and bool(np.all(np.isfinite(np.asarray(result, dtype=float)))):
                 best_finite = np.asarray(result, dtype=float)
                 best_backend = (backend_stepper, backend_name) if backend_stepper is not None else None
-            if result is not None and self._implicit_step_is_physical(temperatures, result, mask):
+            if result is not None and self._implicit_step_is_physical(temperatures, result, mask, delta_limit_K):
+                # A bound floor clamp means the solve drove real cells below absolute
+                # zero: reject and subdivide, because a smaller h shrinks alpha and
+                # the stage matrix approaches the well-conditioned diag(C). Accepting
+                # the clamped state instead is what let a diverging run look healthy
+                # while its cells were being quietly rewritten to 1 mK.
+                #
+                # Bail out of the retry as soon as subdivision stops REDUCING the
+                # overshoot: that is the signature of a genuine over-cool (a constant
+                # cooling source the graph cannot absorb), which subdividing cannot
+                # fix, and chasing it was the original doom-loop.
+                if floor_clamped and (previous_floor_clamped < 0 or floor_clamped < previous_floor_clamped):
+                    previous_floor_clamped = floor_clamped
+                    self._warn_once(
+                        f"Rejected implicit step that clamped {floor_clamped} cell(s) to the "
+                        f"{temp_floor:g} K floor; subdividing to solve it accurately instead."
+                    )
+                    min_substeps = max(2, min_substeps * 2)
+                    continue
                 if backend_stepper is not None:
                     self._record_implicit_profile(backend_stepper, backend_name, profile)
                 if attempt > 0:
@@ -1114,6 +1176,7 @@ class PreparedSimulation:
                     self._warn_once(
                         f"Implicit step subdivided {min_substeps}x to stay stable through stiff cryogenic cells."
                     )
+                self._last_accepted_delta_K = self._masked_max_delta_K(temperatures, result, mask)
                 return result
             min_substeps = max(2, min_substeps * 2)  # subdivide and retry
         # Subdivision did not recover a fully physical step. Never raise (that would

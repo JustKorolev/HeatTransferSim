@@ -1477,6 +1477,30 @@ class GraphVisualizerModelTests(unittest.TestCase):
         # The 1e7/1e9-K blowup signature: an implausibly large single-step jump.
         self.assertFalse(PreparedSimulation._implicit_step_is_physical(prev, prev + 1.0e8))
 
+    def test_implicit_step_delta_bound_scales_to_the_last_accepted_step(self) -> None:
+        """A flat 10,000 K bound let a converged-but-wrong CG solve through: the
+        run that motivated this jumped 203 K -> 6013 K in one step and was accepted
+        as physical. The bound now tracks the last accepted step's movement."""
+        prepared = PreparedSimulation(
+            node_ids=np.array([1, 2], dtype=int),
+            z=np.array([50.0, 50.0, 1.0]),
+            initial_temperatures_K=np.array([50.0, 50.0]),
+            params=SimulationParameters(),
+        )
+        # No history yet -> the cold-start floor, not the old 1e4 ceiling.
+        self.assertEqual(prepared._physical_step_delta_limit_K(), 500.0)
+        # A settled run: the last accepted step moved 149 K, so a 5810 K jump is
+        # now rejected where the flat bound accepted it.
+        prepared._last_accepted_delta_K = 148.9
+        limit = prepared._physical_step_delta_limit_K()
+        self.assertAlmostEqual(limit, 1489.0)
+        prev = np.array([203.0, 203.0])
+        self.assertFalse(PreparedSimulation._implicit_step_is_physical(prev, prev + 5810.0, None, limit))
+        self.assertTrue(PreparedSimulation._implicit_step_is_physical(prev, prev + 100.0, None, limit))
+        # Never looser than the absolute bound it replaced.
+        prepared._last_accepted_delta_K = 1.0e9
+        self.assertEqual(prepared._physical_step_delta_limit_K(), 1.0e4)
+
     def _stub_prepared_for_stepper(self, stepper):
         temps = np.array([300.0, 100.0, 5.0])
         prepared = PreparedSimulation(
@@ -1508,6 +1532,50 @@ class GraphVisualizerModelTests(unittest.TestCase):
         np.testing.assert_allclose(result, temps)  # applied the stable solve, not the garbage
         self.assertEqual(stub.substep_calls[0], 1)  # started at the adaptive count
         self.assertGreaterEqual(max(stub.substep_calls), 4)  # escalated subdivision to recover
+
+    def test_implicit_step_rejects_a_bound_temperature_floor_clamp(self) -> None:
+        """The floor clamp used to run BEFORE the physicality check, so a solve that
+        drove real cells below absolute zero was clamped to 1 mK and then accepted --
+        min >= 0 held by construction. Subdivide and solve it accurately instead."""
+        class _OvershootsUntilSubdivided:
+            def __init__(self) -> None:
+                self.substep_calls: list[int] = []
+
+            def step(self, temps, source, min_substeps=1):
+                self.substep_calls.append(int(min_substeps))
+                if int(min_substeps) >= 4:
+                    return np.asarray(temps, dtype=float).copy()
+                overshot = np.asarray(temps, dtype=float).copy()
+                overshot[: max(1, 3 // int(min_substeps))] = -20.0  # fewer cells each subdivision
+                return overshot
+
+        stub = _OvershootsUntilSubdivided()
+        prepared, temps = self._stub_prepared_for_stepper(stub)
+        result = prepared._run_implicit_step(temps, np.zeros_like(temps))
+        np.testing.assert_allclose(result, temps)  # the accurate solve, not the clamped one
+        self.assertGreaterEqual(max(stub.substep_calls), 4)
+        self.assertTrue(any("Rejected implicit step" in w for w in prepared.warnings))
+
+    def test_constant_overcool_stops_retrying_instead_of_doom_looping(self) -> None:
+        """A genuine over-cool -- a cooling source the graph cannot absorb -- clamps
+        the same cells however finely the step is subdivided. Subdividing cannot fix
+        that, so the retry stops as soon as it stops reducing the overshoot."""
+        class _AlwaysOvercools:
+            def __init__(self) -> None:
+                self.attempts = 0
+
+            def step(self, temps, source, min_substeps=1):
+                self.attempts += 1
+                out = np.asarray(temps, dtype=float).copy()
+                out[0] = -5.0
+                return out
+
+        stub = _AlwaysOvercools()
+        prepared, temps = self._stub_prepared_for_stepper(stub)
+        result = prepared._run_implicit_step(temps, np.zeros_like(temps))
+        self.assertEqual(float(result[0]), prepared.params.implicit_temperature_floor_K)
+        self.assertEqual(stub.attempts, 2)  # one retry to prove it does not help, then accept
+        self.assertFalse(any("best-effort" in w for w in prepared.warnings))
 
     def test_implicit_step_falls_back_gracefully_when_unrecoverable(self) -> None:
         # If subdivision never recovers, the step must NOT raise (that would regress

@@ -73,6 +73,30 @@ def test_abort_threshold_is_enabled_by_default() -> None:
     thr = runner.cfg.thresholds
     assert thr.energy_drift_abort_steps > 0
     assert thr.energy_drift_abort_rel >= 0.5  # only genuine, gross divergence
+    # Small enough to fire on a large graph. At 20 it could not: a 3M-node run
+    # took ~100 s/step, so the guard needed half an hour of known-garbage solving
+    # before it would act, and runs were stopped by hand long before that.
+    assert thr.energy_drift_abort_steps <= 5
+
+
+def test_high_temperature_rate_counts_consecutive_violations() -> None:
+    """The rate guard was documented as hard and implemented as a soft log line, so
+    a run that hit 601 K/s carried on. It now counts toward an abort."""
+    runner = _runner()
+    thr = runner.cfg.thresholds
+    assert thr.max_temperature_rate_abort_steps > 0
+
+    prev = np.array([40.0, 40.0])
+    hot = prev.copy()
+    for i in range(3):
+        hot = hot + 10.0 * thr.max_temperature_rate_K_per_s  # dt=1 -> rate well over
+        _collect_step(runner, prev, hot.copy(), float(i))
+        prev = hot.copy()
+    assert runner._consecutive_high_rate == 3
+
+    # A calm step resets it, so a single real transient cannot abort a run.
+    _collect_step(runner, prev, prev.copy(), 99.0)
+    assert runner._consecutive_high_rate == 0
 
 
 class _RampPrepared:

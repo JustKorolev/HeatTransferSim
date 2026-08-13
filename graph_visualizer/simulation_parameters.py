@@ -220,7 +220,16 @@ class SimulationParameters:
     # C~1e-3, next to bulk ~50) and leaves well-conditioned graphs untouched. 0
     # disables it; the effective floor is max(implicit_capacitance_floor_J_K,
     # max(C)/implicit_capacitance_condition_cap).
-    implicit_capacitance_condition_cap: float = 0.0
+    #
+    # ON by default, unlike the fixed floor above. The objection to that one -- it
+    # adds heat capacity that does not exist -- does not apply here, because a
+    # 100x cap only touches cells whose capacitance is already three orders below
+    # the graph's largest, which no real mesh produces. It is also the term that
+    # matters with temperature-dependent properties on: cp(T) is clamped to the
+    # NIST curves' lower bound, so a cell sitting at the temperature floor still
+    # loses ~30x of its capacitance versus 50 K, and that spread alone is enough
+    # to make jacobi-CG return a converged-but-wrong solution.
+    implicit_capacitance_condition_cap: float = 100.0
     implicit_temperature_floor_K: float = 1.0e-3
     # Optional upper clamp (0 = disabled). KEEP IT DISABLED unless you know why you
     # are enabling it: the runaway "artifact cells" it was written for were cells

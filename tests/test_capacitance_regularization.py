@@ -72,16 +72,27 @@ def test_auto_floor_leaves_well_conditioned_graph_untouched() -> None:
     assert np.array_equal(out, C)
 
 
-def test_capacitance_floor_is_off_by_default() -> None:
-    """The capacitance floor existed to stop tiny-C cells exploding -- a symptom of
-    the zero-Laplacian bug (temperature-dependent properties rebuilt L(T) from an
-    empty edge set, so every cell was thermally isolated and any deposited power
-    ran away). With conduction restored those cells are coupled and the implicit
-    solver handles the stiffness, so the floor only adds heat capacity that does
+def test_fixed_capacitance_floor_is_off_by_default() -> None:
+    """The FIXED floor existed to stop tiny-C cells exploding -- a symptom of the
+    zero-Laplacian bug (temperature-dependent properties rebuilt L(T) from an empty
+    edge set, so every cell was thermally isolated and any deposited power ran
+    away). With conduction restored those cells are coupled and the implicit solver
+    handles the stiffness, so an absolute floor only adds heat capacity that does
     not exist. Off by default; still available as an explicit knob."""
     p = SimulationParameters()
     assert p.implicit_capacitance_floor_J_K == 0.0
-    assert p.implicit_capacitance_condition_cap == 0.0
+
+
+def test_auto_condition_cap_is_on_by_default() -> None:
+    """The auto cap is the one that should default ON: it is scale-free, so it
+    touches only cells already three orders of magnitude below the graph's largest
+    capacitance (see test_auto_floor_leaves_well_conditioned_graph_untouched). That
+    spread is what makes jacobi-CG return a converged-but-wrong solution on a
+    cryogenic graph, and with cp(T) active it appears at runtime rather than at
+    build time -- a cell parked at the temperature floor keeps only ~1/30th of its
+    50 K capacitance, because the NIST curves clamp at their lower bound."""
+    p = SimulationParameters()
+    assert p.implicit_capacitance_condition_cap == 100.0
 
 
 def test_temperature_floor_stays_on_as_a_positivity_guard() -> None:
