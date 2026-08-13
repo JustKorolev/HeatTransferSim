@@ -18,6 +18,12 @@ class AllocationResult:
     solver_success: bool
     solver_message: str
     warnings: tuple[str, ...] = ()
+    # Conditioning of this allocation, so a run can say WHICH part of the demand it
+    # is declining to chase instead of thrashing between near-equivalent solutions.
+    singular_values: tuple[float, ...] = ()
+    lambda_effective: float = 0.0
+    suppressed_directions: int = 0
+    attenuated_command_fraction: float = 0.0
 
 
 def weighted_rms_error(errors: np.ndarray, weights: np.ndarray) -> float:
@@ -49,6 +55,7 @@ def allocate_thermal_rate_qp(
     # POSITIONALLY, so a new positional parameter would silently land in u_ref's slot.
     absolute_target: bool = False,
     undershoot_weight: float = 1.0,
+    lambda_u_relative: float = 1.0e-4,
 ) -> AllocationResult:
     raw_B = np.asarray(B_dyn, dtype=float)
     if raw_B.ndim != 2:
@@ -129,6 +136,11 @@ def allocate_thermal_rate_qp(
             max_delta_power=delta_limit[positive_power],
             u_ref=reference[positive_power],
             absolute_target=absolute_target,
+            # Forward these: dropping them silently disabled the asymmetric
+            # undershoot penalty and the conditioning-scaled regularizer on any run
+            # where a single heater was disabled or configured with 0 W.
+            undershoot_weight=undershoot_weight,
+            lambda_u_relative=lambda_u_relative,
         )
         u = np.zeros(nh, dtype=float)
         u[positive_power] = sub_result.u
@@ -142,6 +154,10 @@ def allocate_thermal_rate_qp(
             bool(sub_result.solver_success),
             str(sub_result.solver_message),
             tuple(warnings + list(sub_result.warnings)),
+            sub_result.singular_values,
+            sub_result.lambda_effective,
+            sub_result.suppressed_directions,
+            sub_result.attenuated_command_fraction,
         )
 
     zero_rows = [index for index, row in enumerate(B) if not np.any(np.abs(row) > 0.0)]
@@ -180,7 +196,33 @@ def allocate_thermal_rate_qp(
     # modes; only the target anchor differs.
     anchor = np.zeros_like(command) if absolute_target else B @ previous
     b_parts = [sqrt_weights * (command - drift + anchor)]
-    lam = max(0.0, float(lambda_u))
+
+    # Tikhonov weight, scaled to THIS gain matrix's spectrum.
+    #
+    # lambda_u is an absolute number, but it is compared against sigma^2 of B -- so
+    # the same value damps completely differently on two graphs whose gains differ
+    # by an order of magnitude, and "0.001" carries no meaning until you know
+    # ||B||. On no_mli_high_res_v3 (sigma_1 = 33.0, sigma_27 = 0.090) the configured
+    # 0.001 left the weakest direction 89% undamped, so the allocator inverted
+    # through it: the setpoints' random +-0.5 K scatter projects almost entirely
+    # onto those weak directions, and chasing it cost 11 W per K and flipped the
+    # active heater set on 99% of steps -- 15 W pulses into single cells that
+    # reached 250 K.
+    #
+    # lambda_u_relative fixes the scale: it is the singular-value RATIO below which
+    # a direction is treated as unreachable, so lam >= (ratio * sigma_1)^2 damps
+    # everything below ratio*sigma_1 while leaving the dominant mode untouched
+    # (at the 1e-4 default, sigma_1 keeps 99.99% of its gain).
+    #
+    # It only ever RAISES an already-positive lambda_u. lambda_u = 0 means the
+    # caller wants no regularization at all -- the exact-decoupling path, and what
+    # the QP-is-the-decoupler tests assert -- and scaling must not quietly switch
+    # it back on.
+    left_singular, singular_values, _ = np.linalg.svd(B, full_matrices=False)
+    sigma_max = float(singular_values[0]) if singular_values.size else 0.0
+    lam_absolute = max(0.0, float(lambda_u))
+    lam_floor = max(0.0, float(lambda_u_relative)) * sigma_max**2
+    lam = max(lam_absolute, lam_floor) if lam_absolute > 0.0 else 0.0
     if lam > 0.0:
         scale = float(np.sqrt(lam))
         A_parts.append(scale * np.eye(nh))
@@ -196,6 +238,29 @@ def allocate_thermal_rate_qp(
 
     target = command - drift + anchor
     asym = max(1.0, float(undershoot_weight))
+
+    # How much of the demand this allocation is deliberately NOT chasing. A
+    # direction with sigma^2 << lam is damped to nothing, and the component of the
+    # target lying along it is simply not delivered -- which is the right answer,
+    # but only if the run SAYS so rather than reporting a tracking error whose
+    # cause looks like mistuning.
+    if lam > 0.0 and singular_values.size:
+        damping = singular_values**2 / (singular_values**2 + lam)
+        projection = left_singular.T @ target
+        total = float(np.linalg.norm(projection))
+        attenuated_fraction = (
+            float(np.linalg.norm((1.0 - damping) * projection) / total) if total > 1.0e-12 else 0.0
+        )
+        suppressed = int(np.count_nonzero(damping < 0.5))
+    else:
+        attenuated_fraction = 0.0
+        suppressed = 0
+    conditioning = (
+        tuple(float(v) for v in singular_values),
+        float(lam),
+        suppressed,
+        attenuated_fraction,
+    )
 
     def _assemble(channel_weights):
         root = np.sqrt(channel_weights)
@@ -246,6 +311,7 @@ def allocate_thermal_rate_qp(
             False,
             str(exc),
             tuple(warnings),
+            *conditioning,
         )
     if not result.success:
         warnings.append(f"MIMO bounded allocation solver did not converge: {result.message}")
@@ -264,4 +330,5 @@ def allocate_thermal_rate_qp(
         bool(result.success),
         str(result.message),
         tuple(warnings),
+        *conditioning,
     )

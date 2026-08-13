@@ -37,6 +37,14 @@ class SimulationParameters:
     mimo_controller_enabled: bool = False
     mimo_default_heater_max_power_W: float = 30.0
     mimo_lambda_u: float = 1.0e-3
+    # Control-effort penalty as a singular-value RATIO of the gain matrix, rather
+    # than the absolute number above. sigma below this fraction of sigma_max is a
+    # direction the plant barely has, so inverting through it costs enormous power
+    # for no delivered temperature and makes the allocation flip between
+    # near-equivalent solutions step to step. The effective weight is
+    # max(mimo_lambda_u, (mimo_lambda_u_relative * sigma_max)**2), so an explicit
+    # absolute value is never overridden downward. 0 disables the scaling.
+    mimo_lambda_u_relative: float = 1.0e-4
     mimo_rho_du: float = 0.0
     # Max rate of change of a heater's COMMANDED power (W/s), per heater: a step may
     # move the command by at most slew*dt. This models the DRIVER, not the thermal
@@ -105,6 +113,12 @@ class SimulationParameters:
     # short of the command. 1.0 absorbs the whole shortfall; 0 disables the
     # correction and lets the integral wind against the actuator bounds.
     mimo_pi_antiwindup_gain: float = 1.0
+    # Quiescence threshold for latching the held passive reference (r - y_passive).
+    # y_ss = y_passive + G u only holds at steady state, so the capture waits until
+    # the sensors stop moving this fast; until then the feedforward is 0 and the
+    # integral carries the load. Latching during a transient bakes an arbitrary
+    # constant into every subsequent command.
+    mimo_pi_passive_latch_rate_K_per_s: float = 1.0e-4
     # How much more the allocator dislikes leaving a sensor SHORT of its target than
     # pushing it past. 1.0 is symmetric (the old behaviour).
     #

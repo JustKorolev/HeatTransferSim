@@ -97,6 +97,66 @@ def test_qp_allocation_reproduces_a_feasible_command() -> None:
     assert np.allclose(np.asarray(result.u).reshape(-1), u_true, atol=1e-6)
 
 
+def _ill_conditioned_plant():
+    """A gain matrix with one dominant direction and one nearly-absent one, like the
+    real cryostat's (sigma_1 = 33.0 carrying 81% of the energy, sigma_27 = 0.090).
+
+    Scaled so sigma_1 is O(10) like the real G, which is the whole point: at this
+    scale the relative floor (1e-4 * sigma_1^2 = 0.01) exceeds a configured absolute
+    lambda_u of 1e-3, exactly as it does on no_mli_high_res_v3.
+    """
+    return np.array([[5.0, 5.0], [5.0, 5.0 + 5.0e-3]])
+
+
+def test_zero_lambda_u_stays_off_despite_the_relative_floor() -> None:
+    """lambda_u = 0 means the caller wants exact decoupling, not "pick a default for
+    me". Scaling must only ever raise an already-positive weight."""
+    from graph_visualizer.mimo_controller import allocate_thermal_rate_qp
+
+    G = _ill_conditioned_plant()
+    result = allocate_thermal_rate_qp(
+        G, np.zeros(2), G @ np.array([1.0, 0.5]), np.ones(2),
+        np.full(2, 1.0e6), np.zeros(2), 0.0, 0.0, lambda_u_relative=1.0e-4,
+    )
+    assert result.lambda_effective == 0.0
+    assert np.allclose(np.asarray(result.u).reshape(-1), [1.0, 0.5], atol=1e-6)
+
+
+def test_lambda_u_is_raised_to_the_gain_matrix_scale() -> None:
+    """An absolute lambda_u is compared against sigma^2, so the same number damps
+    completely differently on two graphs whose gains differ by an order of
+    magnitude. On the real cryostat 1e-3 left the weakest direction 89% undamped,
+    and the allocator inverted through it -- 11 W per K of a direction the plant
+    barely has, flipping the active heater set on 99% of steps."""
+    from graph_visualizer.mimo_controller import allocate_thermal_rate_qp
+
+    G = _ill_conditioned_plant()
+    sigma = np.linalg.svd(G, compute_uv=False)
+    kwargs = dict(
+        max_delta_power=None, absolute_target=True, undershoot_weight=1.0,
+    )
+    scaled = allocate_thermal_rate_qp(
+        G, np.zeros(2), np.array([1.0, 1.0]), np.ones(2),
+        np.full(2, 1.0e6), np.zeros(2), 1.0e-3, 0.0,
+        lambda_u_relative=1.0e-4, **kwargs,
+    )
+    assert scaled.lambda_effective == pytest.approx(1.0e-4 * sigma[0] ** 2)
+    assert scaled.lambda_effective > 1.0e-3, "must be RAISED, not left at the absolute value"
+    # The weak direction is damped out, and the run can say so rather than reporting
+    # a tracking error that looks like mistuning.
+    assert scaled.suppressed_directions == 1
+    assert len(scaled.singular_values) == 2
+
+    # A well-conditioned plant is left alone: nothing is suppressed.
+    benign = allocate_thermal_rate_qp(
+        np.eye(2), np.zeros(2), np.array([1.0, 1.0]), np.ones(2),
+        np.full(2, 1.0e6), np.zeros(2), 1.0e-3, 0.0,
+        lambda_u_relative=1.0e-4, **kwargs,
+    )
+    assert benign.suppressed_directions == 0
+    assert benign.attenuated_command_fraction < 1.0e-2
+
+
 def test_decoupler_can_demand_negative_power_and_the_qp_absorbs_it() -> None:
     """Raising one sensor while holding others down needs COOLING at some heaters,
     which G+ will happily ask for and one-sided heaters cannot deliver. The
@@ -354,11 +414,41 @@ def test_empty_enabled_set_drives_no_heater(monkeypatch) -> None:
 
 # --- the feedforward reference ----------------------------------------------- #
 def _ref(sim, setpoints):
-    """The (r - y_passive) reference the law hands the QP, for given setpoints."""
+    """The (r - y_passive) reference the law hands the QP, for given setpoints.
+
+    Evaluated twice: y_passive is only captured once the sensors have gone quiet,
+    and quiescence needs two readings to measure. This stub's plant does not respond
+    to power, so the first evaluation's command is cleared before the second --
+    y_passive = y - G u_prev, and the premise these tests state is "the sensors read
+    50 K with the heaters at 0 W".
+    """
     for sid, target in zip([20, 21], setpoints):
         sim.model.nodes[sid].controller_setpoint_K = target
     sim._mimo_pi_controller_power_vector(update_state=True)
+    sim.controller_last_power_by_heater = {}
+    sim._mimo_pi_controller_power_vector(update_state=True)
     return np.array(sim.controller_allocator_diagnostics["reference_deviation_K"])
+
+
+def test_the_passive_reference_is_not_captured_during_a_transient(monkeypatch) -> None:
+    """y_ss = y_passive + G u only holds at steady state, so capturing on the first
+    evaluation records whatever the plant happened to be doing then and holds it for
+    the whole run. A 3600 s run of no_mli_high_res_v3 latched all 27 entries at
+    exactly 48.000 K -- the uniform initial temperature -- and fed the QP that
+    arbitrary constant for an hour. While the plant is still moving the feedforward
+    must be zero and the integral must carry the load."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    moving = iter([50.0, 50.0, 70.0, 70.0, 90.0, 90.0])
+    monkeypatch.setattr(
+        "graph_visualizer.simulation_model.sensor_readout_temperature_K",
+        lambda model, idx, temps, nid: next(moving),
+    )
+    for sid in (20, 21):
+        sim.model.nodes[sid].controller_setpoint_K = 60.0
+    for _ in range(3):
+        sim._mimo_pi_controller_power_vector(update_state=True)
+    assert sim.controller_mimo_pi_passive_K is None, "must not latch mid-transient"
+    assert np.allclose(sim.controller_allocator_diagnostics["reference_deviation_K"], 0.0)
 
 
 def test_reference_is_the_rise_needed_above_the_passive_equilibrium(monkeypatch) -> None:

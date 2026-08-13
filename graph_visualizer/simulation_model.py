@@ -979,7 +979,14 @@ class PreparedSimulation:
         if key_text in seen:
             return
         seen.add(key_text)
-        self.warnings.append(message)
+        # Diagnostics must never be the thing that breaks a run. This is reachable
+        # from the controller path, which unit tests drive on hand-built objects
+        # that carry no warnings list.
+        bucket = getattr(self, "warnings", None)
+        if bucket is None:
+            bucket = []
+            self.warnings = bucket
+        bucket.append(message)
 
     def _physical_step_check_mask(self) -> np.ndarray | None:
         """Boolean mask (over node_ids) of REAL body cells for the step-sanity check.
@@ -1829,28 +1836,57 @@ class PreparedSimulation:
         """(r - y_passive) over the controlled sensors, the reference the QP inverts.
 
         y_passive -- what the sensors settle to with the controlled heaters at 0 W --
-        is captured once, from the first evaluation, as ``y - G u_prev`` (u_prev is
-        the last command, so this is exact whenever the plant is at steady state and
-        a first-order estimate otherwise).
+        is captured ONCE, as ``y - G u_prev``, and then held. It is deliberately not
+        refreshed: re-estimating it would turn the law into
+        u = u_prev + G+(Kp e + Ki integral), making Kp a second integrator, and a
+        double integrator on a plant whose slowest mode is ~24 h overshoots by
+        construction. Holding it keeps this a textbook PI.
 
-        It is deliberately NOT refreshed each step. Re-estimating it would turn the
-        law into u = u_prev + G+(Kp e + Ki integral) -- Kp becomes a second
-        integrator, and a double integrator on a plant whose slowest mode is ~24 h
-        overshoots by construction. Holding it keeps this a textbook PI.
+        Because it is held forever, WHEN it is captured decides the whole run. The
+        identity ``y_ss = y_passive + G u`` only holds at steady state, so capturing
+        on the first evaluation records whatever the plant happened to be doing
+        then. On a run started from a uniform initial temperature that is not an
+        estimate of anything: a 3600 s run of no_mli_high_res_v3 latched all 27
+        entries at exactly 48.000 K -- the initial condition the user typed -- and
+        fed the QP an arbitrary constant feedforward for the whole hour.
 
-        A run that starts far from equilibrium therefore captures a biased reference.
-        That is what the integral is for, and it is strictly better than the mean-
-        setpoint offset this replaced, which was biased AND coupled the channels.
+        So it latches only once the sensors have gone quiet (max |dy/dt| under
+        ``mimo_pi_passive_latch_rate_K_per_s``). Until then the feedforward is zero
+        and the integral supplies the holding power on its own -- slower to converge
+        than a correct feedforward, but unbiased, which a wrong constant is not. On
+        a plant far slower than the run, it simply never latches, and a pure PI is
+        the honest answer.
         """
         held = getattr(self, "controller_mimo_pi_passive_K", None)
-        if held is None or np.asarray(held).shape[0] != len(setpoints):
-            u_prev = np.array(
-                [float(self.controller_last_power_by_heater.get(int(h), 0.0)) for h in heater_ids],
-                dtype=float,
-            )
-            held = np.where(valid, y - G @ u_prev, 0.0)
-            self.controller_mimo_pi_passive_K = held
-        return np.where(valid, setpoints - np.asarray(held, dtype=float), 0.0)
+        if held is not None and np.asarray(held).shape[0] == len(setpoints):
+            return np.where(valid, setpoints - np.asarray(held, dtype=float), 0.0)
+
+        previous_y = getattr(self, "_mimo_pi_previous_y_K", None)
+        current_y = np.asarray(y, dtype=float).reshape(-1)
+        self._mimo_pi_previous_y_K = current_y.copy()
+        # Keep the attribute defined even while unlatched, so "captured yet?" is a
+        # None check for every caller rather than a hasattr check for some of them.
+        self.controller_mimo_pi_passive_K = None
+        zero = np.zeros(len(setpoints), dtype=float)
+        if previous_y is None or previous_y.shape != current_y.shape:
+            return zero  # first evaluation: no rate to judge quiescence by yet
+        dt = max(float(self.params.dt_s), 1.0e-12)
+        rate = float(np.max(np.abs(current_y - previous_y))) / dt if current_y.size else 0.0
+        tolerance = max(0.0, float(getattr(self.params, "mimo_pi_passive_latch_rate_K_per_s", 1.0e-4)))
+        if rate > tolerance:
+            return zero
+        u_prev = np.array(
+            [float(self.controller_last_power_by_heater.get(int(h), 0.0)) for h in heater_ids],
+            dtype=float,
+        )
+        held = np.where(valid, current_y - G @ u_prev, 0.0)
+        self.controller_mimo_pi_passive_K = held
+        self._warn_once(
+            f"MIMO PI latched its passive reference at max|dy/dt|={rate:.3g} K/s "
+            f"(mean y_passive={float(np.mean(held[valid])) if np.any(valid) else 0.0:.3f} K); "
+            "the (r - y_passive) feedforward is active from here."
+        )
+        return np.where(valid, setpoints - held, 0.0)
 
     def _mimo_pi_scheme_active(self) -> bool:
         """True when the static-decoupling MIMO PI should run: scheme selected,
@@ -2042,6 +2078,7 @@ class PreparedSimulation:
             # v_cmd is the steady deviation the plant must HOLD, not a change to it.
             absolute_target=True,
             undershoot_weight=float(getattr(self.params, "mimo_undershoot_weight", 1.0)),
+            lambda_u_relative=float(getattr(self.params, "mimo_lambda_u_relative", 1.0e-4)),
         )
         u = np.asarray(result.u, dtype=float).reshape(-1)
 
@@ -2057,7 +2094,21 @@ class PreparedSimulation:
             # configured) reads as both saturated low and saturated high.
             "saturated_high": int(np.count_nonzero((maxima > 0.0) & (u >= maxima - 1.0e-9))),
             "slew_rate_limit_W_per_s": [float(v) for v in slew],
-            "cond_G": float(np.linalg.cond(G)),
+            # From the allocator's own SVD rather than a second np.linalg.cond call
+            # on the same matrix every step.
+            "cond_G": (
+                float(result.singular_values[0] / result.singular_values[-1])
+                if result.singular_values and result.singular_values[-1] > 0.0
+                else float("inf")
+            ),
+            "singular_values": [float(v) for v in result.singular_values],
+            # Which part of the demand the allocator is declining to chase, and why.
+            # An "unserved" channel on a well-conditioned plant is a tuning problem;
+            # the same channel sitting in a direction with sigma^2 << lambda is not,
+            # and only these numbers tell the two apart.
+            "lambda_effective": float(result.lambda_effective),
+            "suppressed_directions": int(result.suppressed_directions),
+            "attenuated_command_fraction": float(result.attenuated_command_fraction),
             # The held (r - y_passive) reference, so a run's feedforward can be
             # checked after the fact rather than inferred from the commands.
             "reference_deviation_K": [float(v) for v in r_dev],

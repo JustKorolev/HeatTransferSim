@@ -297,6 +297,10 @@ class SimulationRunner:
         self._last_step_profile: dict[str, float] = {}
         self._consecutive_high_drift = 0
         self._consecutive_high_rate = 0
+        # Bound before the loop: _finalize writes these out even for a run that
+        # died during prepare, when they are still empty.
+        self._last_allocator_diagnostics: dict = {}
+        self._last_conditioning_bucket: tuple | None = None
         self._start_wall = time.time()
 
     # -- lifecycle ---------------------------------------------------------- #
@@ -956,6 +960,7 @@ class SimulationRunner:
             self._last_allocator_diagnostics = dict(
                 getattr(prepared, "controller_allocator_diagnostics", {}) or {}
             )
+            self._log_allocator_conditioning(state)
             step += 1
 
             # --- snapshots / checkpoints / status ---
@@ -1155,6 +1160,36 @@ class SimulationRunner:
         for warning in warnings[seen:]:
             self._log_event("engine_warning", str(warning))
         self._logged_warning_count = len(warnings)
+
+    def _log_allocator_conditioning(self, state) -> None:
+        """Say, once, how much of the demand the allocator is not chasing.
+
+        A channel that will not track because it lives in a singular direction the
+        plant barely has is NOT a tuning problem, and reporting only its tracking
+        error invites hours of re-tuning that cannot help. Logged on a meaningful
+        change so it does not flood a 3600-step run.
+        """
+        d = self._last_allocator_diagnostics or {}
+        fraction = float(d.get("attenuated_command_fraction", 0.0) or 0.0)
+        suppressed = int(d.get("suppressed_directions", 0) or 0)
+        if not suppressed and fraction <= 0.01:
+            return
+        bucket = (suppressed, round(fraction, 1))
+        if bucket == getattr(self, "_last_conditioning_bucket", None):
+            return
+        self._last_conditioning_bucket = bucket
+        values = [float(v) for v in (d.get("singular_values") or [])]
+        span = (
+            f"sigma {values[0]:.3g}..{values[-1]:.3g}, " if len(values) >= 2 else ""
+        )
+        self._log_event(
+            "allocator_conditioning",
+            f"t={state.time_s:.1f}s {suppressed} of {len(values) or '?'} gain direction(s) "
+            f"damped out ({span}lambda_eff={float(d.get('lambda_effective', 0.0)):.3g}); "
+            f"{100.0 * fraction:.0f}% of the commanded deviation lies in them and is NOT "
+            "being chased. Tracking error in those channels is a plant limit, not a tuning "
+            "problem -- the setpoints they encode are not reachable with non-negative power.",
+        )
 
     def _step_is_bad(self, temps, prev, dt, thr) -> tuple[bool, str]:
         # Only genuine SOLVER failures reject-and-halve (smaller dt can help those):
@@ -1671,12 +1706,30 @@ class SimulationRunner:
             except Exception as exc:  # noqa: BLE001 - never lose the run over a report
                 self._log_event("verification_failed", f"{type(exc).__name__}: {exc}")
         self._write_timeseries()
+        self._write_controller_diagnostics()
         self._write_plots_and_report()
         self._update_status(
             len(self._series.get("time_s", [])),
             self._series.get("time_s", [0.0])[-1] if self._series.get("time_s") else 0.0,
         )
         self._log_event("run_end", f"status={self._exit_status}")
+
+    def _write_controller_diagnostics(self) -> None:
+        """Persist the allocator's last diagnostics.
+
+        These were computed every step and thrown away: the gain matrix's spectrum,
+        the effective regularizer, the per-channel shortfall and which sensors were
+        unserved. Reconstructing them afterwards means re-running the sys-id, so a
+        finished run could not answer "was that channel unreachable or mistuned?"
+        at all. Written even on a failed run -- that is when it is wanted most.
+        """
+        d = self._last_allocator_diagnostics or {}
+        if not d:
+            return
+        try:
+            _atomic_write_json(self.out_dir / "controller_diagnostics.json", d)
+        except Exception as exc:  # noqa: BLE001 - never lose a run over a report
+            self._log_event("controller_diagnostics_failed", f"{type(exc).__name__}: {exc}")
 
     def _write_timeseries(self) -> None:
         if not self._series.get("time_s"):
