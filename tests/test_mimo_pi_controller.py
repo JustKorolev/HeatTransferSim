@@ -736,3 +736,19 @@ def test_a_diagnostic_evaluation_cannot_latch_the_passive_reference(monkeypatch)
     # And a real step while the plant is still moving must not latch either.
     sim._mimo_pi_controller_power_vector(update_state=True)
     assert sim.controller_mimo_pi_passive_K is None
+
+
+def test_diagnostics_carry_the_loop_state_so_a_summary_needs_no_checkpoint(monkeypatch) -> None:
+    """The integrator and the held passive reference lived only inside a checkpoint,
+    so answering "is the integral winding or stalled?" after a run meant shipping a
+    32 MB temperature field to read 27 floats. They belong in the diagnostics."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    ref = _ref(sim, [60.0, 60.0])
+    d = sim.controller_allocator_diagnostics
+    for key in ("integral_K_s", "passive_reference_K", "error_K", "v_cmd_K"):
+        assert key in d, key
+    assert len(d["integral_K_s"]) == len(ref)
+    assert d["passive_reference_K"] == pytest.approx([50.0, 50.0])
+    assert d["error_K"] == pytest.approx([10.0, 10.0])
+    # And it must round-trip through JSON -- this file is written out verbatim.
+    json.dumps(d)

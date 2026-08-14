@@ -2198,6 +2198,22 @@ class PreparedSimulation:
             if cap > 0.0:
                 committed = np.clip(committed, -cap, cap)
             self.controller_mimo_pi_integral = committed
+            # Publish the loop's own state alongside the allocation. Until now the
+            # integrator and the held passive reference existed ONLY inside a
+            # checkpoint, so answering "is the integral winding or stalled?" after a
+            # run meant shipping a 32 MB temperature field to read 27 floats. They
+            # are the two numbers that explain a loop that is not converging.
+            diagnostics = getattr(self, "controller_allocator_diagnostics", None)
+            if isinstance(diagnostics, dict):
+                held = getattr(self, "controller_mimo_pi_passive_K", None)
+                diagnostics["integral_K_s"] = [float(v) for v in committed]
+                diagnostics["passive_reference_K"] = (
+                    [float(v) for v in np.asarray(held, dtype=float).reshape(-1)]
+                    if held is not None
+                    else None
+                )
+                diagnostics["error_K"] = [float(v) for v in error]
+                diagnostics["v_cmd_K"] = [float(v) for v in v_cmd]
             self.controller_weighted_rms_error = (
                 float(np.sqrt(np.mean(error[valid] ** 2))) if valid.any() else 0.0
             )
