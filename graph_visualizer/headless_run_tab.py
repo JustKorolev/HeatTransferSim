@@ -290,13 +290,16 @@ class HeadlessRunTab:
         heater_layout = self.QtWidgets.QVBoxLayout(heater_box)
         heater_help = self.QtWidgets.QLabel(
             "Every heater uses the Controller defaults on the left. Fill a cell to "
-            "override that heater's own limit; blank leaves it on the default."
+            "override that heater's own limit; blank leaves it on the default. "
+            "Filling 'manual W' instead drives that heater OPEN-LOOP at a fixed "
+            "wattage -- it stops taking controller commands, which is what an "
+            "open-loop step test against a column of the gain matrix needs."
         )
         heater_help.setWordWrap(True)
         heater_layout.addWidget(heater_help)
-        self.heater_table = self.QtWidgets.QTableWidget(0, 4)
+        self.heater_table = self.QtWidgets.QTableWidget(0, 5)
         self.heater_table.setHorizontalHeaderLabels(
-            ["heater", "max power W", "slew W/s", "efficiency"]
+            ["heater", "max power W", "slew W/s", "efficiency", "manual W"]
         )
         self.heater_table.horizontalHeader().setStretchLastSection(True)
         self.heater_table.setMinimumHeight(180)
@@ -872,7 +875,7 @@ class HeadlessRunTab:
             item = self.QtWidgets.QTableWidgetItem(label)
             item.setFlags(self.QtCore.Qt.ItemIsEnabled)
             table.setItem(index, 0, item)
-            for column in (1, 2, 3):
+            for column in (1, 2, 3, 4):
                 table.setItem(index, column, self.QtWidgets.QTableWidgetItem(""))
         if announce and not rows and folder is not None:
             self._status(f"{folder.name} declares no heaters in its nodes.csv.", True)
@@ -892,6 +895,7 @@ class HeadlessRunTab:
             (1, "heater_max_power_W"),
             (2, "heater_slew_rate_W_per_s"),
             (3, "heater_efficiency"),
+            (4, "sensor_manual_power_W"),
         )
         for index, row in enumerate(rows):
             try:
@@ -917,7 +921,7 @@ class HeadlessRunTab:
         if table is None:
             return
         for index in range(table.rowCount()):
-            for column in (1, 2, 3):
+            for column in (1, 2, 3, 4):
                 table.setItem(index, column, self.QtWidgets.QTableWidgetItem(""))
 
     def collect_setpoint_overrides(self) -> dict[int, float]:

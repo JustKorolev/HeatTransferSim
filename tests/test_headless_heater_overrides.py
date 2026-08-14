@@ -229,6 +229,33 @@ def test_the_run_writes_the_overrides_onto_the_heater(tmp_path) -> None:
     assert node.heater.heater_efficiency == pytest.approx(1.0), "unnamed fields keep the default"
 
 
+def test_manual_power_is_written_on_the_node_and_forces_open_loop(tmp_path) -> None:
+    """The open-loop step knob. sensor_manual_power_W lives on the heater NODE, not
+    on its .heater limits record, and the manual command path is skipped entirely
+    for a heater tagged "mimo" -- so setting the wattage without switching the mode
+    would be accepted, logged as applied, and then silently ignored all run."""
+    node = _heater_node()
+    node.sensor_control_mode = "mimo"
+    model = type("M", (), {"nodes": {10: node}})()
+    runner = _runner({10: {"sensor_manual_power_W": 10.0}})
+    runner._apply_heater_overrides(model)
+    assert node.sensor_manual_power_W == pytest.approx(10.0)
+    assert node.sensor_control_mode == "manual"
+    assert any("manual" in message for _kind, message in runner._logged)
+
+
+def test_manual_power_also_clears_the_legacy_mimo_tag(tmp_path) -> None:
+    """_heater_controller_mode reads heater_control.mode as well, and "mimo" there
+    wins over the node's own mode."""
+    from graph_visualizer.simulation_model import _heater_controller_mode
+
+    node = _heater_node()
+    node.heater_control.mode = "mimo"
+    model = type("M", (), {"nodes": {10: node}})()
+    _runner({10: {"sensor_manual_power_W": 7.5}})._apply_heater_overrides(model)
+    assert _heater_controller_mode(node) == "manual", "the heater would take no manual power"
+
+
 def test_an_override_for_a_node_that_is_not_a_heater_is_reported(tmp_path) -> None:
     """Applying nothing and saying nothing would run all night on default limits
     while the user believes a heater was capped."""

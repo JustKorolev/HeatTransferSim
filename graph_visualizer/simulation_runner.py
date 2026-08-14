@@ -702,19 +702,30 @@ class SimulationRunner:
         "heater_slew_rate_W_per_s",
         "heater_efficiency",
     )
+    # Written on the heater NODE rather than its .heater sub-object: the manual
+    # command path reads sensor_manual_power_W off the node (or its paired sensor),
+    # not off the limits record.
+    _HEATER_NODE_OVERRIDE_FIELDS = ("sensor_manual_power_W",)
 
     def _apply_heater_overrides(self, model) -> None:
-        """Write per-heater limit overrides onto the heater nodes.
+        """Write per-heater overrides onto the heater nodes.
 
         A heater not named here keeps the controller defaults, and a named heater
         keeps them for every field left out -- so this is strictly additive to the
-        Controller section's single default. Both control schemes read these values
-        per heater when they build u_max and the slew vector.
+        Controller section's single default. Both control schemes read the limit
+        fields per heater when they build u_max and the slew vector.
+
+        ``sensor_manual_power_W`` is the open-loop knob: it drives one heater at a
+        fixed wattage so a step response can be measured against a column of the DC
+        gain matrix. It only reaches the plant from a heater in manual mode, and a
+        graph whose heaters are tagged for MIMO would otherwise ignore it in
+        silence, so naming it here also switches that heater to manual.
         """
         overrides = self.cfg.heater_overrides or {}
         if not overrides:
             return
         applied = 0
+        manual: list[int] = []
         missing: list[int] = []
         for raw_id, fields in overrides.items():
             node = model.nodes.get(int(raw_id))
@@ -725,9 +736,23 @@ class SimulationRunner:
             for name in self._HEATER_OVERRIDE_FIELDS:
                 if name in fields:
                     setattr(heater, name, float(fields[name]))
+            for name in self._HEATER_NODE_OVERRIDE_FIELDS:
+                if name in fields:
+                    setattr(node, name, float(fields[name]))
+                    node.sensor_control_mode = "manual"
+                    legacy = getattr(node, "heater_control", None)
+                    if str(getattr(legacy, "mode", "")).strip().lower() == "mimo":
+                        legacy.mode = "manual"
+                    manual.append(int(raw_id))
             applied += 1
         if applied:
             self._log_event("heater_overrides", f"{applied} heater(s) given explicit limits")
+        if manual:
+            self._log_event(
+                "heater_overrides",
+                f"{len(manual)} heater(s) switched to manual at a fixed commanded power: "
+                f"{sorted(manual)[:10]}. They are driven open-loop and ignore the controller.",
+            )
         if missing:
             # Silently ignoring these would run the whole night on default limits
             # while the user believes a heater was capped.
