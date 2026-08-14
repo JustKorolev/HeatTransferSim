@@ -752,3 +752,50 @@ def test_diagnostics_carry_the_loop_state_so_a_summary_needs_no_checkpoint(monke
     assert d["error_K"] == pytest.approx([10.0, 10.0])
     # And it must round-trip through JSON -- this file is written out verbatim.
     json.dumps(d)
+
+
+def test_a_solved_passive_reference_is_used_on_the_first_step(monkeypatch, tmp_path) -> None:
+    """G is a DEVIATION gain -- it says how far the sensors rise per watt, above a
+    baseline it never states. Estimating that baseline from a running plant is
+    hopeless when the dominant mode is ~24 h: one run latched the initial condition,
+    another never latched at all and made its integral discover the whole 25 W of
+    holding power, and shortening that ramp with a bigger ki overshot to 48 W and
+    cooked cells to 1211 K. Solved beside the matrix, it is right on step 1."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    sim._mimo_pi_cache = {
+        "G": np.array([[0.5, 0.1], [0.1, 0.5]]),
+        "passive_K": 21.289,
+        "sensor_ids": [20, 21],
+        "heater_ids": [10, 11],
+        "per_sensor": {},
+        "preset_kp": None,
+        "preset_ki": None,
+    }
+    sim._mimo_pi_cache_path = ""
+    monkeypatch.setattr(type(sim), "_load_mimo_pi_gain", lambda self: self._mimo_pi_cache)
+    for sid in (20, 21):
+        sim.model.nodes[sid].controller_setpoint_K = 50.0
+    sim._mimo_pi_controller_power_vector(update_state=True)
+    ref = np.array(sim.controller_allocator_diagnostics["reference_deviation_K"])
+    # 50 - 21.289, available immediately rather than after hours of integration.
+    assert ref == pytest.approx([28.711, 28.711], abs=1e-3)
+
+
+def test_the_solved_reference_matches_the_linearisation_g_was_built_from() -> None:
+    """It must be the tangent's zero crossing, not the lift curve's own no-load
+    floor. At T_op = 50 K those differ by 6.4 K -- about 5 W of holding power."""
+    from graph_visualizer.cryocooler import PT60LiftCurve
+    from graph_visualizer.modal_reduction import (
+        cryocooler_ground_conductance_W_K,
+        cryocooler_passive_temperature_K,
+    )
+
+    T_op = 50.0
+    curve = PT60LiftCurve(max_power_w=150.0)
+    slope = cryocooler_ground_conductance_W_K(T_op)
+    passive = cryocooler_passive_temperature_K(T_op)
+    assert passive == pytest.approx(T_op - curve.cooling_capacity_w(T_op) / slope)
+    assert passive == pytest.approx(21.289, abs=1e-2)
+    assert passive < curve.minimum_temperature_k - 5.0, "must not be the no-load floor"
+    # The tangent removes zero power there, which is what "passive" means.
+    assert slope * (passive - T_op) == pytest.approx(-curve.cooling_capacity_w(T_op))

@@ -81,6 +81,39 @@ def cryocooler_ground_conductance_W_K(
     return float(max(slope, 1.0e-3))
 
 
+def cryocooler_passive_temperature_K(
+    operating_temperature_K: float,
+    *,
+    max_power_w: float = 150.0,
+    capacity_scale: float = 1.0,
+    delta_K: float = 1.0,
+) -> float:
+    """Temperature the LINEARISED sink pulls to with no heat applied.
+
+    The DC operator grounds the plant with a conductance g = dQ/dT taken at the
+    operating point, which models the cooler as removing g*(T - T_star). T_star is
+    where that tangent line crosses zero power:
+
+        T_star = T_op - Q(T_op) / (dQ/dT)
+
+    NOT the lift curve's own no-load floor (27.7 K for a PT60). The tangent is what
+    G was built from, so the feedforward and the gain have to share it or they
+    describe different plants. At T_op = 50 K the two differ by 6.4 K, which is
+    ~5 W of holding power on this cryostat.
+    """
+    from .cryocooler import PT60LiftCurve
+
+    curve = PT60LiftCurve(max_power_w=float(max_power_w), capacity_scale=float(capacity_scale))
+    slope = cryocooler_ground_conductance_W_K(
+        operating_temperature_K,
+        max_power_w=max_power_w,
+        capacity_scale=capacity_scale,
+        delta_K=delta_K,
+    )
+    T = float(operating_temperature_K)
+    return float(T - curve.cooling_capacity_w(T) / slope)
+
+
 # ------------------------------------------------------------------ reduction primitives
 # These are shared with tools/analyze_plant_modes.py (which imports them).
 
@@ -225,9 +258,29 @@ def exact_dc_gain(
         )
         L_dc = (csr_matrix(Lm) + diags(np.where(is_cryo, total_ground / cryo_cells, 0.0))).tocsr()
         ground = "cryocooler"
+        # The passive equilibrium, in closed form.
+        #
+        # G is a DEVIATION gain: it says how far the sensors rise per watt, above a
+        # baseline it never states. The controller needs that baseline -- the law is
+        # y_ss = y_passive + G u, so the reference it inverts is (r - y_passive) --
+        # and estimating it from a running plant is hopeless here, because the
+        # dominant mode is ~24 h and no run is ever quiet enough to measure it.
+        #
+        # But it does not need measuring. The DC operator is L + diag(g), a
+        # Laplacian plus a conductance to the sink, and the linearised cooler
+        # removes g*(T - T_star). With the heaters at zero the steady state solves
+        # (L + diag(g)) T = g*T_star, and a Laplacian annihilates constants, so
+        # T = T_star uniformly satisfies it exactly -- no solve, and it inherits
+        # exactly the linearisation G was built from.
+        passive_K = cryocooler_passive_temperature_K(float(T_op_K))
+        _report(progress, f"Passive equilibrium (heaters at 0 W): {passive_K:.3f} K.")
     else:
         L_dc = (csr_matrix(Lm) + diags(Gradm)).tocsr()
         ground = "radiation"
+        # Same argument would give T_env uniformly, but this branch never receives
+        # it -- so report nothing rather than guess, and the controller falls back
+        # to its runtime estimate.
+        passive_K = None
 
     G, RGA = dc_gain_and_rga(L_dc, F, S, monitor, progress=progress, workers=workers)
     controlled_ids = np.asarray(sensor_ids)[~monitor]
@@ -247,6 +300,7 @@ def exact_dc_gain(
         "all_sensor_ids": [int(v) for v in sensor_ids],
         "monitor": monitor,
         "dc_ground": ground,
+        "passive_K": passive_K,
         "cond": float(np.linalg.cond(G)),
         # RGA is the standard test for whether per-pair SISO control is viable.
         # A negative diagonal entry means that pairing's gain CHANGES SIGN once the

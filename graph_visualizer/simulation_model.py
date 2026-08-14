@@ -1903,6 +1903,22 @@ class PreparedSimulation:
         quiescence test passes on the first step, which is the very failure this
         gate exists to prevent. It latched at 46.928 K that way on a 100 ks run.
         """
+        # A gain matrix built with the passive equilibrium solved alongside it needs
+        # none of the machinery below: the baseline is known exactly, from the same
+        # linearisation G came from, and it is right on the first step. Estimating
+        # it from the plant is the fallback for older artifacts, not the plan.
+        solved = (self._load_mimo_pi_gain() or {}).get("passive_K")
+        if solved is not None:
+            held = np.full(len(setpoints), float(solved), dtype=float)
+            if getattr(self, "controller_mimo_pi_passive_K", None) is None:
+                self.controller_mimo_pi_passive_K = held
+                self._warn_once(
+                    f"MIMO PI passive reference {float(solved):.3f} K, solved with the gain "
+                    "matrix rather than estimated from the run. The feedforward is correct "
+                    "from the first step, so the integral only has to trim it."
+                )
+            return np.where(valid, setpoints - held, 0.0)
+
         held = getattr(self, "controller_mimo_pi_passive_K", None)
         if held is not None and np.asarray(held).shape[0] == len(setpoints):
             return np.where(valid, setpoints - np.asarray(held, dtype=float), 0.0)
@@ -1978,8 +1994,16 @@ class PreparedSimulation:
             if not np.all(np.isfinite(G)):
                 raise ValueError("G contains non-finite entries.")
             preset = load_mimo_pi_preset(Path(path)) or {}
+            # The baseline G is a deviation from, solved at build time. Absent on
+            # matrices built before it existed, and on radiation-grounded ones.
+            passive = (data.metadata or {}).get("passive_reference_K")
+            try:
+                passive = float(passive) if passive is not None and np.isfinite(float(passive)) else None
+            except (TypeError, ValueError):
+                passive = None
             cache = {
                 "G": G,
+                "passive_K": passive,
                 "sensor_ids": sensor_ids,
                 "heater_ids": heater_ids,
                 "per_sensor": preset.get("per_sensor", {}),

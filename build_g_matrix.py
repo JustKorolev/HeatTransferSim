@@ -96,6 +96,11 @@ def build(args: argparse.Namespace) -> Path:
             "method": "exact_dc_solve",
             "T_op_K": float(args.t_op),
             "dc_ground": result["dc_ground"],
+            # The baseline G is a deviation from. Without it the controller has to
+            # discover the whole holding power through its integral, which on a
+            # ~24 h plant means hours of ramp and an overshoot when anyone
+            # shortens it: one run reached 48 W against a 25 W requirement.
+            "passive_reference_K": result["passive_K"],
             "cond_G": result["cond"],
             "rga_diag_min": result["rga_diag_min"],
             "rga_diag_negative": result["rga_diag_negative"],
