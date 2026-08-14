@@ -34,7 +34,10 @@ class _State:
 
 def _runner() -> SimulationRunner:
     with TemporaryDirectory() as directory:
-        return SimulationRunner(RunConfig(graph_folder=str(Path(directory) / "g")))
+        runner = SimulationRunner(RunConfig(graph_folder=str(Path(directory) / "g")))
+    runner._logged = []
+    runner._log_event = lambda kind, message: runner._logged.append((kind, message))
+    return runner
 
 
 def _collect_step(runner, prev, temps, t) -> None:
@@ -135,3 +138,39 @@ def test_drift_compares_against_the_power_that_drove_the_step() -> None:
     assert drift, "drift series must be populated"
     # Every recorded step conserved energy exactly -> drift ~0, not ~0.13.
     assert max(drift) < 1e-9, f"off-by-one reintroduced: {drift}"
+
+
+class _Osc:
+    """Feeds _log_command_oscillation a command history directly."""
+
+    def __init__(self, runner, pattern):
+        runner._series = {"time_s": list(range(len(pattern))), "heater_1_W": list(pattern)}
+        self.runner = runner
+
+
+def test_alternating_commands_are_reported_as_a_limit_cycle() -> None:
+    """Two runs burned 3.4 h and 7.7 h looking healthy -- energy conserved,
+    temperatures bounded, tracking even improving -- while the actuators bang-banged
+    at the Nyquist frequency. The tell is one number, so the run should say it."""
+    runner = _runner()
+    _Osc(runner, [10.0 + 5.0 * (-1) ** i for i in range(60)])
+    runner._log_command_oscillation(_State(600.0, np.zeros(2)))
+    kinds = [k for k, _m in runner._logged]
+    assert "command_oscillation" in kinds
+    message = next(m for k, m in runner._logged if k == "command_oscillation")
+    assert "ALTERNATING" in message and "mimo_pi_kp" in message
+
+
+def test_a_settled_loop_is_not_reported() -> None:
+    runner = _runner()
+    _Osc(runner, list(np.linspace(10.0, 12.0, 60)))     # smooth ramp, no alternation
+    runner._log_command_oscillation(_State(600.0, np.zeros(2)))
+    assert not [k for k, _m in runner._logged if k == "command_oscillation"]
+
+
+def test_still_commands_are_not_reported() -> None:
+    """A loop holding steady has ac1 dominated by float noise; amplitude gates it."""
+    runner = _runner()
+    _Osc(runner, [10.0] * 60)
+    runner._log_command_oscillation(_State(600.0, np.zeros(2)))
+    assert not [k for k, _m in runner._logged if k == "command_oscillation"]

@@ -986,6 +986,7 @@ class SimulationRunner:
                 getattr(prepared, "controller_allocator_diagnostics", {}) or {}
             )
             self._log_allocator_conditioning(state)
+            self._log_command_oscillation(state)
             step += 1
 
             # --- snapshots / checkpoints / status ---
@@ -1192,6 +1193,76 @@ class SimulationRunner:
         for warning in warnings[seen:]:
             self._log_event("engine_warning", str(warning))
         self._logged_warning_count = len(warnings)
+
+    # Trailing window for the oscillation test, and how negative the lag-1
+    # autocorrelation has to get before it is a limit cycle rather than noise.
+    # Measured on three real runs: -0.72 and -0.98 on the two that were
+    # oscillating, +0.84 on the one that was not, so -0.5 separates them with room
+    # on both sides.
+    _OSCILLATION_WINDOW = 40
+    _OSCILLATION_AC1 = -0.5
+    _OSCILLATION_MIN_AMPLITUDE_W = 1.0e-3
+
+    def _log_command_oscillation(self, state) -> None:
+        """Say when the heater commands are alternating every step.
+
+        A proportional loop closed through a sensor with no thermal lag goes
+        unstable at loop gain 1, and the failure looks like a healthy run: energy
+        conserves, temperatures stay bounded, tracking error even improves. What it
+        actually does is bang-bang the actuators at the Nyquist frequency, which
+        pumps power into whatever cells sit nearest the heaters. Two runs burned
+        3.4 h and 7.7 h before anyone noticed, and the tell was one number.
+        """
+        series = self._series
+        keys = [k for k in series if k.startswith("heater_") and k.endswith("_W") and "undeliv" not in k]
+        window = int(self._OSCILLATION_WINDOW)
+        if not keys or len(series.get("time_s", [])) < window + 2:
+            return
+        # Per heater, then amplitude-weighted -- NOT on the summed command. Heaters
+        # in a limit cycle alternate out of phase with each other, so the total is
+        # comparatively smooth while every individual command bang-bangs: the run
+        # that swung 7.7 W per heater per step summed to ac1 -0.65 and slipped
+        # under the threshold, while its worst heaters were at -0.82.
+        scores: list[tuple[float, float]] = []
+        for key in keys:
+            values = series[key]
+            if len(values) < window + 1:
+                continue
+            deltas = np.diff(np.asarray(values[-(window + 1):], dtype=float))
+            weight = float(np.mean(np.abs(deltas)))
+            # Gate on how much the step-to-step change VARIES, not how big it is.
+            # A command ramping steadily has a large mean |du| and no variation at
+            # all -- its deltas differ only in the last bits of the float -- so an
+            # autocorrelation computed on it is noise, and noise lands near -0.5
+            # about as often as not.
+            if float(np.std(deltas)) <= self._OSCILLATION_MIN_AMPLITUDE_W:
+                continue
+            centred = deltas - deltas.mean()
+            denominator = float(np.dot(centred, centred))
+            if denominator <= 0.0:
+                continue
+            scores.append((float(np.dot(centred[:-1], centred[1:]) / denominator), weight))
+        if not scores:
+            return
+        total_weight = sum(w for _a, w in scores)
+        ac1 = sum(a * w for a, w in scores) / total_weight
+        amplitude = total_weight
+        oscillating = ac1 <= self._OSCILLATION_AC1
+        if oscillating == bool(getattr(self, "_last_oscillating", False)):
+            return
+        self._last_oscillating = oscillating
+        if not oscillating:
+            self._log_event("command_oscillation", f"t={state.time_s:.1f}s commands settled (ac1={ac1:+.2f})")
+            return
+        self._log_event(
+            "command_oscillation",
+            f"t={state.time_s:.1f}s heater commands are ALTERNATING every step "
+            f"(lag-1 autocorrelation {ac1:+.2f} over {window} steps, mean |du|={amplitude:.3g} W). "
+            "This is a limit cycle, not control: the loop gain through a zero-lag "
+            "sensor exceeds 1, so the sign of the error flips every step. Energy and "
+            "temperatures can look fine while it pumps power into the cells nearest "
+            "the heaters. Reduce mimo_pi_kp -- it scales the loop gain directly.",
+        )
 
     def _log_allocator_conditioning(self, state) -> None:
         """Say, once, how much of the demand the allocator is not chasing.
@@ -1523,8 +1594,23 @@ class SimulationRunner:
                 ),
                 **_optional_state_arrays(prepared),
             )
+            self._prune_checkpoints()
         except Exception as exc:  # noqa: BLE001
             self._log_event("checkpoint_error", str(exc))
+
+    # Checkpoints to keep. Resume reads only the newest; the rest exist so a
+    # corrupt write does not strand the run, which two spares cover. A 7.7 h run
+    # wrote 46 of them at 24 MB -- 1.1 GB, against 533 KB for everything else the
+    # run produced -- and a full 100 ks run would leave 4 GB behind.
+    _CHECKPOINTS_KEPT = 3
+
+    def _prune_checkpoints(self) -> None:
+        stale = self._available_checkpoints()[: -int(self._CHECKPOINTS_KEPT)]
+        for path in stale:
+            try:
+                path.unlink()
+            except OSError:
+                pass  # a locked or already-removed file is not worth failing a run over
 
     def _available_checkpoints(self) -> list:
         """This run directory's checkpoints, oldest first. One definition, used by

@@ -1494,7 +1494,7 @@ class PreparedSimulation:
         if self.model is None:
             return {}
         if (_mimo_controller_is_active(self.model, self.heater_node_ids, self.params) or self._modal_scheme_active()) and not disable_mimo_controller:
-            self._mimo_controller_power_vector(update_state=False)
+            self._mimo_controller_power_vector(update_state=False, commands_only=True)
             diagnostics = self.controller_allocator_diagnostics or {}
             heater_ids = [int(value) for value in diagnostics.get("heater_ids", []) or []]
             commands = [float(value) for value in diagnostics.get("heater_commands_W", []) or []]
@@ -2017,7 +2017,7 @@ class PreparedSimulation:
         ki = np.array([float(per.get(int(s), {}).get("ki", ki0)) for s in sensor_ids], dtype=float)
         return kp, ki
 
-    def _mimo_pi_controller_power_vector(self, update_state: bool) -> np.ndarray:
+    def _mimo_pi_controller_power_vector(self, update_state: bool, commands_only: bool = False) -> np.ndarray:
         """Static-decoupling MIMO PI.
 
             e = r - y                          (K)
@@ -2037,14 +2037,26 @@ class PreparedSimulation:
         model = self.model
         node_index = self.node_index_by_id or {int(v): i for i, v in enumerate(self.node_ids)}
         # Cryocoolers and any manual (non-MIMO) heaters first, as the baseline.
-        powers = _controlled_heater_power_vector(
-            model, self.node_ids, self.temperatures_K, float(self.params.dt_s), self.params,
-            include_heater_inputs=True, update_pid_state=False, excluded_modes={"mimo"},
-            node_index_by_id=node_index, heater_node_ids=self.heater_node_ids,
-            cryocooler_node_ids=self.cryocooler_node_ids, cryocooler_devices=self.cryocooler_devices,
-            cryocooler_lift_curve=self.cryocooler_lift_curve,
-            cryocooler_diagnostics=self.last_cryocooler_diagnostics,
-            capacitance=self._live_capacitance(),
+        #
+        # commands_only skips it, and the deposition loop at the end. The
+        # actuator-readout path (heater_actuator_power_by_node) wants nothing but
+        # controller_allocator_diagnostics and throws this vector away, so building
+        # it there costs a 24 MB zeros array plus a walk over every heater's
+        # deposition cells -- ~150k iterations -- on every step. That walk is also
+        # where a 7.7 h run took a Windows access violation, faulting on the first
+        # write to a page the OS had reserved but never committed.
+        powers = (
+            np.zeros(0, dtype=float)
+            if commands_only
+            else _controlled_heater_power_vector(
+                model, self.node_ids, self.temperatures_K, float(self.params.dt_s), self.params,
+                include_heater_inputs=True, update_pid_state=False, excluded_modes={"mimo"},
+                node_index_by_id=node_index, heater_node_ids=self.heater_node_ids,
+                cryocooler_node_ids=self.cryocooler_node_ids, cryocooler_devices=self.cryocooler_devices,
+                cryocooler_lift_curve=self.cryocooler_lift_curve,
+                cryocooler_diagnostics=self.last_cryocooler_diagnostics,
+                capacitance=self._live_capacitance(),
+            )
         )
         gain = self._load_mimo_pi_gain()
         if gain is None:
@@ -2221,11 +2233,12 @@ class PreparedSimulation:
             self.controller_last_power_by_heater = {
                 int(h): float(c) for h, c in zip(heater_ids, u)
             }
-        for heater_id, command in zip(heater_ids, u):
-            _deposit_heater_command_power(powers, model, node_index, int(heater_id), float(command))
+        if not commands_only:
+            for heater_id, command in zip(heater_ids, u):
+                _deposit_heater_command_power(powers, model, node_index, int(heater_id), float(command))
         return powers
 
-    def _mimo_controller_power_vector(self, update_state: bool) -> np.ndarray:
+    def _mimo_controller_power_vector(self, update_state: bool, commands_only: bool = False) -> np.ndarray:
         """Dispatch to the selected heater controller.
 
         The PID+QP allocator that used to live here has been removed. It ran a
@@ -2239,7 +2252,7 @@ class PreparedSimulation:
         if self.model is None:
             return np.zeros(len(self.node_ids), dtype=float)
         if self._mimo_pi_scheme_active():
-            return self._mimo_pi_controller_power_vector(update_state)
+            return self._mimo_pi_controller_power_vector(update_state, commands_only)
         if self._modal_scheme_active():
             return self._modal_controller_power_vector(update_state)
         # No controller is selected/usable. Apply cryocoolers and any manual heaters
