@@ -1577,6 +1577,47 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(stub.attempts, 2)  # one retry to prove it does not help, then accept
         self.assertFalse(any("best-effort" in w for w in prepared.warnings))
 
+    def test_a_gpu_non_convergence_does_not_disable_the_gpu(self) -> None:
+        """A CG iteration-cap miss is a property of THIS stage matrix, which the
+        retry fixes by subdividing -- not a broken backend. Treating the two the
+        same cost a run a 10x slowdown: one non-convergence nulled the GPU stepper,
+        the very next subdivided attempt would have converged, and the remaining
+        226 steps ran on the CPU at 86 s each."""
+        from graph_visualizer.simulation_model import SolverConvergenceError
+
+        class _GpuFailsOnce:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def step(self, temps, source, min_substeps=1):
+                self.calls += 1
+                if int(min_substeps) < 2:
+                    raise SolverConvergenceError("cg did not converge; info=500, iterations=500")
+                return np.asarray(temps, dtype=float).copy()
+
+        gpu = _GpuFailsOnce()
+        prepared, temps = self._stub_prepared_for_stepper(_GpuFailsOnce())
+        prepared.gpu_implicit_stepper = gpu
+        prepared.sparse_implicit_stepper = None  # force the GPU to be the only backend
+        result = prepared._run_implicit_step(temps, np.zeros_like(temps))
+        np.testing.assert_allclose(result, temps)
+        self.assertIsNotNone(prepared.gpu_implicit_stepper, "GPU must survive a non-convergence")
+        self.assertGreaterEqual(gpu.calls, 2, "it must be retried after subdividing")
+
+    def test_a_broken_gpu_backend_is_still_disabled(self) -> None:
+        """A genuinely dead backend (cupy missing, OOM, bad shapes) must not be
+        retried every step forever -- only convergence failures are transient."""
+        class _GpuBroken:
+            def step(self, temps, source, min_substeps=1):
+                raise RuntimeError("cupy is not available")
+
+        prepared, temps = self._stub_prepared_for_stepper(
+            type("_Cpu", (), {"step": lambda self, t, s, min_substeps=1: np.asarray(t, dtype=float).copy()})()
+        )
+        prepared.gpu_implicit_stepper = _GpuBroken()
+        prepared._run_implicit_step(temps, np.zeros_like(temps))
+        self.assertIsNone(prepared.gpu_implicit_stepper, "a dead backend must be dropped")
+
     def test_implicit_step_falls_back_gracefully_when_unrecoverable(self) -> None:
         # If subdivision never recovers, the step must NOT raise (that would regress
         # vs. old behaviour) -- it applies a best-effort finite result and warns.

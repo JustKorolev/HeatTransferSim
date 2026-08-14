@@ -712,3 +712,27 @@ def test_shortfall_is_relative_to_the_channels_own_demand(monkeypatch) -> None:
     not. Judging both against an absolute threshold would report the wrong one."""
     big = _reach(monkeypatch, v=[40.0, 40.0], u=[21.0, 21.0], maxima=[30.0, 30.0])
     assert big["unserved_sensor_ids"] == [], big
+
+
+def test_a_diagnostic_evaluation_cannot_latch_the_passive_reference(monkeypatch) -> None:
+    """The controller is also evaluated with update_state=False for readouts and
+    diagnostics. Two evaluations inside one step see identical temperatures, so
+    dy/dt reads exactly 0 and the quiescence gate passes on the very first step --
+    which is the failure the gate exists to prevent. A 100 ks run latched at
+    46.928 K that way, reported as "max|dy/dt|=0 K/s"."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    for sid in (20, 21):
+        sim.model.nodes[sid].controller_setpoint_K = 60.0
+    moving = iter([50.0, 50.0, 70.0, 70.0, 90.0, 90.0, 110.0, 110.0])
+    monkeypatch.setattr(
+        "graph_visualizer.simulation_model.sensor_readout_temperature_K",
+        lambda model, idx, temps, nid: next(moving),
+    )
+    # A real step, then two diagnostic evaluations at the same temperatures.
+    sim._mimo_pi_controller_power_vector(update_state=True)
+    sim._mimo_pi_controller_power_vector(update_state=False)
+    sim._mimo_pi_controller_power_vector(update_state=False)
+    assert sim.controller_mimo_pi_passive_K is None, "a diagnostic pass must not latch"
+    # And a real step while the plant is still moving must not latch either.
+    sim._mimo_pi_controller_power_vector(update_state=True)
+    assert sim.controller_mimo_pi_passive_K is None

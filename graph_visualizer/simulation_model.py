@@ -69,6 +69,19 @@ def _resolve_solver_backend(backend: str) -> dict[str, Any]:
     }
 
 
+class SolverConvergenceError(RuntimeError):
+    """The iterative linear solver hit its iteration cap on this stage matrix.
+
+    Distinguished from a broken backend (cupy missing, out of memory, bad shapes)
+    because the two need opposite responses: a convergence failure is a property of
+    THIS step's stage matrix, which subdividing usually fixes, so the backend must
+    stay available for the retry. Treating it as a dead backend cost one run a 10x
+    slowdown -- a single non-convergence disabled the GPU permanently, the very next
+    subdivided attempt would have converged, and the remaining 226 steps ran on the
+    CPU at 86 s each.
+    """
+
+
 @dataclass
 class SparseImplicitStepper:
     """Implicit TR-BDF2 (or backward-Euler) thermal stepper.
@@ -412,7 +425,9 @@ class SparseImplicitStepper:
         self.last_info = int(info)
         self.last_iterations += int(iterations)
         if int(info) != 0:
-            raise RuntimeError(f"{self.solver} did not converge; info={int(info)}, iterations={int(iterations)}")
+            raise SolverConvergenceError(
+                f"{self.solver} did not converge; info={int(info)}, iterations={int(iterations)}"
+            )
         if result.shape != rhs.shape or not bool(xp.all(xp.isfinite(result))):
             raise RuntimeError(f"{self.solver} returned an invalid temperature vector.")
         return guess + result
@@ -963,6 +978,12 @@ class PreparedSimulation:
     # 2**N x the adaptive count (N=8 -> up to 256x) before giving up.
     _MAX_STEP_SUBDIVISIONS = 8
 
+    # How many GPU non-convergences to tolerate before conceding the backend cannot
+    # handle this graph. Counted over the whole run, not per step: a handful on the
+    # stiffest steps is normal and costs one wasted attempt each, while a graph that
+    # never converges on the GPU would otherwise pay that toll every step forever.
+    _MAX_GPU_CONVERGENCE_FAILURES = 25
+
     def _warn_once(self, message: str) -> None:
         """Append a warning at most once per distinct prefix.
 
@@ -1107,7 +1128,26 @@ class PreparedSimulation:
                     result = self.gpu_implicit_stepper.step(temperatures, source, min_substeps=min_substeps)
                     backend_stepper = self.gpu_implicit_stepper
                     backend_name = "gpu"
-                except Exception as exc:  # noqa: BLE001 - fall back to CPU on any GPU error
+                except SolverConvergenceError as exc:
+                    # Transient: this stage matrix was too ill-conditioned at this
+                    # substep count. Take the CPU result for this attempt but KEEP
+                    # the GPU -- the retry below subdivides, and the finer stage
+                    # matrix normally converges. Only give up on it if it fails
+                    # this way relentlessly, which means the graph is beyond it.
+                    self._gpu_convergence_failures = getattr(self, "_gpu_convergence_failures", 0) + 1
+                    if self._gpu_convergence_failures >= self._MAX_GPU_CONVERGENCE_FAILURES:
+                        self.warnings.append(
+                            f"GPU implicit solver gave up after {self._gpu_convergence_failures} "
+                            f"non-convergences; running on the CPU from here: {exc}"
+                        )
+                        self.gpu_implicit_stepper = None
+                    else:
+                        self._warn_once(
+                            f"GPU implicit step did not converge ({exc}); subdividing and retrying. "
+                            "The GPU stays enabled -- this is a property of the step, not the backend."
+                        )
+                    result = None
+                except Exception as exc:  # noqa: BLE001 - a genuinely broken backend
                     self.warnings.append(f"GPU implicit step failed; falling back to CPU implicit solver: {exc}")
                     self.gpu_implicit_stepper = None
                     result = None
@@ -1832,7 +1872,7 @@ class PreparedSimulation:
             "worst_shortfall_K": float(shortfall.max()) if shortfall.size else 0.0,
         }
 
-    def _mimo_pi_reference_deviation(self, G, heater_ids, setpoints, y, valid) -> np.ndarray:
+    def _mimo_pi_reference_deviation(self, G, heater_ids, setpoints, y, valid, update_state: bool = True) -> np.ndarray:
         """(r - y_passive) over the controlled sensors, the reference the QP inverts.
 
         y_passive -- what the sensors settle to with the controlled heaters at 0 W --
@@ -1856,18 +1896,26 @@ class PreparedSimulation:
         than a correct feedforward, but unbiased, which a wrong constant is not. On
         a plant far slower than the run, it simply never latches, and a pure PI is
         the honest answer.
+
+        Only a real step may sample the rate. The controller is also evaluated with
+        update_state=False for readouts and diagnostics, and two evaluations inside
+        one step see identical temperatures -- so dy/dt reads exactly 0 and the
+        quiescence test passes on the first step, which is the very failure this
+        gate exists to prevent. It latched at 46.928 K that way on a 100 ks run.
         """
         held = getattr(self, "controller_mimo_pi_passive_K", None)
         if held is not None and np.asarray(held).shape[0] == len(setpoints):
             return np.where(valid, setpoints - np.asarray(held, dtype=float), 0.0)
 
-        previous_y = getattr(self, "_mimo_pi_previous_y_K", None)
-        current_y = np.asarray(y, dtype=float).reshape(-1)
-        self._mimo_pi_previous_y_K = current_y.copy()
         # Keep the attribute defined even while unlatched, so "captured yet?" is a
         # None check for every caller rather than a hasattr check for some of them.
         self.controller_mimo_pi_passive_K = None
         zero = np.zeros(len(setpoints), dtype=float)
+        if not update_state:
+            return zero  # a diagnostic evaluation: same temperatures, no new sample
+        previous_y = getattr(self, "_mimo_pi_previous_y_K", None)
+        current_y = np.asarray(y, dtype=float).reshape(-1)
+        self._mimo_pi_previous_y_K = current_y.copy()
         if previous_y is None or previous_y.shape != current_y.shape:
             return zero  # first evaluation: no rate to judge quiescence by yet
         dt = max(float(self.params.dt_s), 1.0e-12)
@@ -2036,7 +2084,7 @@ class PreparedSimulation:
         # whole holding power (slow, and it winds up across the plant's multi-hour
         # transient). Worse, it coupled channels through the mean: giving one extra
         # sensor a setpoint shifted EVERY other channel's reference.
-        r_dev = self._mimo_pi_reference_deviation(G, heater_ids, setpoints, y, valid)
+        r_dev = self._mimo_pi_reference_deviation(G, heater_ids, setpoints, y, valid, update_state)
         v_cmd = r_dev + kp * error + ki * candidate
 
         # A heater the user unticked in the enabled-I/O table must not be driven.
