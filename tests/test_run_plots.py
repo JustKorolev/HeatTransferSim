@@ -85,3 +85,36 @@ def test_plots_are_rewritten_in_place_with_no_temp_files_left() -> None:
             (runner.plots_dir / name).stat().st_mtime_ns >= stamps[name] for name in first
         ), "the newest plot must overwrite the old one in place"
         assert all((runner.plots_dir / name).stat().st_size > 0 for name in first)
+
+
+def test_the_periodic_refresh_runs_out_of_process() -> None:
+    """matplotlib faulted natively inside savefig on a 3.2 h run -- a Windows access
+    violation in the font cache, which no try/except can catch because it kills the
+    interpreter. Drawing at every checkpoint turned a once-per-run risk into a
+    once-per-ten-minutes one and killed a run 22800 s into a 100000 s simulation.
+    The figures regenerate from timeseries.npz, so the draw belongs in a child whose
+    death costs a stale PNG."""
+    import numpy as np
+
+    with TemporaryDirectory() as directory:
+        runner = _runner(Path(directory))
+        np.savez(
+            runner.out_dir / "timeseries.npz",
+            time_s=np.arange(50.0),
+            avg_temp_K=np.linspace(48.0, 50.0, 50),
+            max_temp_K=np.linspace(50.0, 60.0, 50),
+            min_temp_K=np.linspace(47.0, 49.0, 50),
+        )
+        runner._spawn_plot_refresh()
+        assert runner._plot_process is not None, "must actually spawn"
+        first = runner._plot_process
+        runner._spawn_plot_refresh()
+        assert runner._plot_process is first, "must not pile up refreshes"
+        runner._reap_plot_refresh()
+        assert runner._plot_process is None
+        assert list(runner.plots_dir.glob("*.png")), "the child should have drawn"
+
+
+def test_reaping_tolerates_no_refresh_ever_having_run() -> None:
+    with TemporaryDirectory() as directory:
+        _runner(Path(directory))._reap_plot_refresh()  # must not raise
