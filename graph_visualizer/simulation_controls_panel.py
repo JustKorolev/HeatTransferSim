@@ -423,6 +423,24 @@ class SimulationControlsPanel:
             "model does not contain."
         )
         self._row(run_form, "mimo_pi_ki", self.mimo_pi_ki_spin, "MIMO PI Ki")
+        self.mimo_pi_filter_spin = self.double_spin(
+            0.0, 1.0e6, float(getattr(self.params, "mimo_pi_measurement_filter_s", 0.0)), 60.0
+        )
+        self.mimo_pi_filter_spin.setToolTip(
+            "Low-pass on the sensor readouts the loop regulates, in seconds. 0 = off.\n\n"
+            "Kp is the loop's only damping term, and on this plant it is capped near 0.1 by a "
+            "FAST path: sensors share cells with their heaters, those cells settle inside one "
+            "control step, and the proportional term closes an algebraic loop through them that "
+            "goes bang-bang above unity gain. The mode that actually needs damping rings three "
+            "orders slower (34 h, zeta ~ 0.14 on no_mli_high_res_v3).\n\n"
+            "Filtering separates them. At 900 s with dt = 30 s a step in the fast path "
+            "contributes dt/tau = 3% on the first step, so Kp can be raised ~30x, while the 34 h "
+            "mode picks up arctan(w*tau) = 2.6 degrees of phase. Raise Kp only after confirming "
+            "the run does not log command_oscillation."
+        )
+        self._row(
+            run_form, "mimo_pi_measurement_filter_s", self.mimo_pi_filter_spin, "MIMO PI meas filter s"
+        )
         # Headless only: how often the launched run writes snapshots/checkpoints.
         # Live playback has no such artifacts.
         self.snapshot_spin = self.double_spin(0.0, 1.0e12, 300.0, 60.0)
@@ -1210,6 +1228,21 @@ class SimulationControlsPanel:
         self.modal_integral_spin.blockSignals(True)
         self.modal_integral_spin.setValue(float(getattr(params, "modal_integral_gain", 0.0)))
         self.modal_integral_spin.blockSignals(False)
+        # The MIMO PI spins live outside self.inputs (they are built by hand rather
+        # than through _add_double), so the generic loop above does not reach them.
+        for attribute, field, default in (
+            ("mimo_pi_kp_spin", "mimo_pi_kp", 0.0),
+            ("mimo_pi_ki_spin", "mimo_pi_ki", 1.0e-3),
+            ("mimo_pi_filter_spin", "mimo_pi_measurement_filter_s", 0.0),
+        ):
+            widget = getattr(self, attribute, None)
+            if widget is None:
+                continue
+            widget.blockSignals(True)
+            try:
+                widget.setValue(float(getattr(params, field, default)))
+            finally:
+                widget.blockSignals(False)
 
     def selected_controller(self) -> tuple[str, str]:
         """(scheme, artifact path) for the selected controller.
@@ -1264,4 +1297,6 @@ class SimulationControlsPanel:
         if hasattr(self, "mimo_pi_kp_spin"):
             values["mimo_pi_kp"] = float(self.mimo_pi_kp_spin.value())
             values["mimo_pi_ki"] = float(self.mimo_pi_ki_spin.value())
+        if hasattr(self, "mimo_pi_filter_spin"):
+            values["mimo_pi_measurement_filter_s"] = float(self.mimo_pi_filter_spin.value())
         return replace(base if base is not None else self.params, **values)

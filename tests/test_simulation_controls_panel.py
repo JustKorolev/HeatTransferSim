@@ -903,3 +903,30 @@ def test_headless_tab_reads_the_graphs_saved_parameters(tmp_path):
     assert collected.dt_s == pytest.approx(0.5)
     # A field with no widget still comes from the graph's saved file.
     assert collected.colormap == "viridis"
+
+
+def test_the_measurement_filter_round_trips_through_the_panel():
+    """A parameter with no widget cannot be set from the tab at all -- which is how
+    this one and max_logged_sensors both shipped unreachable, defaulting to off with
+    no way to turn them on. read() must return what the spin holds, and set_params
+    must put a loaded value back into it."""
+    panel, _form = _build(MODE_HEADLESS)
+    assert hasattr(panel, "mimo_pi_filter_spin"), "no widget = unreachable from the tab"
+
+    panel.set_params(replace(SimulationParameters(), mimo_pi_measurement_filter_s=900.0))
+    assert panel.mimo_pi_filter_spin.value() == 900.0, "a loaded value must reach the widget"
+    assert panel.read().mimo_pi_measurement_filter_s == 900.0
+
+    panel.mimo_pi_filter_spin.setValue(0.0)
+    assert panel.read().mimo_pi_measurement_filter_s == 0.0, "off must survive the round trip"
+
+
+def test_the_pi_gains_round_trip_too():
+    """The same hand-built spins carry Kp and Ki; set_params reached none of them
+    before, so a graph's saved gains did not show in the tab."""
+    panel, _form = _build(MODE_HEADLESS)
+    panel.set_params(replace(SimulationParameters(), mimo_pi_kp=0.5, mimo_pi_ki=1.0e-5))
+    assert panel.mimo_pi_kp_spin.value() == 0.5
+    assert panel.mimo_pi_ki_spin.value() == 1.0e-5
+    got = panel.read()
+    assert got.mimo_pi_kp == 0.5 and got.mimo_pi_ki == 1.0e-5
