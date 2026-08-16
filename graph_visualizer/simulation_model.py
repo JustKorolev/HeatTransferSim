@@ -3372,6 +3372,7 @@ def _cryocooler_power_vector(
         distribution_weights = np.asarray(device.distribution_weights, dtype=float)
         warning = ""
         capped_cells = 0  # set by the over-cool cap below when it actually bites
+        cooling_discarded_w = 0.0  # lift the cap threw away after redistribution
         if len(rows) != len(device.receiving_node_ids) or len(rows) == 0:
             tip_temperature = float("nan")
             base_capacity_w = 0.0
@@ -3422,15 +3423,41 @@ def _cryocooler_power_vector(
             max_removable_w = np.maximum(0.0, capacity_rows * (temperatures[rows_arr] - floor_K) / dt_s)
             requested = np.asarray(distributed, dtype=float)
             distributed = np.minimum(requested, max_removable_w)
-            # Report where the cap bit: it discards requested cooling, so a run that
-            # leans on it is not delivering the lift the curve advertises.
             capped_cells = int(np.count_nonzero(distributed < requested - 1.0e-12))
+            # Move the capped surplus to cells that still have headroom, instead of
+            # discarding it. A cold head is one object; if the share this scheme
+            # happened to assign one cell exceeds what that cell can give up in a
+            # step, the heat comes off the rest of the head rather than not at all.
+            #
+            # Discarding it made the cooler deliver less lift the LARGER dt was,
+            # because the cap is C_i*(T_i - floor)/dt: 84% of the curve at dt = 10 s
+            # and 61% at dt = 30 s on no_mli_high_res_v3. That silently changed the
+            # plant's holding power whenever dt changed, which is not something a
+            # timestep is allowed to do.
+            for _pass in range(8):
+                shortfall = float(applied_cooling_w - float(np.sum(distributed)))
+                if shortfall <= 1.0e-12:
+                    break
+                headroom = max_removable_w - distributed
+                open_cells = headroom > 1.0e-12
+                if not bool(np.any(open_cells)):
+                    break  # every receiving cell is at its floor; the lift is genuinely unavailable
+                weights = distribution_weights * open_cells
+                total = float(np.sum(weights))
+                if total <= 0.0:
+                    weights, total = open_cells.astype(float), float(np.count_nonzero(open_cells))
+                distributed = distributed + np.minimum(shortfall * weights / total, headroom)
+            cooling_discarded_w = float(applied_cooling_w - float(np.sum(distributed)))
             for row, cooling_w in zip(rows, distributed):
                 powers[int(row)] += float(cooling_w)
         enabled = bool(params.cryocooler_enabled) and bool(device.enabled)
         diagnostics.append(
             {
                 "cooling_capped_cells": int(capped_cells),
+                # What the cap ultimately threw away, AFTER redistributing onto
+                # cells with headroom. Nonzero means the receiving cells genuinely
+                # cannot absorb the lift the curve advertises this step.
+                "cooling_discarded_W": float(cooling_discarded_w),
                 "cryocooler_id": str(device.identifier),
                 "source_node_ids": [int(value) for value in device.source_node_ids],
                 "receiving_node_ids": [int(value) for value in device.receiving_node_ids],

@@ -1474,6 +1474,31 @@ class SimulationRunner:
         # cold tip (coldest cryocooler node) / global coldest
         if cryo_idx:
             s.setdefault("cryo_tip_K", []).append(float(np.min(temps[cryo_idx])))
+        # Lift the over-cool cap threw away. This was computed every step and
+        # written nowhere, so a cooler delivering 61% of its curve went unnoticed
+        # across a dozen runs -- and since the cap is C*(T-floor)/dt, how much it
+        # discards depends on the TIMESTEP, which quietly moved the plant's holding
+        # power whenever dt changed.
+        try:
+            discarded = sum(
+                float(item.get("cooling_discarded_W", 0.0) or 0.0)
+                for item in (prepared.cryocooler_diagnostics() or ())
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must never end a run
+            discarded = float("nan")
+        s.setdefault("cooling_discarded_W", []).append(discarded)
+        if np.isfinite(discarded) and discarded > 0.01:
+            self._consecutive_discarded_cooling = getattr(self, "_consecutive_discarded_cooling", 0) + 1
+            if self._consecutive_discarded_cooling in (1, 100, 1000):
+                self._log_event(
+                    "cooling_discarded",
+                    f"t={state.time_s:.1f}s the cryocooler could not place {discarded:.3g} W of its "
+                    "own lift: every receiving cell is at the per-step cap C*(T-floor)/dt. The plant "
+                    "is being cooled less than its curve says, and MORE so at larger dt. Reduce dt, "
+                    "or spread the cooler over cells with more heat capacity.",
+                )
+        else:
+            self._consecutive_discarded_cooling = 0
         # Power balance from the engine's own accounting: heater injection in,
         # cryocooler removal out, net radiative load, and net_W (~ dU/dt).
         try:

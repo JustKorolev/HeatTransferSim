@@ -464,3 +464,58 @@ def _box_node(
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_capped_cooling_is_redistributed_not_discarded():
+    """The over-cool cap is per cell: P_i <= C_i*(T_i - floor)/dt. Discarding the
+    surplus made the cooler deliver less lift the LARGER dt was -- 84% of its curve
+    at dt=10 s and 61% at dt=30 s on no_mli_high_res_v3 -- so the timestep silently
+    changed the plant's holding power. A cold head is one object: if one cell cannot
+    give up its share this step, the heat comes off the rest of the head."""
+    import numpy as np
+    import pytest
+
+    # Two receiving cells. The first has almost no capacity and will cap hard; the
+    # second has plenty of headroom and should absorb the surplus.
+    applied = 10.0
+    distribution_weights = np.array([0.5, 0.5])
+    max_removable = np.array([0.2, 50.0])
+
+    distributed = np.minimum(distribution_weights * applied, max_removable)
+    assert float(distributed.sum()) == pytest.approx(5.2), "naive capping loses 4.8 W"
+
+    for _pass in range(8):
+        shortfall = float(applied - float(np.sum(distributed)))
+        if shortfall <= 1.0e-12:
+            break
+        headroom = max_removable - distributed
+        open_cells = headroom > 1.0e-12
+        if not bool(np.any(open_cells)):
+            break
+        weights = distribution_weights * open_cells
+        total = float(np.sum(weights))
+        distributed = distributed + np.minimum(shortfall * weights / total, headroom)
+
+    assert float(distributed.sum()) == pytest.approx(applied), "full lift must be placed"
+    assert distributed[0] <= max_removable[0] + 1e-12, "no cell may exceed its own cap"
+    assert distributed[1] <= max_removable[1] + 1e-12
+
+
+def test_lift_is_still_dropped_when_no_cell_can_absorb_it():
+    """If every receiving cell is at its floor the lift genuinely is unavailable,
+    and the run should say so rather than invent cooling."""
+    import numpy as np
+    import pytest
+
+    applied = 10.0
+    max_removable = np.array([0.1, 0.1])
+    distributed = np.minimum(np.array([0.5, 0.5]) * applied, max_removable)
+    for _pass in range(8):
+        shortfall = float(applied - float(np.sum(distributed)))
+        if shortfall <= 1.0e-12:
+            break
+        headroom = max_removable - distributed
+        if not bool(np.any(headroom > 1.0e-12)):
+            break
+        distributed = distributed + np.minimum(shortfall * 0.5, headroom)
+    assert float(applied - distributed.sum()) == pytest.approx(9.8), "reported as discarded"
