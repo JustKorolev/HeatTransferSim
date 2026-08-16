@@ -124,6 +124,19 @@ class SimulationParameters:
     # the first step, so kp can rise ~30x, while the 34 h mode picks up
     # arctan(w*tau) = 2.6 degrees of phase. 0 disables it.
     mimo_pi_measurement_filter_s: float = 0.0
+    # Integral gain multiplier applied only while a channel is ABOVE its setpoint.
+    #
+    # The plant's authority is one-sided. Too cold is corrected by adding heater
+    # power: direct, immediate, and bounded only by the heaters. Too hot can only
+    # be corrected by taking power away and waiting for the cryocooler, at a rate
+    # nothing in the loop controls. Overshoot is therefore strictly more expensive
+    # than undershoot, and a symmetric integrator prices them the same.
+    #
+    # Above 1 the loop cuts power faster than it adds it, so it approaches the
+    # setpoint from below and resists crossing. This biases the TRANSIENT only:
+    # the error is zero at steady state, so both branches agree there and no
+    # offset is introduced. 1.0 is symmetric, i.e. the old behaviour.
+    mimo_pi_overshoot_integral_scale: float = 1.0
     # Quiescence threshold for latching the held passive reference (r - y_passive).
     # y_ss = y_passive + G u only holds at steady state, so the capture waits until
     # the sensors stop moving this fast; until then the feedforward is 0 and the

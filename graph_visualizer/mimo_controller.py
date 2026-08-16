@@ -237,7 +237,12 @@ def allocate_thermal_rate_qp(
     lower_bounds = np.minimum(lower_bounds, upper_bounds)
 
     target = command - drift + anchor
-    asym = max(1.0, float(undershoot_weight))
+    # Not clamped to >= 1. It was, which meant the knob could only ever ask for MORE
+    # heat -- the one asymmetry this plant does not want. Heating is direct and
+    # immediate; cooling is whatever the cryocooler happens to do, so overshoot
+    # costs more than undershoot and a value below 1 is the physically motivated
+    # setting here. Negative and zero are still meaningless, hence the floor.
+    asym = max(1.0e-6, float(undershoot_weight))
 
     # How much of the demand this allocation is deliberately NOT chasing. A
     # direction with sigma^2 << lam is damped to nothing, and the component of the
@@ -292,7 +297,11 @@ def allocate_thermal_rate_qp(
         # the residual, which depends on the solution, so it is applied by
         # reweighting from the previous pass -- a couple of passes is plenty, and
         # each one is a bounded least-squares solve that is already cheap.
-        if asym > 1.0:
+        #
+        # Below 1 it reads the other way: under-delivering is cheaper than
+        # over-delivering, so the allocator settles low and lets the integral walk
+        # up. That is the right sign for a plant whose only fast actuator heats.
+        if asym != 1.0:
             for _pass in range(2):
                 residual = B @ np.asarray(result.x, dtype=float) - target
                 reweighted = np.where(residual < 0.0, q * asym, q)

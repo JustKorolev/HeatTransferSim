@@ -2160,7 +2160,15 @@ class PreparedSimulation:
         integral = getattr(self, "controller_mimo_pi_integral", None)
         if integral is None or np.asarray(integral).shape[0] != len(sensor_ids):
             integral = np.zeros(len(sensor_ids), dtype=float)
-        candidate = integral + error * dt
+        # Asymmetric integration: the plant's authority is one-sided. Too cold is
+        # fixed by adding heater power -- direct, immediate. Too hot can only be
+        # fixed by removing power and waiting for the cryocooler, at a rate nothing
+        # here controls. Weighting the above-setpoint branch makes the loop quicker
+        # to back off than to push, so it approaches from below. Error is zero at
+        # steady state, so this biases the transient without adding an offset.
+        overshoot_scale = max(0.0, float(getattr(self.params, "mimo_pi_overshoot_integral_scale", 1.0)))
+        integrand = np.where(error < 0.0, error * overshoot_scale, error)
+        candidate = integral + integrand * dt
 
         # v is a virtual command in KELVIN: the steady deviation we want the plant
         # to hold. Because G maps power to the rise ABOVE the unheated equilibrium

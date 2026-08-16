@@ -847,3 +847,58 @@ def test_the_passive_reference_is_derived_not_read_back() -> None:
     # It tracks the operating point, so a matrix built at 80 K gets its own value.
     hot = PreparedSimulation._mimo_pi_passive_reference({"T_op_K": 80.0, "dc_ground": "cryocooler"})
     assert hot == pytest.approx(27.669, abs=1e-2), "no-load floor is a curve property"
+
+
+def test_the_integral_can_be_told_that_overshoot_costs_more(monkeypatch) -> None:
+    """The plant's authority is one-sided: too cold is fixed by adding heater power,
+    immediately; too hot can only be fixed by removing power and waiting for the
+    cryocooler. A symmetric integrator prices those the same, so the loop crosses
+    the setpoint and then spends hours coming back -- 22 h of a 27.8 h run."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    sim.params = replace(sim.params, dt_s=10.0, mimo_pi_overshoot_integral_scale=4.0)
+    for sid in (20, 21):
+        sim.model.nodes[sid].controller_setpoint_K = 50.0
+
+    def _run(readout):
+        sim.controller_mimo_pi_integral = np.zeros(2)
+        monkeypatch.setattr(
+            "graph_visualizer.simulation_model.sensor_readout_temperature_K",
+            lambda model, idx, temps, nid: readout,
+        )
+        sim._mimo_pi_controller_power_vector(update_state=True)
+        return np.asarray(sim.controller_mimo_pi_integral, dtype=float).mean()
+
+    too_cold = _run(49.0)   # error +1 K -> integrate at the plain rate
+    too_hot = _run(51.0)    # error -1 K -> integrate 4x harder to back off
+    assert too_cold > 0.0 and too_hot < 0.0
+    # Not exactly 4x: the anti-windup also bleeds the committed integral, and it
+    # bleeds hardest on the too-hot branch, where v_cmd asks for a power reduction
+    # the non-negative allocator cannot fully deliver. The asymmetry survives it.
+    assert abs(too_hot) > 3.0 * abs(too_cold)
+
+    # Symmetric by default, so nothing changes for a run that does not ask.
+    plain = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    assert plain.params.mimo_pi_overshoot_integral_scale == 1.0
+
+
+def test_the_allocator_asymmetry_can_point_either_way() -> None:
+    """undershoot_weight was clamped to >= 1, so the only asymmetry it could express
+    was "ask for more heat" -- the one this plant does not want."""
+    from graph_visualizer.mimo_controller import allocate_thermal_rate_qp
+
+    G = _coupled_plant()
+    # Deliberately NOT exactly achievable: with a feasible target the residual is
+    # zero, the reweighting has nothing to weigh, and every asym gives one answer.
+    target = np.array([0.9, 0.2, 0.7])
+    kwargs = dict(absolute_target=True, lambda_u_relative=0.0)
+    low = allocate_thermal_rate_qp(
+        G, np.zeros(3), target, np.ones(3), np.full(3, 1.0e6), np.zeros(3), 0.0, 0.0,
+        undershoot_weight=0.25, **kwargs,
+    )
+    high = allocate_thermal_rate_qp(
+        G, np.zeros(3), target, np.ones(3), np.full(3, 1.0e6), np.zeros(3), 0.0, 0.0,
+        undershoot_weight=4.0, **kwargs,
+    )
+    assert float(np.asarray(low.u).sum()) < float(np.asarray(high.u).sum()), (
+        "a weight below 1 must settle lower than one above it"
+    )
