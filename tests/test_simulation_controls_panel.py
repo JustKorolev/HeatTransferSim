@@ -930,3 +930,18 @@ def test_the_pi_gains_round_trip_too():
     assert panel.mimo_pi_ki_spin.value() == 1.0e-5
     got = panel.read()
     assert got.mimo_pi_kp == 0.5 and got.mimo_pi_ki == 1.0e-5
+
+
+def test_the_overshoot_asymmetry_round_trips_through_the_panel():
+    """The knob that tells the loop overshoot costs more than undershoot. Shipping
+    it without a widget would repeat exactly the mistake the measurement filter
+    made -- a parameter that defaults to off with no way to turn it on."""
+    panel, _form = _build(MODE_HEADLESS)
+    assert hasattr(panel, "mimo_pi_overshoot_spin")
+
+    panel.set_params(replace(SimulationParameters(), mimo_pi_overshoot_integral_scale=4.0))
+    assert panel.mimo_pi_overshoot_spin.value() == 4.0
+    assert panel.read().mimo_pi_overshoot_integral_scale == 4.0
+
+    panel.mimo_pi_overshoot_spin.setValue(1.0)
+    assert panel.read().mimo_pi_overshoot_integral_scale == 1.0, "symmetric must survive"

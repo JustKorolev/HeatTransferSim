@@ -441,6 +441,29 @@ class SimulationControlsPanel:
         self._row(
             run_form, "mimo_pi_measurement_filter_s", self.mimo_pi_filter_spin, "MIMO PI meas filter s"
         )
+        self.mimo_pi_overshoot_spin = self.double_spin(
+            0.0, 1.0e6, float(getattr(self.params, "mimo_pi_overshoot_integral_scale", 1.0)), 0.5
+        )
+        self.mimo_pi_overshoot_spin.setToolTip(
+            "Integral gain multiplier applied only while a channel is ABOVE its setpoint. "
+            "1 = symmetric.\n\n"
+            "This plant's authority is one-sided. Too cold is corrected by adding heater "
+            "power -- direct and immediate. Too hot can only be corrected by taking power "
+            "away and waiting for the cryocooler, at a rate nothing in the loop controls. "
+            "Overshoot therefore costs strictly more than undershoot, and a symmetric "
+            "integrator prices them the same: one run crossed setpoint at 2.2 h and was "
+            "still climbing 4 h later, another spent 22 of its 27.8 h recovering from a "
+            "single crossing.\n\n"
+            "Above 1 the loop backs off faster than it pushes, so it approaches from below "
+            "and resists crossing. The bias is on the TRANSIENT only -- error is zero at "
+            "steady state, so both branches agree there and no offset is introduced. Try 4."
+        )
+        self._row(
+            run_form,
+            "mimo_pi_overshoot_integral_scale",
+            self.mimo_pi_overshoot_spin,
+            "MIMO PI overshoot Ki x",
+        )
         # Headless only: how often the launched run writes snapshots/checkpoints.
         # Live playback has no such artifacts.
         self.snapshot_spin = self.double_spin(0.0, 1.0e12, 300.0, 60.0)
@@ -1234,6 +1257,7 @@ class SimulationControlsPanel:
             ("mimo_pi_kp_spin", "mimo_pi_kp", 0.0),
             ("mimo_pi_ki_spin", "mimo_pi_ki", 1.0e-3),
             ("mimo_pi_filter_spin", "mimo_pi_measurement_filter_s", 0.0),
+            ("mimo_pi_overshoot_spin", "mimo_pi_overshoot_integral_scale", 1.0),
         ):
             widget = getattr(self, attribute, None)
             if widget is None:
@@ -1299,4 +1323,6 @@ class SimulationControlsPanel:
             values["mimo_pi_ki"] = float(self.mimo_pi_ki_spin.value())
         if hasattr(self, "mimo_pi_filter_spin"):
             values["mimo_pi_measurement_filter_s"] = float(self.mimo_pi_filter_spin.value())
+        if hasattr(self, "mimo_pi_overshoot_spin"):
+            values["mimo_pi_overshoot_integral_scale"] = float(self.mimo_pi_overshoot_spin.value())
         return replace(base if base is not None else self.params, **values)
