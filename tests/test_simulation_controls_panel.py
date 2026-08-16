@@ -945,3 +945,13 @@ def test_the_overshoot_asymmetry_round_trips_through_the_panel():
 
     panel.mimo_pi_overshoot_spin.setValue(1.0)
     assert panel.read().mimo_pi_overshoot_integral_scale == 1.0, "symmetric must survive"
+
+
+def test_the_measured_passive_reference_round_trips_through_the_panel():
+    panel, _form = _build(MODE_HEADLESS)
+    assert hasattr(panel, "mimo_pi_passive_spin")
+    panel.set_params(replace(SimulationParameters(), mimo_pi_passive_reference_K=33.2))
+    assert panel.mimo_pi_passive_spin.value() == 33.2
+    assert panel.read().mimo_pi_passive_reference_K == 33.2
+    panel.mimo_pi_passive_spin.setValue(0.0)
+    assert panel.read().mimo_pi_passive_reference_K == 0.0, "0 = derive must survive"

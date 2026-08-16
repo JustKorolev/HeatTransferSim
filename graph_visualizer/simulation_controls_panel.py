@@ -464,6 +464,25 @@ class SimulationControlsPanel:
             self.mimo_pi_overshoot_spin,
             "MIMO PI overshoot Ki x",
         )
+        self.mimo_pi_passive_spin = self.double_spin(
+            0.0, 1.0e6, float(getattr(self.params, "mimo_pi_passive_reference_K", 0.0)), 0.5
+        )
+        self.mimo_pi_passive_spin.setToolTip(
+            "MEASURED passive equilibrium in kelvin -- what the sensors settle to with the "
+            "heaters at 0 W. 0 = derive it from the gain matrix's operating point.\n\n"
+            "G is a DEVIATION gain, so the reference the loop inverts is "
+            "(setpoint - passive). The derived value reads the cryocooler's lift curve, and "
+            "on no_mli_high_res_v3 the simulated cooler does not follow it: at a reported "
+            "tip of 49.1 K it removes 18.2 W where the curve says 29.9 W. Both derived "
+            "values therefore commanded far too much power.\n\n"
+            "Measuring it needs no settled run -- the cooler's response to its tip and the "
+            "sensor-to-tip gradient equilibrate in minutes. Fit P_out(T_tip) and "
+            "R = (T_sensor - T_tip)/P_out, then solve P = P_out(setpoint - P*R). This graph "
+            "measured 17.4 W of holding power, i.e. a passive reference of 33.2 K."
+        )
+        self._row(
+            run_form, "mimo_pi_passive_reference_K", self.mimo_pi_passive_spin, "MIMO PI passive K (0=auto)"
+        )
         # Headless only: how often the launched run writes snapshots/checkpoints.
         # Live playback has no such artifacts.
         self.snapshot_spin = self.double_spin(0.0, 1.0e12, 300.0, 60.0)
@@ -1258,6 +1277,7 @@ class SimulationControlsPanel:
             ("mimo_pi_ki_spin", "mimo_pi_ki", 1.0e-3),
             ("mimo_pi_filter_spin", "mimo_pi_measurement_filter_s", 0.0),
             ("mimo_pi_overshoot_spin", "mimo_pi_overshoot_integral_scale", 1.0),
+            ("mimo_pi_passive_spin", "mimo_pi_passive_reference_K", 0.0),
         ):
             widget = getattr(self, attribute, None)
             if widget is None:
@@ -1325,4 +1345,6 @@ class SimulationControlsPanel:
             values["mimo_pi_measurement_filter_s"] = float(self.mimo_pi_filter_spin.value())
         if hasattr(self, "mimo_pi_overshoot_spin"):
             values["mimo_pi_overshoot_integral_scale"] = float(self.mimo_pi_overshoot_spin.value())
+        if hasattr(self, "mimo_pi_passive_spin"):
+            values["mimo_pi_passive_reference_K"] = float(self.mimo_pi_passive_spin.value())
         return replace(base if base is not None else self.params, **values)

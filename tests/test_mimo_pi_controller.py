@@ -902,3 +902,29 @@ def test_the_allocator_asymmetry_can_point_either_way() -> None:
     assert float(np.asarray(low.u).sum()) < float(np.asarray(high.u).sum()), (
         "a weight below 1 must settle lower than one above it"
     )
+
+
+def test_a_measured_passive_reference_overrides_the_derived_one(monkeypatch) -> None:
+    """The derivation reads the cryocooler's lift curve, and a simulated cooler that
+    does not follow it makes every derived value wrong by an amount the curve cannot
+    predict: at a reported tip of 49.1 K this plant removed 18.2 W where the curve
+    says 29.9 W. A measured value has to win."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    sim._mimo_pi_cache = {
+        "G": np.array([[0.5, 0.1], [0.1, 0.5]]), "passive_K": 27.669,
+        "sensor_ids": [20, 21], "heater_ids": [10, 11],
+        "per_sensor": {}, "preset_kp": None, "preset_ki": None,
+    }
+    sim._mimo_pi_cache_path = ""
+    monkeypatch.setattr(type(sim), "_load_mimo_pi_gain", lambda self: self._mimo_pi_cache)
+    for sid in (20, 21):
+        sim.model.nodes[sid].controller_setpoint_K = 50.0
+
+    sim.params = replace(sim.params, mimo_pi_passive_reference_K=33.2)
+    sim._mimo_pi_controller_power_vector(update_state=True)
+    ref = np.array(sim.controller_allocator_diagnostics["reference_deviation_K"])
+    assert ref == pytest.approx([16.8, 16.8], abs=1e-3), "50 - 33.2, not 50 - 27.669"
+
+    # 0 falls back to the derived value, so an unset field changes nothing.
+    plain = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    assert plain.params.mimo_pi_passive_reference_K == 0.0

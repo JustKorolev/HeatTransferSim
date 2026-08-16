@@ -1939,14 +1939,21 @@ class PreparedSimulation:
         # linearisation G came from, and it is right on the first step. Estimating
         # it from the plant is the fallback for older artifacts, not the plan.
         solved = (self._load_mimo_pi_gain() or {}).get("passive_K")
+        source = "solved from the gain matrix's operating point"
+        # A measured value wins. The derivation reads the cryocooler's lift curve,
+        # and a simulated cooler that does not follow it makes every derived value
+        # wrong by an amount the curve cannot predict.
+        override = float(getattr(self.params, "mimo_pi_passive_reference_K", 0.0) or 0.0)
+        if np.isfinite(override) and override > 0.0:
+            solved, source = override, "measured (mimo_pi_passive_reference_K)"
         if solved is not None:
             held = np.full(len(setpoints), float(solved), dtype=float)
             if getattr(self, "controller_mimo_pi_passive_K", None) is None:
                 self.controller_mimo_pi_passive_K = held
                 self._warn_once(
-                    f"MIMO PI passive reference {float(solved):.3f} K, solved with the gain "
-                    "matrix rather than estimated from the run. The feedforward is correct "
-                    "from the first step, so the integral only has to trim it."
+                    f"MIMO PI passive reference {float(solved):.3f} K, {source} rather than "
+                    "estimated from the run. The feedforward is correct from the first step, "
+                    "so the integral only has to trim it."
                 )
             return np.where(valid, setpoints - held, 0.0)
 

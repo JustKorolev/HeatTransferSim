@@ -137,6 +137,23 @@ class SimulationParameters:
     # the error is zero at steady state, so both branches agree there and no
     # offset is introduced. 1.0 is symmetric, i.e. the old behaviour.
     mimo_pi_overshoot_integral_scale: float = 1.0
+    # Measured override for the passive equilibrium, in kelvin. 0 = derive it from
+    # the gain matrix's operating point.
+    #
+    # The derivation reads the cryocooler's lift curve, and on no_mli_high_res_v3
+    # the SIMULATED cooler does not follow that curve: at a reported tip of
+    # 49.1 K it removes 18.2 W where the PT60 curve says 29.9 W, with a slope of
+    # 0.72 W/K against the curve's 1.07. Every reference derived from the curve is
+    # therefore wrong by an amount the curve cannot predict -- the tangent's
+    # 21.3 K and the no-load floor's 27.7 K both commanded far too much power.
+    #
+    # Measuring it needs no settled run. The cooler's response to its own tip
+    # temperature and the sensor-to-tip gradient both equilibrate in minutes, so
+    # fitting P_out(T_tip) and R = (T_sensor - T_tip)/P_out from a transient, then
+    # solving P = P_out(setpoint - P*R) for the holding power, gives the value the
+    # feedforward should reproduce. That put this graph at 17.4 W and 33.2 K,
+    # against 23.1 W from the curve.
+    mimo_pi_passive_reference_K: float = 0.0
     # Quiescence threshold for latching the held passive reference (r - y_passive).
     # y_ss = y_passive + G u only holds at steady state, so the capture waits until
     # the sensors stop moving this fast; until then the feedforward is 0 and the
