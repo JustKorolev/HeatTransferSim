@@ -827,3 +827,23 @@ def test_the_measurement_filter_attenuates_the_fast_path(monkeypatch) -> None:
     plain = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
     assert plain.params.mimo_pi_measurement_filter_s == 0.0
     assert np.allclose(plain._mimo_pi_filtered_readout(np.array([60.0, 60.0]), True), [60.0, 60.0])
+
+
+def test_the_passive_reference_is_derived_not_read_back() -> None:
+    """It is a closed-form property of the lift curve and T_op; G does not enter
+    it. Storing it meant a one-line correction to the formula cost a 51-minute
+    re-solve of 27 CG systems on a 3M-node graph. An OLD matrix carrying the old
+    tangent value must still yield the current one."""
+    from graph_visualizer.simulation_model import PreparedSimulation
+
+    stale = {"T_op_K": 50.0, "dc_ground": "cryocooler", "passive_reference_K": 21.289}
+    assert PreparedSimulation._mimo_pi_passive_reference(stale) == pytest.approx(27.669, abs=1e-2)
+    # Radiation-grounded matrices never receive an environment temperature.
+    assert PreparedSimulation._mimo_pi_passive_reference(
+        {"T_op_K": 50.0, "dc_ground": "radiation"}
+    ) is None
+    # And anything predating T_op_K falls back to the runtime estimate.
+    assert PreparedSimulation._mimo_pi_passive_reference({"dc_ground": "cryocooler"}) is None
+    # It tracks the operating point, so a matrix built at 80 K gets its own value.
+    hot = PreparedSimulation._mimo_pi_passive_reference({"T_op_K": 80.0, "dc_ground": "cryocooler"})
+    assert hot == pytest.approx(27.669, abs=1e-2), "no-load floor is a curve property"

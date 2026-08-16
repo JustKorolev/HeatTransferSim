@@ -1992,6 +1992,34 @@ class PreparedSimulation:
             return False
         return self._load_mimo_pi_gain() is not None
 
+    @staticmethod
+    def _mimo_pi_passive_reference(metadata: dict) -> float | None:
+        """The baseline G is a deviation from: what the sensors settle to at 0 W.
+
+        DERIVED from the matrix's operating point, not read back from it. It is a
+        closed-form property of the cryocooler's lift curve and T_op alone -- G
+        does not enter it -- so storing it made a one-line correction to the
+        formula cost a 51-minute re-solve of 27 CG systems on a 3M-node graph. It
+        is still written into the metadata as a record of what a build believed,
+        but the number in use comes from the current code.
+
+        None for a radiation-grounded matrix, whose environment temperature this
+        never receives, and for anything predating T_op_K in the metadata. The
+        controller then falls back to estimating it from the run.
+        """
+        if str(metadata.get("dc_ground", "cryocooler")).strip().lower() != "cryocooler":
+            return None
+        try:
+            T_op = float(metadata["T_op_K"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not np.isfinite(T_op) or T_op <= 0.0:
+            return None
+        from .modal_reduction import cryocooler_passive_temperature_K
+
+        value = float(cryocooler_passive_temperature_K(T_op))
+        return value if np.isfinite(value) else None
+
     def _load_mimo_pi_gain(self):
         """Load + cache the DC gain G and its per-sensor gain preset.
 
@@ -2025,13 +2053,7 @@ class PreparedSimulation:
             if not np.all(np.isfinite(G)):
                 raise ValueError("G contains non-finite entries.")
             preset = load_mimo_pi_preset(Path(path)) or {}
-            # The baseline G is a deviation from, solved at build time. Absent on
-            # matrices built before it existed, and on radiation-grounded ones.
-            passive = (data.metadata or {}).get("passive_reference_K")
-            try:
-                passive = float(passive) if passive is not None and np.isfinite(float(passive)) else None
-            except (TypeError, ValueError):
-                passive = None
+            passive = self._mimo_pi_passive_reference(data.metadata or {})
             cache = {
                 "G": G,
                 "passive_K": passive,
