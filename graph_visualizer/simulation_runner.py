@@ -1823,7 +1823,14 @@ class SimulationRunner:
         self._reap_plot_refresh()
         self._write_timeseries()
         self._write_controller_diagnostics()
-        self._write_plots_and_report()
+        # Out of process, then wait. matplotlib has now killed two runs from inside
+        # savefig, and the second had already finished all 100000 s of simulation --
+        # it died writing the report, losing report.md for a tick label. Drawing in
+        # a child and waiting for it keeps the figures synchronous with the report
+        # while making a native fault cost the figures rather than the summary.
+        self._spawn_plot_refresh()
+        self._reap_plot_refresh(timeout_s=300.0)
+        self._write_report(self._existing_plot_names())
         self._update_status(
             len(self._series.get("time_s", [])),
             self._series.get("time_s", [0.0])[-1] if self._series.get("time_s") else 0.0,
@@ -2020,8 +2027,17 @@ class SimulationRunner:
 
         return plotted
 
+    def _existing_plot_names(self) -> list[str]:
+        """Figures actually on disk, for the report to link. The child that drew
+        them may have died partway, so ask the directory rather than assume."""
+        if not self.plots_dir.exists():
+            return []
+        return sorted(p.name for p in self.plots_dir.glob("*.png"))
+
     def _write_plots_and_report(self) -> None:
-        plotted = self._write_plots()
+        self._write_report(self._write_plots())
+
+    def _write_report(self, plotted: list[str]) -> None:
         series = self._series
         summary = self._summary_metrics()
         # report

@@ -781,9 +781,13 @@ def test_a_solved_passive_reference_is_used_on_the_first_step(monkeypatch, tmp_p
     assert ref == pytest.approx([28.711, 28.711], abs=1e-3)
 
 
-def test_the_solved_reference_matches_the_linearisation_g_was_built_from() -> None:
-    """It must be the tangent's zero crossing, not the lift curve's own no-load
-    floor. At T_op = 50 K those differ by 6.4 K -- about 5 W of holding power."""
+def test_the_solved_reference_is_the_curves_no_load_floor_not_a_tangent() -> None:
+    """The tangent's zero crossing, T_op - Q(T_op)/(dQ/dT), extrapolates a local
+    linearisation 29 K past its operating point across a curve that is nowhere near
+    linear over that span. It was tried: on a 27.8 h run it commanded 28.5 W of
+    holding power against a true requirement near 20 W, and the integral spent the
+    entire run walking that off as a 34 h oscillation. The curve's own no-load
+    floor is the temperature at which the cooler actually removes zero power."""
     from graph_visualizer.cryocooler import PT60LiftCurve
     from graph_visualizer.modal_reduction import (
         cryocooler_ground_conductance_W_K,
@@ -792,10 +796,34 @@ def test_the_solved_reference_matches_the_linearisation_g_was_built_from() -> No
 
     T_op = 50.0
     curve = PT60LiftCurve(max_power_w=150.0)
-    slope = cryocooler_ground_conductance_W_K(T_op)
     passive = cryocooler_passive_temperature_K(T_op)
-    assert passive == pytest.approx(T_op - curve.cooling_capacity_w(T_op) / slope)
-    assert passive == pytest.approx(21.289, abs=1e-2)
-    assert passive < curve.minimum_temperature_k - 5.0, "must not be the no-load floor"
-    # The tangent removes zero power there, which is what "passive" means.
-    assert slope * (passive - T_op) == pytest.approx(-curve.cooling_capacity_w(T_op))
+    assert passive == pytest.approx(curve.minimum_temperature_k)
+    assert passive == pytest.approx(27.669, abs=1e-2)
+    assert curve.cooling_capacity_w(passive) == pytest.approx(0.0, abs=1e-9), "zero power there"
+    # And it must NOT be the tangent value, which is 6.4 K colder.
+    tangent = T_op - curve.cooling_capacity_w(T_op) / cryocooler_ground_conductance_W_K(T_op)
+    assert tangent == pytest.approx(21.289, abs=1e-2)
+    assert passive - tangent > 6.0
+
+
+def test_the_measurement_filter_attenuates_the_fast_path(monkeypatch) -> None:
+    """kp is the loop's only damping term and is capped near 0.1 by sensors that
+    settle inside one control step -- the proportional term closes an algebraic
+    loop through them. The mode that needs damping rings at 34 h. One filter
+    separates them: a step in the fast path contributes only dt/tau on the first
+    step, so kp can rise by that factor, while the slow mode is untouched."""
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    sim.params = replace(sim.params, dt_s=30.0, mimo_pi_measurement_filter_s=900.0)
+    raw = np.array([50.0, 50.0])
+    assert np.allclose(sim._mimo_pi_filtered_readout(raw, True), raw), "seeds on the first read"
+    stepped = sim._mimo_pi_filtered_readout(np.array([60.0, 60.0]), True)
+    # dt/tau = 30/900 = 1/30 of a 10 K step.
+    assert stepped == pytest.approx([50.0 + 10.0 / 30.0] * 2, abs=1e-9)
+    # A diagnostic pass must not advance it -- the controller runs more than once
+    # per step, and a filter stepped twice has half its intended time constant.
+    again = sim._mimo_pi_filtered_readout(np.array([60.0, 60.0]), False)
+    assert again == pytest.approx(stepped)
+    # Off by default, so an existing run is bit-for-bit unchanged.
+    plain = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    assert plain.params.mimo_pi_measurement_filter_s == 0.0
+    assert np.allclose(plain._mimo_pi_filtered_readout(np.array([60.0, 60.0]), True), [60.0, 60.0])

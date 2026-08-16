@@ -1872,6 +1872,37 @@ class PreparedSimulation:
             "worst_shortfall_K": float(shortfall.max()) if shortfall.size else 0.0,
         }
 
+    def _mimo_pi_filtered_readout(self, y: np.ndarray, update_state: bool) -> np.ndarray:
+        """First-order low-pass on the sensor readouts the loop regulates.
+
+        Separates two timescales that are otherwise in direct conflict. kp is the
+        only damping term the loop has, and it is capped near 0.1 by sensors that
+        share cells with their heaters and settle inside one control step -- the
+        proportional term closes an algebraic loop through them. The mode that
+        needs damping rings at 34 h. Attenuating the fast path lets kp do its job
+        on the slow one; see mimo_pi_measurement_filter_s for the arithmetic.
+
+        A diagnostic re-evaluation must not advance the filter, for the same reason
+        it must not latch the passive reference: the controller is called more than
+        once per step, and a filter stepped twice per step has half the intended
+        time constant.
+        """
+        current = np.asarray(y, dtype=float).reshape(-1)
+        tau = max(0.0, float(getattr(self.params, "mimo_pi_measurement_filter_s", 0.0) or 0.0))
+        if tau <= 0.0:
+            return current
+        state = getattr(self, "_mimo_pi_filtered_y_K", None)
+        if state is None or np.asarray(state).shape != current.shape:
+            self._mimo_pi_filtered_y_K = current.copy()
+            return current
+        state = np.asarray(state, dtype=float)
+        if not update_state:
+            return state
+        alpha = min(1.0, max(float(self.params.dt_s), 0.0) / tau)
+        state = state + alpha * (current - state)
+        self._mimo_pi_filtered_y_K = state
+        return state
+
     def _mimo_pi_reference_deviation(self, G, heater_ids, setpoints, y, valid, update_state: bool = True) -> np.ndarray:
         """(r - y_passive) over the controlled sensors, the reference the QP inverts.
 
@@ -2094,6 +2125,7 @@ class PreparedSimulation:
             [sensor_readout_temperature_K(model, node_index, temps, int(s)) for s in sensor_ids],
             dtype=float,
         )
+        y = self._mimo_pi_filtered_readout(y, update_state)
         setpoints = np.array(
             [float(getattr(model.nodes[int(s)], "controller_setpoint_K", np.nan)) for s in sensor_ids],
             dtype=float,
@@ -2206,6 +2238,8 @@ class PreparedSimulation:
             # its bounds is not underpowered, it is UNREACHABLE: serving it would
             # require cooling somewhere, and heaters only heat.
             **self._mimo_pi_reachability(G, u, v_cmd, sensor_ids, maxima),
+            # Carried across a diagnostic re-evaluation, which rebuilds this dict.
+            **(getattr(self, "controller_mimo_pi_loop_state", None) or {}),
         }
         if update_state:
             # Back-calculation anti-windup. This previously FROZE the integral
@@ -2234,22 +2268,30 @@ class PreparedSimulation:
             if cap > 0.0:
                 committed = np.clip(committed, -cap, cap)
             self.controller_mimo_pi_integral = committed
-            # Publish the loop's own state alongside the allocation. Until now the
-            # integrator and the held passive reference existed ONLY inside a
-            # checkpoint, so answering "is the integral winding or stalled?" after a
-            # run meant shipping a 32 MB temperature field to read 27 floats. They
-            # are the two numbers that explain a loop that is not converging.
-            diagnostics = getattr(self, "controller_allocator_diagnostics", None)
-            if isinstance(diagnostics, dict):
-                held = getattr(self, "controller_mimo_pi_passive_K", None)
-                diagnostics["integral_K_s"] = [float(v) for v in committed]
-                diagnostics["passive_reference_K"] = (
+            # Publish the loop's own state alongside the allocation, so a run can be
+            # read without a 32 MB checkpoint. Held in its OWN attribute rather than
+            # written into the diagnostics dict: heater_actuator_power_by_node
+            # re-evaluates the controller with update_state=False AFTER the step,
+            # which rebuilds that dict from scratch. Writing here was silently
+            # discarded every step -- the fields never survived to the file they
+            # were added for.
+            held = getattr(self, "controller_mimo_pi_passive_K", None)
+            self.controller_mimo_pi_loop_state = {
+                "integral_K_s": [float(v) for v in committed],
+                "passive_reference_K": (
                     [float(v) for v in np.asarray(held, dtype=float).reshape(-1)]
                     if held is not None
                     else None
-                )
-                diagnostics["error_K"] = [float(v) for v in error]
-                diagnostics["v_cmd_K"] = [float(v) for v in v_cmd]
+                ),
+                "error_K": [float(v) for v in error],
+                "v_cmd_K": [float(v) for v in v_cmd],
+            }
+            # Also into THIS step's dict. The dict is assembled before the integral
+            # is committed, so the merge there can only carry the previous step's
+            # state -- one call stale, and on the first step absent entirely.
+            diagnostics = getattr(self, "controller_allocator_diagnostics", None)
+            if isinstance(diagnostics, dict):
+                diagnostics.update(self.controller_mimo_pi_loop_state)
             self.controller_weighted_rms_error = (
                 float(np.sqrt(np.mean(error[valid] ** 2))) if valid.any() else 0.0
             )

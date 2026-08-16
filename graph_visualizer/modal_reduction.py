@@ -88,30 +88,31 @@ def cryocooler_passive_temperature_K(
     capacity_scale: float = 1.0,
     delta_K: float = 1.0,
 ) -> float:
-    """Temperature the LINEARISED sink pulls to with no heat applied.
+    """Temperature the sink pulls to with no heat applied: the lift curve's own
+    no-load floor, where it removes zero power.
 
-    The DC operator grounds the plant with a conductance g = dQ/dT taken at the
-    operating point, which models the cooler as removing g*(T - T_star). T_star is
-    where that tangent line crosses zero power:
+    The obvious alternative is the tangent's zero crossing,
+    T_star = T_op - Q(T_op)/(dQ/dT), on the argument that the feedforward should
+    share the linearisation G was built from. That was tried and it is wrong. G's
+    SLOPE is a tangent property and correctly local; the passive temperature is an
+    ABSOLUTE level 29 K away from the operating point, and the lift curve is far
+    too nonlinear over that span for a tangent to be extrapolated across it. At
+    T_op = 50 K the tangent gives 21.3 K against the curve's 27.7 K.
 
-        T_star = T_op - Q(T_op) / (dQ/dT)
+    On a 27.8 h run the tangent value commanded 28.5 W of holding power against a
+    true requirement near 20 W, and the integral spent the whole run walking that
+    error off -- a 34 h oscillation with the loop cutting power 50% and back. The
+    floor puts the feedforward within a few percent instead.
 
-    NOT the lift curve's own no-load floor (27.7 K for a PT60). The tangent is what
-    G was built from, so the feedforward and the gain have to share it or they
-    describe different plants. At T_op = 50 K the two differ by 6.4 K, which is
-    ~5 W of holding power on this cryostat.
+    Neither is exact: a linear y_passive + G u cannot represent a nonlinear cooler
+    across 29 K, so a residual always remains for the integral to trim. The point
+    is to make that residual small enough that trimming it does not dominate the
+    run.
     """
     from .cryocooler import PT60LiftCurve
 
     curve = PT60LiftCurve(max_power_w=float(max_power_w), capacity_scale=float(capacity_scale))
-    slope = cryocooler_ground_conductance_W_K(
-        operating_temperature_K,
-        max_power_w=max_power_w,
-        capacity_scale=capacity_scale,
-        delta_K=delta_K,
-    )
-    T = float(operating_temperature_K)
-    return float(T - curve.cooling_capacity_w(T) / slope)
+    return float(curve.minimum_temperature_k)
 
 
 # ------------------------------------------------------------------ reduction primitives

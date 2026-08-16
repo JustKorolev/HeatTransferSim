@@ -113,6 +113,17 @@ class SimulationParameters:
     # short of the command. 1.0 absorbs the whole shortfall; 0 disables the
     # correction and lets the integral wind against the actuator bounds.
     mimo_pi_antiwindup_gain: float = 1.0
+    # First-order low-pass on the sensor readouts feeding the loop, in seconds.
+    #
+    # kp is the loop's only damping term, and on this plant it is capped near 0.1
+    # by a FAST path: sensors share cells with their heaters, those cells settle
+    # inside one control step, so the proportional term closes an algebraic loop
+    # and goes bang-bang above unity gain. The mode that actually needs damping is
+    # three orders slower -- a 34 h ring at zeta ~ 0.14. Filtering separates them:
+    # at 900 s with dt = 30 s a step in the fast path contributes dt/tau = 3% on
+    # the first step, so kp can rise ~30x, while the 34 h mode picks up
+    # arctan(w*tau) = 2.6 degrees of phase. 0 disables it.
+    mimo_pi_measurement_filter_s: float = 0.0
     # Quiescence threshold for latching the held passive reference (r - y_passive).
     # y_ss = y_passive + G u only holds at steady state, so the capture waits until
     # the sensors stop moving this fast; until then the feedforward is 0 and the
