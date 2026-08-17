@@ -870,13 +870,36 @@ class SimulationRunner:
         # monitor-only sensors -- the ones the controller cannot act on -- so the
         # plots showed everything except the loop being tuned. Controlled sensors now
         # claim the budget first; monitor-only fill whatever is left.
+        # "Controlled" has to mean IN THE LOOP, not merely non-monitor in the graph.
+        # A sensor unticked for this run is no longer regulated, so counting it in
+        # rms_tracking_error_controlled_K reports the controller for work it was told
+        # not to do -- and it dominates: two excluded channels held that figure at
+        # 0.74 K where the 25 remaining ones were at 0.20 K. It is not hidden either;
+        # it still appears in rms_tracking_error_K and the monitor figure.
+        enabled_sensor_ids = getattr(params, "enabled_sensor_node_ids", None)
+        enabled = None if enabled_sensor_ids is None else {int(v) for v in enabled_sensor_ids}
         self._sensor_controlled = np.array(
             [
                 not bool(getattr(prepared.model.nodes.get(int(sid)), "sensor_monitor_only", False))
+                and (enabled is None or int(sid) in enabled)
                 for sid in sensor_ids
             ],
             dtype=bool,
         )
+        excluded = [
+            int(sid)
+            for sid in sensor_ids
+            if enabled is not None
+            and int(sid) not in enabled
+            and not bool(getattr(prepared.model.nodes.get(int(sid)), "sensor_monitor_only", False))
+        ]
+        if excluded:
+            self._log_event(
+                "sensors_excluded",
+                f"{len(excluded)} controllable sensor(s) excluded from the loop for this run: "
+                f"{sorted(excluded)[:10]}. They are reported under the all-sensor and "
+                "monitor figures, not under rms_tracking_error_controlled_K.",
+            )
         cap = max(0, int(self.cfg.max_logged_sensors))
         controlled_first = [int(j) for j in np.where(self._sensor_controlled)[0]]
         monitor_rest = [int(j) for j in np.where(~self._sensor_controlled)[0]]
@@ -1030,6 +1053,7 @@ class SimulationRunner:
         sensor. Written at start (so it exists even if the run dies) and completed
         with final values in _finalize."""
         nodes = getattr(prepared.model, "nodes", {}) or {}
+        controlled_flags = list(getattr(self, "_sensor_controlled", []) or [])
         rows = []
         for index, (node_id, setpoint) in enumerate(zip(sensor_ids, np.asarray(setpoints, dtype=float))):
             node = nodes.get(int(node_id))
@@ -1041,6 +1065,13 @@ class SimulationRunner:
                     "material": str(getattr(node, "material", "") or ""),
                     "setpoint_K": "" if not np.isfinite(setpoint) else f"{float(setpoint):.6g}",
                     "monitor_only": bool(getattr(node, "sensor_monitor_only", False)),
+                    # Whether this run actually regulated it. monitor_only is a GRAPH
+                    # property and does not move when a channel is unticked, so
+                    # regenerate_plots reading only that would keep drawing an
+                    # excluded channel among the controlled ones.
+                    "controlled": bool(
+                        controlled_flags[index] if index < len(controlled_flags) else False
+                    ),
                     "readout_nodes": len(getattr(node, "readout_node_ids", None) or []),
                     "center_mm": ";".join(
                         f"{float(v):.2f}" for v in (getattr(node, "center_mm", None) or ())
@@ -2143,7 +2174,14 @@ def regenerate_plots(run_dir) -> list[str]:
     if manifest.is_file():
         with manifest.open(newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
-                if str(row.get("monitor_only", "")).strip().lower() == "false":
+                # Prefer "controlled" -- whether the run actually regulated it.
+                # monitor_only is a graph property and does not move when a channel
+                # is unticked, so reading only that would keep an excluded channel in
+                # the controlled plots. Older runs have no such column; fall back.
+                flag = row.get("controlled")
+                if flag is None:
+                    flag = "true" if str(row.get("monitor_only", "")).strip().lower() == "false" else "false"
+                if str(flag).strip().lower() == "true":
                     controlled.add(f"{row.get('series', '')}_K")
 
     runner = object.__new__(SimulationRunner)

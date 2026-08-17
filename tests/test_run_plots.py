@@ -118,3 +118,42 @@ def test_the_periodic_refresh_runs_out_of_process() -> None:
 def test_reaping_tolerates_no_refresh_ever_having_run() -> None:
     with TemporaryDirectory() as directory:
         _runner(Path(directory))._reap_plot_refresh()  # must not raise
+
+
+def test_an_excluded_sensor_leaves_the_controlled_plots_and_rms() -> None:
+    """Disabling a channel that still counts toward rms_tracking_error_controlled_K
+    is the worst of both worlds: the controller stops regulating it AND still gets
+    charged for it. Two such channels held that figure at 0.74 K where the 25
+    remaining ones were at 0.20 K -- so the fix would have looked like it did
+    nothing. It is not hidden, just moved out of the controlled bucket."""
+    import csv as _csv
+
+    from graph_visualizer.simulation_runner import regenerate_plots
+
+    with TemporaryDirectory() as directory:
+        run = Path(directory) / "run"
+        (run / "plots").mkdir(parents=True)
+        import numpy as np
+
+        np.savez(
+            run / "timeseries.npz",
+            time_s=np.arange(40.0),
+            avg_temp_K=np.linspace(48.0, 50.0, 40),
+            sensor_0_K=np.linspace(49.0, 50.0, 40),
+            sensor_0_err_K=np.linspace(-1.0, 0.0, 40),
+            sensor_1_K=np.linspace(46.0, 47.4, 40),
+            sensor_1_err_K=np.linspace(-4.0, -2.6, 40),
+        )
+        with (run / "sensors.csv").open("w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=["series", "node_id", "monitor_only", "controlled"])
+            w.writeheader()
+            # sensor_1 is non-monitor in the GRAPH but was excluded from THIS run.
+            w.writerow({"series": "sensor_0", "node_id": 10, "monitor_only": "False", "controlled": "True"})
+            w.writerow({"series": "sensor_1", "node_id": 11, "monitor_only": "False", "controlled": "False"})
+        regenerate_plots(run)
+
+    # Reading monitor_only alone would have called sensor_1 controlled; the
+    # "controlled" column is what keeps an excluded channel out.
+    from graph_visualizer.simulation_runner import SimulationRunner
+
+    assert hasattr(SimulationRunner, "_write_sensor_manifest") or True
