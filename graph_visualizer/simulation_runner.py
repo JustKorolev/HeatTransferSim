@@ -1053,7 +1053,11 @@ class SimulationRunner:
         sensor. Written at start (so it exists even if the run dies) and completed
         with final values in _finalize."""
         nodes = getattr(prepared.model, "nodes", {}) or {}
-        controlled_flags = list(getattr(self, "_sensor_controlled", []) or [])
+        # No `or []` here: _sensor_controlled is a numpy array, and `or` evaluates its
+        # truth value, which raises for anything longer than one element. That killed
+        # a run at the first manifest write.
+        _flags = getattr(self, "_sensor_controlled", None)
+        controlled_flags = [] if _flags is None else [bool(v) for v in _flags]
         rows = []
         for index, (node_id, setpoint) in enumerate(zip(sensor_ids, np.asarray(setpoints, dtype=float))):
             node = nodes.get(int(node_id))

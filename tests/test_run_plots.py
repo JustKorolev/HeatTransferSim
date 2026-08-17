@@ -7,6 +7,7 @@ pre-populated series and calling the plot/report step.
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -157,3 +158,36 @@ def test_an_excluded_sensor_leaves_the_controlled_plots_and_rms() -> None:
     from graph_visualizer.simulation_runner import SimulationRunner
 
     assert hasattr(SimulationRunner, "_write_sensor_manifest") or True
+
+
+def test_the_sensor_manifest_survives_a_numpy_controlled_mask() -> None:
+    """_sensor_controlled is a numpy array, and `getattr(...) or []` evaluates its
+    truth value -- which raises for anything longer than one element. That killed a
+    run at its first manifest write, before a single step."""
+    import numpy as np
+
+    class _Node:
+        component_name = "part"
+        material = "copper"
+        sensor_monitor_only = False
+        readout_node_ids = [1, 2, 3]
+        center_mm = (0.0, 0.0, 0.0)
+
+    class _Model:
+        nodes = {10: _Node(), 11: _Node()}
+
+    class _Prepared:
+        model = _Model()
+
+    with TemporaryDirectory() as directory:
+        runner = _runner(Path(directory))
+        runner._sensor_controlled = np.array([True, False])      # the array that broke it
+        runner._write_sensor_manifest(_Prepared(), [10, 11], np.array([50.0, 50.0]))
+        rows = list(csv.DictReader((runner.out_dir / "sensors.csv").open(newline="", encoding="utf-8")))
+        assert [r["controlled"] for r in rows] == ["True", "False"]
+
+    # And with no mask set at all it must still write, not raise.
+    with TemporaryDirectory() as directory:
+        runner = _runner(Path(directory))
+        runner._write_sensor_manifest(_Prepared(), [10, 11], np.array([50.0, 50.0]))
+        assert (runner.out_dir / "sensors.csv").is_file()
