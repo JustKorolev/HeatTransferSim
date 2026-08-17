@@ -451,8 +451,22 @@ def dc_gain_and_rga(Leff, F, S, monitor, *, progress=None, rtol=1.0e-10, workers
         G = _dc_gain_iterative(
             Leff, F, np.asarray(S)[ctrl], progress=progress, rtol=rtol, workers=workers
         )
-    RGA = G * np.linalg.pinv(G).T
-    return G, RGA
+    return G, relative_gain_array(G)
+
+
+def relative_gain_array(G):
+    """Bristol's RGA of a gain matrix: ``Lambda = G .* pinv(G).T``.
+
+    Element (i, j) is heater j's open-loop gain on sensor i divided by its gain
+    with every OTHER loop closed. 1 means the other loops do not touch that
+    pairing; a NEGATIVE entry means the pairing's gain changes sign once they do,
+    so a PID tuned open-loop drives the wrong way.
+
+    The pseudo-inverse rather than the inverse so a non-square G (more heaters
+    than controlled sensors, or a sensor dropped from the loop) still has one.
+    """
+    G = np.asarray(G, dtype=float)
+    return G * np.linalg.pinv(G).T
 
 
 def _dc_gain_iterative(

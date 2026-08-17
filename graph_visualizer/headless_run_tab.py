@@ -175,6 +175,28 @@ class HeadlessRunTab:
         )
         self.build_gain_button.clicked.connect(self.build_gain_matrix)
         form.addRow(self.build_gain_button)
+        # Almost every claim anyone makes about this plant is a claim about G: how
+        # coupled it is, how many directions it really has, whether it could be
+        # paired one heater per sensor, which channels can be shaped independently.
+        # Those were answered one at a time in whatever notebook was open, so the
+        # answers drifted and none were reproducible. This computes them together
+        # from the one artifact and writes a report that stands on its own.
+        self.plant_analysis_button = self.QtWidgets.QPushButton("Analyse plant (full G report)")
+        self.plant_analysis_button.setToolTip(
+            "Analyse the G matrix selected in the controller row and write "
+            "analysis/ beside it: plant_analysis.md, plant_analysis.json, per-channel and "
+            "per-heater CSVs, and figures for the gain structure, singular spectrum, "
+            "dominant directions, RGA, pairing, actuator redundancy, per-channel "
+            "reachability and the achievable operating point.\n\n"
+            "Everything is derived from G, so the report is reproducible from the artifact "
+            "alone. The operating-point section additionally uses the setpoint table and "
+            "the Controller section's max heater power, and says so when the artifact "
+            "carries no passive reference to measure a deviation against.\n\n"
+            "The 'controlled' ticks in the setpoint table are applied: dropping a channel "
+            "moves every result, because each one runs through the pseudo-inverse."
+        )
+        self.plant_analysis_button.clicked.connect(self.analyse_plant)
+        form.addRow(self.plant_analysis_button)
         self.notes_edit = self.QtWidgets.QLineEdit()
         self.notes_edit.setPlaceholderText("optional note stored with the run")
         form.addRow("notes", self.notes_edit)
@@ -773,6 +795,98 @@ class HeadlessRunTab:
             self._status(f"G matrix built; select it in the controller row. See {log}.", False)
         else:
             self._status(f"G matrix build failed (exit {code}); see {log}.", True)
+
+    # -- full plant analysis of the selected G matrix ------------------------ #
+    def analyse_plant(self) -> None:
+        """Analyse the selected G matrix and write the report beside it.
+
+        In-process rather than detached, like 'Generate plots': the whole cost is
+        an SVD and a pseudo-inverse of a matrix with one row per controlled sensor,
+        which is milliseconds at these sizes -- there is nothing here worth a
+        subprocess and its startup. Figures render through the Agg canvas directly
+        so they cannot disturb the Qt backend the 2D graph view is using.
+        """
+        scheme, path = self.panel.selected_controller()
+        if scheme != "mimo_pi" or not path:
+            self._status(
+                "Select a MIMO PI entry in the controller row first -- the analysis is "
+                "computed from its G matrix. Press 'Generate G matrix' if this graph has "
+                "none yet.",
+                True,
+            )
+            return
+        if not Path(path).is_dir():
+            self._status(f"The selected G matrix is gone: {path}", True)
+            return
+        try:
+            from .plant_report import write_plant_analysis
+
+            analysis = write_plant_analysis(
+                Path(path),
+                # The run's own channel selection, so the report describes the loop
+                # this tab would actually close rather than a different one.
+                enabled_sensor_ids=self.collect_enabled_sensors(),
+                # The operating-point section needs a target and a budget, and both
+                # live in this tab rather than in the artifact.
+                setpoints_K=self.collect_setpoint_overrides() or None,
+                heater_max_power_W=self._analysis_heater_caps(),
+            )
+        except Exception as exc:  # noqa: BLE001 - report rather than kill the tab
+            self._status(f"Could not analyse the plant: {exc}", True)
+            return
+        self._status(self._describe_analysis(analysis), False)
+
+    def _analysis_heater_caps(self) -> dict[int, float] | float:
+        """Per-heater max power, defaulting to the Controller section's value.
+
+        Mirrors what the run itself does (``_controller_heater_max_power``): a
+        heater with its own limit uses it, everything else falls back to the one
+        number on the left. Analysing against a different budget than the run
+        would use is how a report ends up disagreeing with the loop it describes.
+        """
+        from .simulation_parameters import SimulationParameters
+
+        widget = (getattr(self, "inputs", None) or {}).get("mimo_default_heater_max_power_W")
+        default = (
+            float(widget.value())
+            if widget is not None
+            else SimulationParameters().mimo_default_heater_max_power_W
+        )
+        overrides = {
+            node_id: float(fields["heater_max_power_W"])
+            for node_id, fields in self.collect_heater_overrides().items()
+            if "heater_max_power_W" in fields
+        }
+        if not overrides:
+            return default
+        rows = getattr(self, "_heater_rows_manifest", None) or []
+        caps = {int(row["node_id"]): default for row in rows if row.get("node_id")}
+        caps.update(overrides)
+        return caps
+
+    @staticmethod
+    def _describe_analysis(analysis: Any) -> str:
+        """The headline numbers, so the status bar says what was found rather than
+        only that something was written."""
+        stats = analysis.stats
+        spectrum = stats["spectrum"]
+        summary = stats["pairing"]["rga_summary"]
+        parts = [
+            f"{stats['n_sensors']}x{stats['n_heaters']} G",
+            f"cond {spectrum['condition_number']:.4g}",
+            f"sigma_1 carries {spectrum['top_energy_fraction'] * 100:.1f}%",
+        ]
+        if summary.get("rga_diag_negative") is not None:
+            parts.append(f"{summary['rga_diag_negative']} negative RGA diagonal entries")
+        bounded = (stats["uniform_lift"] or {}).get("nonnegative")
+        if bounded:
+            parts.append(f"uniform-lift residual {bounded['residual_rms_K_per_K']:.3g} K/K")
+        skipped = stats.get("skipped_figures") or []
+        tail = f" ({len(skipped)} figure(s) skipped)" if skipped else ""
+        return (
+            f"{'; '.join(parts)}. Wrote {len(analysis.figures)} figure(s) and "
+            f"{len(analysis.tables)} table(s) to {analysis.out_dir}{tail}"
+        )
 
     # -- per-sensor setpoints ------------------------------------------------ #
     def sensor_manifest(self, graph_name: str) -> list[dict[str, str]]:
