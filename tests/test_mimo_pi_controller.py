@@ -965,3 +965,39 @@ def test_a_genuinely_unreachable_channel_still_reads_unreachable(monkeypatch) ->
     assert got["unserved_sensor_ids"] == [10]
     assert got["unserved_cause"] == "unreachable"
     assert got["relevant_heater_headroom_W"] > 0.0
+
+
+def test_the_integral_does_not_accumulate_in_unreachable_directions() -> None:
+    """27 independent integrators have nothing stopping them diverging from each
+    other, and the differential component lands in G's weak singular directions --
+    commanded, never delivered, so the errors driving it never close. A 27.8 h run
+    ended with ki*I spanning 15.9 K on a 26.4 K command while its channel spread grew
+    from 0.101 K to 0.196 K, the mean having converged perfectly."""
+    from graph_visualizer.simulation_model import PreparedSimulation
+    from graph_visualizer.simulation_parameters import SimulationParameters
+
+    G = _ill_conditioned_plant()               # sigma = [10.0, 0.0025]: one strong, one absent
+    sim = PreparedSimulation(
+        node_ids=np.array([1, 2], dtype=int), z=np.array([50.0, 50.0, 1.0]),
+        initial_temperatures_K=np.array([50.0, 50.0]),
+        params=replace(SimulationParameters(), mimo_lambda_u=1.0e-3, mimo_lambda_u_relative=1.0e-4),
+    )
+    u_svd, sigma, _ = np.linalg.svd(G, full_matrices=False)
+    gain = {"left_singular": u_svd, "singular_values": sigma}
+    valid = np.array([True, True])
+
+    common = u_svd[:, 0] * 1.0                 # purely along the STRONG direction
+    weak = u_svd[:, 1] * 1.0                   # purely along the ABSENT direction
+    got_common = sim._mimo_pi_modal_integrand(common, gain, valid)
+    got_weak = sim._mimo_pi_modal_integrand(weak, gain, valid)
+    assert np.linalg.norm(got_common) == pytest.approx(1.0, rel=1e-3), "strong mode passes through"
+    assert np.linalg.norm(got_weak) < 0.01, "the plant cannot deliver this; it must not accumulate"
+
+    # A disabled channel must stay at zero, even though the transform mixes modes.
+    partly = sim._mimo_pi_modal_integrand(np.array([1.0, 1.0]), gain, np.array([True, False]))
+    assert partly[1] == 0.0
+
+    # And with no regularization asked for, it is a no-op.
+    off = replace(sim.params, mimo_lambda_u=0.0)
+    sim.params = off
+    assert np.allclose(sim._mimo_pi_modal_integrand(weak, gain, valid), weak)

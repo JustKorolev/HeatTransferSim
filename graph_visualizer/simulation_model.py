@@ -1897,6 +1897,45 @@ class PreparedSimulation:
             "worst_shortfall_K": float(shortfall.max()) if shortfall.size else 0.0,
         }
 
+    def _mimo_pi_modal_integrand(self, integrand: np.ndarray, gain: dict, valid: np.ndarray) -> np.ndarray:
+        """Damp the integrand in G's weak output directions before accumulating it.
+
+        The 27 per-channel integrators are independent, so nothing stops them
+        diverging from each other: a channel that stays cold winds up while one that
+        stays hot winds down. That DIFFERENTIAL component lives in G's weak singular
+        directions -- the ones the allocator damps out with lambda -- so it is
+        commanded and never delivered, the errors driving it never close, and the
+        divergence feeds itself. On a 27.8 h run the integrals ended spanning 15.9 K
+        (ki*I from -8.8 to +7.0) on a 26.4 K command, and the channel-to-channel
+        spread grew monotonically from 0.101 K at 2.8 h to 0.196 K at the end while
+        the MEAN error converged perfectly.
+
+        Scaling each mode's integrand by the same sigma^2/(sigma^2 + lambda) the
+        allocator applies makes the integral respect the reachability judgement the
+        allocator has already made: modes the plant cannot deliver stop
+        accumulating. No new parameter -- with lambda_u = 0 every factor is 1 and
+        this is a no-op, so it only ever does what the configured regularization
+        already implies.
+        """
+        left = gain.get("left_singular")
+        sigma = gain.get("singular_values")
+        if left is None or sigma is None:
+            return integrand
+        left = np.asarray(left, dtype=float)
+        sigma = np.asarray(sigma, dtype=float).reshape(-1)
+        if left.shape[0] != integrand.shape[0] or not sigma.size:
+            return integrand
+        absolute = max(0.0, float(getattr(self.params, "mimo_lambda_u", 0.0) or 0.0))
+        if absolute <= 0.0:
+            return integrand  # no regularization asked for; nothing is unreachable
+        relative = max(0.0, float(getattr(self.params, "mimo_lambda_u_relative", 0.0) or 0.0))
+        lam = max(absolute, relative * float(sigma[0]) ** 2)
+        damping = sigma**2 / (sigma**2 + lam)
+        modal = left.T @ np.asarray(integrand, dtype=float).reshape(-1)
+        # Re-zero the excluded channels: the transform spreads a mode across every
+        # sensor, so a disabled one would otherwise start accumulating again.
+        return np.where(valid, left @ (damping * modal), 0.0)
+
     def _mimo_pi_filtered_readout(self, y: np.ndarray, update_state: bool) -> np.ndarray:
         """First-order low-pass on the sensor readouts the loop regulates.
 
@@ -2089,6 +2128,10 @@ class PreparedSimulation:
             cache = {
                 "G": G,
                 "passive_K": passive,
+                # Output singular basis of G, cached because G is fixed for the run.
+                # The integral is damped in this basis; see _mimo_pi_modal_integrand.
+                "left_singular": np.linalg.svd(G, full_matrices=False)[0],
+                "singular_values": np.linalg.svd(G, compute_uv=False),
                 "sensor_ids": sensor_ids,
                 "heater_ids": heater_ids,
                 "per_sensor": preset.get("per_sensor", {}),
@@ -2215,6 +2258,7 @@ class PreparedSimulation:
         # steady state, so this biases the transient without adding an offset.
         overshoot_scale = max(0.0, float(getattr(self.params, "mimo_pi_overshoot_integral_scale", 1.0)))
         integrand = np.where(error < 0.0, error * overshoot_scale, error)
+        integrand = self._mimo_pi_modal_integrand(integrand, gain, valid)
         candidate = integral + integrand * dt
 
         # v is a virtual command in KELVIN: the steady deviation we want the plant
