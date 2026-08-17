@@ -31,6 +31,7 @@ from .rga_report import (
     RGA_CSV,
     RGA_PNG,
     apply_channel_ticks,
+    diagonal_axis_scale,
     has_pairing_verdict,
     render_rga_figure,
     write_rga_csv,
@@ -212,6 +213,17 @@ def figure_pairing(path: Path, stats: dict[str, Any]) -> Path | None:
     grid = fig.add_gridspec(2, 1, hspace=0.05)
     ax_share = fig.add_subplot(grid[0, 0])
     _bar_channels(ax_share, share, sensor_ids, color=ACCENT)
+    # The benchmark that makes this panel mean something: if a heater spread its
+    # influence perfectly evenly over every sensor, its own sensor would still get
+    # 100/n %. Landing AT that line means the pairing is not a pairing at all.
+    even = 100.0 / max(len(sensor_ids), 1)
+    ax_share.axhline(even, color="#2a8a4a", linewidth=1.1, linestyle="--")
+    ax_share.annotate(
+        f"perfectly even spreading = {even:.2f}%",
+        xy=(0.995, even), xycoords=("axes fraction", "data"),
+        ha="right", va="bottom", fontsize=7, color="#2a8a4a",
+    )
+    ax_share.set_ylim(0.0, max(float(share.max()) if share.size else 0.0, even) * 1.25)
     ax_share.set_ylabel("paired influence\n[% of row]", fontsize=8)
     ax_share.tick_params(labelbottom=False)
     ax_share.set_title(
@@ -225,10 +237,11 @@ def figure_pairing(path: Path, stats: dict[str, Any]) -> Path | None:
         ax_diag, diag, sensor_ids,
         color=[NEGATIVE if v < 0 else POSITIVE for v in diag],
     )
-    ax_diag.set_yscale("symlog", linthresh=1.0)
+    scale, scale_kwargs = diagonal_axis_scale(diag)
+    ax_diag.set_yscale(scale, **scale_kwargs)
     ax_diag.axhline(1.0, color="#2a8a4a", linewidth=1.1, linestyle="--")
     ax_diag.axhline(0.0, color="black", linewidth=0.8)
-    ax_diag.set_ylabel("RGA diagonal\n(symlog)", fontsize=8)
+    ax_diag.set_ylabel(f"RGA diagonal\n({scale})", fontsize=8)
     ax_diag.set_xlabel("controlled sensor node id", fontsize=9)
     ax_diag.set_title(
         f"RGA diagonal — {summary['rga_diag_negative']} of {len(sensor_ids)} negative "

@@ -42,6 +42,8 @@ RGA_CSV = "rga.csv"
 # so they are thinned rather than drawn on top of each other.
 MAX_TICK_LABELS = 30
 FOOTER_FONTSIZE = 7.5
+# Below this span, a log axis is all empty decades -- see diagonal_axis_scale.
+SYMLOG_MIN_EXTENT = 10.0
 
 
 def rga_summary(
@@ -265,14 +267,13 @@ def render_rga_figure(
         ax_diag.barh(positions, diag, color=colors, height=0.75)
         ax_diag.axvline(1.0, color="#2a8a4a", linewidth=1.2, linestyle="--", label="ideal (1)")
         ax_diag.axvline(0.0, color="black", linewidth=0.8)
-        # Symlog for the same reason the heatmap uses it: one channel with a huge
-        # relative gain would otherwise flatten all the others to invisible stubs.
-        ax_diag.set_xscale("symlog", linthresh=1.0)
+        scale, scale_kwargs = diagonal_axis_scale(diag)
+        ax_diag.set_xscale(scale, **scale_kwargs)
         ax_diag.set_ylim(n_s - 0.5, -0.5)          # match the heatmap's row order
         # Thinned on the same rule as the heatmap, so the two panels' row labels
         # stay in step instead of one of them silently going unreadable.
         apply_channel_ticks(ax_diag.set_yticks, ax_diag.set_yticklabels, sensor_ids, rotation=0)
-        ax_diag.set_xlabel("diagonal RGA element (symlog)", fontsize=9)
+        ax_diag.set_xlabel(f"diagonal RGA element ({scale})", fontsize=9)
         ax_diag.set_title(
             f"Pairing verdict: {summary['rga_diag_negative']} of {n_s} negative", fontsize=10
         )
@@ -309,6 +310,24 @@ def _wrap_footer(lines: Sequence[str], width_in: float, fontsize: float) -> list
     for line in lines:
         wrapped.extend(textwrap.wrap(line, columns) or [""])
     return wrapped
+
+
+def diagonal_axis_scale(values: Sequence[float]) -> tuple[str, dict[str, Any]]:
+    """Linear unless the diagonal actually spans decades.
+
+    symlog with linthresh=1 is right when one channel has a relative gain of 50
+    and another 0.05. It is actively WRONG when the whole diagonal sits inside
+    +/-1 -- which is precisely what a plant with no paired authority looks like.
+    Every bar then lands in the linear region, and the axis spends its range on
+    decades that hold no data, so the figure reads as "nothing here" when the
+    finding is that every pairing is negative.
+    """
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)] if finite.size else finite
+    extent = float(np.max(np.abs(finite))) if finite.size else 0.0
+    if extent <= SYMLOG_MIN_EXTENT:
+        return "linear", {}
+    return "symlog", {"linthresh": 1.0}
 
 
 def apply_channel_ticks(set_ticks, set_labels, ids: Sequence[int], *, rotation: int) -> None:

@@ -15,6 +15,7 @@ import pytest
 
 from graph_visualizer.modal_reduction import relative_gain_array
 from graph_visualizer.rga_report import (
+    diagonal_axis_scale,
     has_pairing_verdict,
     render_rga_figure,
     rga_summary,
@@ -76,6 +77,25 @@ def test_square_but_non_finite_diagonal_still_withholds_the_verdict():
     assert has_pairing_verdict(summary) is False
     assert np.isnan(summary["cond_G"])
     assert "not reported" in verdict_lines(summary)[1]
+
+
+def test_diagonal_axis_stays_linear_when_the_whole_diagonal_is_small():
+    """A plant with no paired authority has every diagonal entry inside +/-1.
+    symlog then spends the axis on empty decades and every bar collapses into the
+    linear region, so the figure reads "nothing here" when the finding is that
+    every pairing reverses. Measured on the real 27x27: min -0.669, max +0.001."""
+    scale, kwargs = diagonal_axis_scale([-0.6686, -0.0004, 0.0011, -0.117])
+    assert scale == "linear" and kwargs == {}
+
+
+def test_diagonal_axis_goes_symlog_when_it_genuinely_spans_decades():
+    scale, kwargs = diagonal_axis_scale([11.0, -10.0, 0.05])
+    assert scale == "symlog" and kwargs == {"linthresh": 1.0}
+
+
+def test_diagonal_axis_ignores_non_finite_entries():
+    scale, _ = diagonal_axis_scale([np.nan, 0.5, np.inf])
+    assert scale == "linear"
 
 
 def test_figure_renders_both_layouts(tmp_path):
