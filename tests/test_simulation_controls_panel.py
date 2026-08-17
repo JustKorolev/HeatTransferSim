@@ -301,12 +301,19 @@ class QTableWidgetItem:
     def __init__(self, text: str = "") -> None:
         self._text = str(text)
         self._flags = 0
+        self._check_state = _Qt.Unchecked
 
     def text(self) -> str:
         return self._text
 
     def setFlags(self, flags) -> None:
         self._flags = flags
+
+    def setCheckState(self, state) -> None:
+        self._check_state = state
+
+    def checkState(self):
+        return self._check_state
 
 
 class QTreeWidget(_Widget):
@@ -477,6 +484,11 @@ class _Qt:
     ItemIsEnabled = 32
     ItemIsSelectable = 1
     ItemIsEditable = 2
+    # Check state: the headless setpoint table's "controlled" column is how a
+    # channel the plant cannot serve gets out of the MIMO PI loop.
+    ItemIsUserCheckable = 16
+    Checked = 2
+    Unchecked = 0
 
 
 class _QtCore:

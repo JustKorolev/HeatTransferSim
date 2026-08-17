@@ -1860,8 +1860,30 @@ class PreparedSimulation:
         # small one are held to the same relative standard.
         scale = np.maximum(np.abs(np.asarray(v_cmd, dtype=float)), 1.0e-9)
         short = shortfall > np.maximum(0.05 * scale, 1.0e-3)
-        bounded = headroom <= 1.0e-6 * max(float(np.sum(maxima)), 1.0)
         ids = [int(s) for s in sensor_ids]
+        # Judge saturation on the heaters that actually REACH the short channels, not
+        # on the total. The docstring above promised "the heaters that reach this
+        # channel are at their bounds", but the test was global headroom -- so with 25
+        # idle heaters it read "unreachable" no matter how hard the two relevant ones
+        # were pinned. That is a much stronger claim than the evidence supported, and
+        # it is the claim a reader acts on.
+        gain = np.abs(np.asarray(G, dtype=float))
+        commands = np.asarray(u, dtype=float)
+        per_heater_headroom = np.maximum(0.0, maxima - commands)
+        relevant_headroom = float("nan")
+        if short.any() and gain.size:
+            rows = gain[short]
+            # A heater "reaches" a channel if its gain there is a meaningful share of
+            # the best heater for that channel.
+            reaches = np.any(rows >= 0.25 * np.max(rows, axis=1, keepdims=True), axis=0)
+            if bool(np.any(reaches)):
+                relevant_headroom = float(np.sum(per_heater_headroom[reaches]))
+                relevant_total = float(np.sum(maxima[reaches]))
+            else:
+                relevant_headroom, relevant_total = headroom, float(np.sum(maxima))
+            bounded = relevant_headroom <= 1.0e-3 * max(relevant_total, 1.0)
+        else:
+            bounded = False
         return {
             "channel_shortfall_K": [float(v) for v in shortfall],
             "unserved_sensor_ids": [i for i, flag in zip(ids, short) if flag],
@@ -1869,6 +1891,9 @@ class PreparedSimulation:
             # not "the command was capped".
             "unserved_cause": ("saturated" if bounded else "unreachable") if short.any() else "none",
             "heater_headroom_W": headroom,
+            # Headroom on the heaters that reach the short channels. This, not the
+            # total, is what decides whether more installed power would help.
+            "relevant_heater_headroom_W": relevant_headroom,
             "worst_shortfall_K": float(shortfall.max()) if shortfall.size else 0.0,
         }
 
@@ -2159,7 +2184,22 @@ class PreparedSimulation:
             [float(getattr(model.nodes[int(s)], "controller_setpoint_K", np.nan)) for s in sensor_ids],
             dtype=float,
         )
-        valid = np.isfinite(y) & np.isfinite(setpoints)
+        # An unticked sensor must actually leave the loop. enabled_sensor_node_ids was
+        # honoured by the manual and PID paths and ignored here, so there was no way
+        # at all to drop a channel from MIMO PI control -- and a channel the plant
+        # cannot serve does not merely track badly, it drags the whole allocation.
+        # Two such sensors on no_mli_high_res_v3 sat 2.6 K cold, demanded the highest
+        # deviation of all 27, and pushed the other 25 a further 0.12 K above
+        # setpoint through the least-squares fit.
+        #
+        # Zeroing the weight, not dropping the row: G's shape is fixed at build time
+        # and its rows outlive any later disabling, exactly as its columns do for a
+        # disabled heater. No rebuild is needed to exclude a channel.
+        enabled_sensors = _enabled_node_id_set(self.params.enabled_sensor_node_ids)
+        controlled = np.array(
+            [_node_id_enabled(enabled_sensors, int(s)) for s in sensor_ids], dtype=bool
+        )
+        valid = np.isfinite(y) & np.isfinite(setpoints) & controlled
         error = np.where(valid, setpoints - y, 0.0)
 
         dt = max(float(self.params.dt_s), 1.0e-12)

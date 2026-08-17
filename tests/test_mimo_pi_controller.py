@@ -928,3 +928,40 @@ def test_a_measured_passive_reference_overrides_the_derived_one(monkeypatch) -> 
     # 0 falls back to the derived value, so an unset field changes nothing.
     plain = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
     assert plain.params.mimo_pi_passive_reference_K == 0.0
+
+
+def test_saturation_is_judged_on_the_heaters_that_reach_the_channel(monkeypatch) -> None:
+    """The docstring promised "the heaters that reach this channel are at their
+    bounds" and the test was TOTAL headroom, so on a 27-heater plant with 25 idle it
+    read "unreachable" however hard the two relevant heaters were pinned. That is a
+    stronger claim than the evidence supports, and it is the one a reader acts on --
+    "unreachable" says stop tuning and change the graph, "saturated" says add power.
+    """
+    from graph_visualizer.simulation_model import PreparedSimulation
+
+    # Channel 0 is reached only by heater 0; heaters 1-2 barely touch it and are idle.
+    G = np.array([[1.0, 0.01, 0.01], [0.01, 1.0, 0.5], [0.01, 0.5, 1.0]])
+    maxima = np.array([5.0, 100.0, 100.0])
+    u = np.array([5.0, 0.0, 0.0])          # heater 0 pinned, plenty of total headroom
+    v_cmd = np.array([20.0, 0.0, 0.0])     # channel 0 wants far more than 5 W can give
+    got = PreparedSimulation._mimo_pi_reachability(
+        None, G, u, v_cmd, [10, 11, 12], maxima
+    )
+    assert got["unserved_sensor_ids"] == [10]
+    assert got["unserved_cause"] == "saturated", "heater 0 is at its bound"
+    assert got["heater_headroom_W"] == pytest.approx(200.0), "total headroom is huge"
+    assert got["relevant_heater_headroom_W"] == pytest.approx(0.0)
+
+
+def test_a_genuinely_unreachable_channel_still_reads_unreachable(monkeypatch) -> None:
+    """When the reaching heaters have room and the channel is still short, no amount
+    of installed power helps -- serving it would need cooling somewhere."""
+    from graph_visualizer.simulation_model import PreparedSimulation
+
+    G = np.array([[1.0, 1.0], [1.0, 1.0]])   # the two channels are indistinguishable
+    got = PreparedSimulation._mimo_pi_reachability(
+        None, G, np.array([1.0, 1.0]), np.array([10.0, 2.0]), [10, 11], np.array([50.0, 50.0])
+    )
+    assert got["unserved_sensor_ids"] == [10]
+    assert got["unserved_cause"] == "unreachable"
+    assert got["relevant_heater_headroom_W"] > 0.0

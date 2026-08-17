@@ -232,8 +232,8 @@ class HeadlessRunTab:
         )
         setpoint_help.setWordWrap(True)
         setpoint_layout.addWidget(setpoint_help)
-        self.setpoint_table = self.QtWidgets.QTableWidget(0, 2)
-        self.setpoint_table.setHorizontalHeaderLabels(["sensor", "setpoint K"])
+        self.setpoint_table = self.QtWidgets.QTableWidget(0, 3)
+        self.setpoint_table.setHorizontalHeaderLabels(["sensor", "setpoint K", "controlled"])
         self.setpoint_table.horizontalHeader().setStretchLastSection(True)
         self.setpoint_table.setMinimumHeight(200)
         setpoint_layout.addWidget(self.setpoint_table, 1)
@@ -480,7 +480,14 @@ class HeadlessRunTab:
         # run through the saved file with nothing in this tab to show it -- the run
         # would quietly drive fewer heaters than the controller was designed for.
         # Every heater runs headless; None is the "no filter" convention.
-        return replace(params, enabled_heater_node_ids=None)
+        # Sensors, unlike heaters, ARE filterable headless: unticking one is how a
+        # channel the plant cannot serve gets out of the loop, and the column that
+        # does it lives in this tab where the run can see it.
+        return replace(
+            params,
+            enabled_heater_node_ids=None,
+            enabled_sensor_node_ids=self.collect_enabled_sensors(),
+        )
 
     def persist_parameters(self) -> bool:
         """Write the current form back to <graph>/simulation_parameters.json.
@@ -849,6 +856,18 @@ class HeadlessRunTab:
             # Prefilled, not blank: this table is the run's only source of
             # setpoints, so an unedited row still has to say what it wants.
             table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(f"{DEFAULT_SETPOINT_K:g}"))
+            # Untick to drop a channel from the loop entirely. A sensor the plant
+            # cannot serve does not just track badly: it holds the largest error, so
+            # it demands the largest deviation, and the allocator's least-squares fit
+            # pushes every other channel above setpoint trying to help it.
+            control = self.QtWidgets.QTableWidgetItem("")
+            control.setFlags(
+                self.QtCore.Qt.ItemIsEnabled | self.QtCore.Qt.ItemIsUserCheckable
+            )
+            control.setCheckState(
+                self.QtCore.Qt.Unchecked if monitor else self.QtCore.Qt.Checked
+            )
+            table.setItem(index, 2, control)
         if announce and not rows and folder is not None:
             self._status(
                 f"{folder.name} declares no sensors: its nodes.csv has no is_sensor rows "
@@ -941,6 +960,33 @@ class HeadlessRunTab:
             except (TypeError, ValueError):
                 continue
         return overrides
+
+    def collect_enabled_sensors(self):
+        """Ticked sensor ids, or None when nothing has been unticked.
+
+        None is the "no filter" convention, so a tab nobody has touched behaves
+        exactly as before. Monitor-only sensors start unticked and are irrelevant to
+        the controller either way, so they are not counted as a filter on their own.
+        """
+        table = getattr(self, "setpoint_table", None)
+        rows = getattr(self, "_sensor_rows_manifest", None) or []
+        if table is None or not rows:
+            return None
+        enabled: list[int] = []
+        unticked_controllable = False
+        for index, row in enumerate(rows):
+            monitor = str(row.get("monitor_only", "")).lower() == "true"
+            cell = table.item(index, 2)
+            ticked = bool(cell is not None and cell.checkState() == self.QtCore.Qt.Checked)
+            try:
+                node_id = int(row["node_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if ticked:
+                enabled.append(node_id)
+            elif not monitor:
+                unticked_controllable = True
+        return enabled if unticked_controllable else None
 
     def apply_setpoint_to_all_sensors(self) -> None:
         """Write the 'set all' value into every row, as a starting point to edit."""
