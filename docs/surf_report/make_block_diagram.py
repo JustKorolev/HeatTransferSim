@@ -32,7 +32,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, FancyBboxPatch
 
-W, H = 1260.0, 580.0
+W, H = 1260.0, 556.0
 
 # DejaVu Sans (matplotlib's default) sets roughly 0.84 * fontsize per character,
 # noticeably wider than the browser fonts this layout was first sketched against.
@@ -132,10 +132,10 @@ def build(theme: str) -> plt.Figure:
     d = Diagram(theme)
 
     # ---------------------------------------------------- solved once, offline
-    d.note(490, 24, "— solved once, offline, from the model —",
+    d.note(490, 24, "solved once, offline, from the model",
            color=d.c["accent_orange"], ha="center")
     d.box(100, 40, 280, 76, "off", "Passive reference  ŷ_passive",
-          ("derived from the cooler curve,", "not measured — 17.40 vs 17.29 W"))
+          ("where the sensors sit with", "every heater off, from the cooler curve"))
     d.box(615, 40, 250, 76, "off", "DC gain  G  (27 × 27)",
           ("solved once from  L T = P", "cond 366,  σ₁ = 81 %"))
 
@@ -174,7 +174,7 @@ def build(theme: str) -> plt.Figure:
     d.wire([(559, 290), (587, 290)])
     d.signal(570, 278, "v")
     d.note(540, 366,
-           "v = r_dev + v_fb   —   a demand in K; the allocator turns it into W",
+           "v = r_dev + v_fb   ·   a demand in K; the allocator turns it into W",
            ha="center")
 
     d.box(590, 236, 295, 108, "live", "Bounded allocator",
@@ -204,10 +204,6 @@ def build(theme: str) -> plt.Figure:
     d.box(590, 402, 250, 58, "fix", "Measurement filter", ("τ_f = 900 s",))
     d.wire([(590, 430), (200, 430), (200, 313)])
     d.signal(400, 418, "y_f")
-    d.note(715, 486,
-           "hides the one-step parasitic path, passes the 34 h mode"
-           "   —   K_p:  0.09 → 5.5",
-           color=d.c["accent_green"], ha="center")
 
     # ---------------------------------------------------------- offline feed
     d.wire([(715, 118), (715, 238)], dashed=True)
@@ -217,12 +213,12 @@ def build(theme: str) -> plt.Figure:
     # The allocator's three weights, spelled out once. On the slide these are the
     # only symbols an audience has not already been told, and leaving them to the
     # speaker means the equation reads as decoration.
-    d.note(630, 516,
+    d.note(630, 496,
            "λ: damping, scaled to G's own spectrum   ·   ρ: rate penalty (0 by default)",
            size=9.0, ha="center")
-    d.note(630, 546,
+    d.note(630, 526,
            "The feedforward supplies the holding power; the PI only trims it.  "
-           "Nothing in the live loop inverts G — the allocator solves against it under u ≥ 0.",
+           "Nothing in the live loop inverts G; the allocator solves against it under u ≥ 0.",
            size=9.5, ha="center")
     return d.fig
 
