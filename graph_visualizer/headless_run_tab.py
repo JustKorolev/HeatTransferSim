@@ -167,6 +167,8 @@ class HeadlessRunTab:
         resume_row.addWidget(self.replot_button)
         form.addRow("resume", resume_row)
         self.resume_combo.currentIndexChanged.connect(self._sync_replot_enabled)
+        self.resume_combo.currentIndexChanged.connect(self.load_resume_run_settings)
+        self.resume_combo.currentIndexChanged.connect(self._sync_initial_temperature_enabled)
         self._sync_replot_enabled()
         # MIMO PI needs one object: the plant's DC gain. In simulation that is an
         # exact solve of L T = P, not a step-test campaign -- 74.3% of G lives in
@@ -520,9 +522,21 @@ class HeadlessRunTab:
         from .simulation_parameters import SimulationParameters, load_simulation_parameters
 
         folder = self._selected_folder()
-        path = (folder / "simulation_parameters.json") if folder else None
-        if path is not None and path.is_file():
-            base, _extras = load_simulation_parameters(path)
+        # Fields with no widget keep the base's value, so on a resume the base has to
+        # be the RUN's own file. Taking the graph's instead would quietly revert every
+        # such field to whatever the graph was last saved with -- a "resume" that
+        # continues the state but not the physics.
+        resume_dir = self.selected_resume_dir()
+        candidates = [
+            path
+            for path in (
+                (resume_dir / "simulation_parameters.json") if resume_dir else None,
+                (folder / "simulation_parameters.json") if folder else None,
+            )
+            if path is not None and path.is_file()
+        ]
+        if candidates:
+            base, _extras = load_simulation_parameters(candidates[0])
         else:
             base = SimulationParameters()
         # Widgets win; fields without a widget keep the graph's saved value.
@@ -1326,6 +1340,253 @@ class HeadlessRunTab:
         button = getattr(self, "replot_button", None)
         if button is not None:
             button.setEnabled(self.selected_resume_dir() is not None)
+
+    def _sync_initial_temperature_enabled(self, *_: Any) -> None:
+        """Grey out the initial temperature while a resume target is selected.
+
+        A resume takes its starting state from the checkpoint and ignores this field
+        entirely (see the runner's _prepare). Leaving it live invites the reading
+        that a resumed run starts from it -- exactly the question it raises when the
+        form still shows 50.1 K beside a run that had got to 46 K.
+        """
+        resuming = self.selected_resume_dir() is not None
+        for name in ("initial_spin", "use_initial", "initial_temperature_all_spin"):
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            widget.setEnabled(not resuming)
+            if resuming:
+                widget.setToolTip(
+                    "Ignored while resuming: the checkpoint supplies the starting state. "
+                    "Select '(fresh run)' in the resume row to use this."
+                )
+
+    def load_resume_run_settings(self, *_: Any) -> None:
+        """Load the selected resume target's OWN settings into this form.
+
+        Without this, picking a run to resume left the form showing the graph's saved
+        parameters and a default setpoint table -- so continuing a run silently
+        changed the setpoints, the controlled-sensor filter and the heater limits it
+        had been running with. Everything needed is already written beside the run.
+
+        Each part is loaded independently and reported, because a run may predate any
+        of these files and a partial load beats none as long as it says what it
+        could not do.
+        """
+        run_dir = self.selected_resume_dir()
+        if run_dir is None:
+            return
+        # Only on a genuine change of target. refresh_resume_runs() rebuilds the combo
+        # and re-selects what was selected before, which fires this again -- and a
+        # second load would silently discard whatever the user had tuned since the
+        # first one. Refreshing the list is not a request to revert the form.
+        if getattr(self, "_resume_settings_loaded_from", None) == run_dir:
+            return
+        self._resume_settings_loaded_from = run_dir
+        loaded: list[str] = []
+        missing: list[str] = []
+
+        params = None
+        params_path = run_dir / "simulation_parameters.json"
+        if params_path.is_file():
+            try:
+                from .simulation_parameters import load_simulation_parameters
+
+                params, _extras = load_simulation_parameters(params_path)
+                self.panel.set_params(params)
+                self._params_source = f"loaded from {run_dir.name}/{params_path.name}"
+                loaded.append("parameters")
+            except Exception as exc:  # noqa: BLE001 - report, do not kill the tab
+                missing.append(f"parameters ({exc})")
+        else:
+            missing.append("parameters")
+
+        config: dict = {}
+        config_path = run_dir / "config.json"
+        if config_path.is_file():
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8")) or {}
+            except Exception:  # noqa: BLE001
+                config = {}
+        # These two live in config.json, not the parameter file, so set_params above
+        # cannot have restored them.
+        for key, attribute in (
+            ("snapshot_interval_s", "snapshot_spin"),
+            ("checkpoint_interval_s", "checkpoint_spin"),
+        ):
+            widget = getattr(self, attribute, None)
+            if widget is not None and isinstance(config.get(key), (int, float)):
+                widget.setValue(float(config[key]))
+                loaded.append(key)
+
+        if self._select_controller_for_resume(params, config):
+            loaded.append("controller")
+
+        setpoints = self._read_id_map(run_dir / "setpoints.json")
+        if not setpoints:
+            try:
+                setpoints = {
+                    int(k): float(v) for k, v in (config.get("setpoints_K") or {}).items()
+                }
+            except (TypeError, ValueError):
+                setpoints = {}
+        if setpoints and self._apply_setpoints(setpoints):
+            loaded.append(f"{len(setpoints)} setpoint(s)")
+        elif not setpoints:
+            missing.append("setpoints")
+
+        # None is the no-filter convention, so it is NOT "load nothing": it means
+        # every controllable sensor was in the loop, and the ticks have to be put
+        # back to that rather than left wherever the form happened to be.
+        if params is not None:
+            count = self._apply_enabled_sensors(params.enabled_sensor_node_ids)
+            if count is not None:
+                loaded.append(f"{count} controlled sensor(s)")
+
+        overrides = self._read_heater_overrides(run_dir)
+        if not overrides:
+            overrides = config.get("heater_overrides") or {}
+        if overrides and self._apply_heater_overrides(overrides):
+            loaded.append(f"{len(overrides)} heater override(s)")
+
+        self._sync_initial_temperature_enabled()
+        summary = ", ".join(loaded) if loaded else "nothing"
+        message = f"Loaded from {run_dir.name}: {summary}"
+        if missing:
+            message += f". NOT found: {', '.join(missing)} (the form's values stand)."
+        self._status(message, bool(missing) and not loaded)
+
+    @staticmethod
+    def _read_id_map(path: Path) -> dict:
+        """{int node id: float} from a run's json sidecar; {} if absent or unreadable."""
+        if not path.is_file():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8")) or {}
+            return {int(k): float(v) for k, v in raw.items()}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    @staticmethod
+    def _read_heater_overrides(run_dir: Path) -> dict:
+        path = run_dir / "heater_overrides.json"
+        if not path.is_file():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _select_controller_for_resume(self, params, config) -> bool:
+        """Re-select the artifact the run used, matched by NAME rather than by path.
+
+        A run's recorded path is the path on the machine that produced it, so
+        matching it literally fails for any run copied between machines. The
+        artifact's folder name is what actually identifies it.
+        """
+        combo = getattr(self, "controller_scheme_combo", None)
+        if combo is None:
+            return False
+        wanted = ""
+        for candidate in (
+            getattr(params, "mimo_pi_gain_matrix_path", "") if params is not None else "",
+            getattr(params, "modal_controller_path", "") if params is not None else "",
+            config.get("controller_path") or "",
+        ):
+            if candidate:
+                wanted = Path(str(candidate)).name
+                break
+        if not wanted:
+            return False
+        for index in range(combo.count()):
+            data = combo.itemData(index)
+            path = data[1] if isinstance(data, (tuple, list)) and len(data) > 1 else ""
+            if path and Path(str(path)).name == wanted:
+                combo.setCurrentIndex(index)
+                return True
+        self._status(
+            f"The run used controller '{wanted}', which is not in this graph's list; "
+            "the current selection stands.",
+            True,
+        )
+        return False
+
+    def _apply_setpoints(self, setpoints: dict) -> bool:
+        table = getattr(self, "setpoint_table", None)
+        rows = getattr(self, "_sensor_rows_manifest", None) or []
+        if table is None or not rows:
+            return False
+        applied = 0
+        for index, row in enumerate(rows):
+            try:
+                node_id = int(row["node_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if node_id in setpoints:
+                value = f"{setpoints[node_id]:g}"
+                table.setItem(index, 1, self.QtWidgets.QTableWidgetItem(value))
+                applied += 1
+        return applied > 0
+
+    def _apply_enabled_sensors(self, enabled):
+        """Restore the controlled ticks. Returns how many ended ticked, or None."""
+        table = getattr(self, "setpoint_table", None)
+        rows = getattr(self, "_sensor_rows_manifest", None) or []
+        if table is None or not rows:
+            return None
+        allowed = None if enabled is None else {int(v) for v in enabled}
+        ticked = 0
+        for index, row in enumerate(rows):
+            cell = table.item(index, 2)
+            if cell is None:
+                continue
+            monitor = str(row.get("monitor_only", "")).lower() == "true"
+            try:
+                node_id = int(row["node_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # No filter means every controllable sensor was in the loop; monitor-only
+            # rows are not controlled under either convention.
+            on = (not monitor) if allowed is None else (node_id in allowed)
+            cell.setCheckState(
+                self.QtCore.Qt.Checked if on else self.QtCore.Qt.Unchecked
+            )
+            ticked += int(on)
+        return ticked
+
+    def _apply_heater_overrides(self, overrides: dict) -> bool:
+        table = getattr(self, "heater_table", None)
+        rows = getattr(self, "_heater_rows_manifest", None) or []
+        if table is None or not rows:
+            return False
+        columns = (
+            (1, "heater_max_power_W"),
+            (2, "heater_slew_rate_W_per_s"),
+            (3, "heater_efficiency"),
+            (4, "sensor_manual_power_W"),
+        )
+        by_id: dict = {}
+        for key, fields in overrides.items():
+            try:
+                by_id[int(key)] = dict(fields or {})
+            except (TypeError, ValueError):
+                continue
+        applied = 0
+        for index, row in enumerate(rows):
+            try:
+                node_id = int(row["node_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            fields = by_id.get(node_id, {})
+            # Cleared, not merged: a blank cell means "use the Controller defaults",
+            # so a heater the run did not override must come back blank rather than
+            # keeping an override from whatever the form showed before.
+            for column, name in columns:
+                value = fields.get(name)
+                text = "" if value is None else f"{float(value):g}"
+                table.setItem(index, column, self.QtWidgets.QTableWidgetItem(text))
+            applied += int(bool(fields))
+        return applied > 0
 
     def regenerate_run_plots(self) -> None:
         run_dir = self.selected_resume_dir()

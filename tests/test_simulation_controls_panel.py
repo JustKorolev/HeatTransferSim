@@ -237,6 +237,11 @@ class QComboBox(_Widget):
             return self.items[self.index][1]
         return None
 
+    def itemData(self, index):
+        if 0 <= int(index) < len(self.items):
+            return self.items[int(index)][1]
+        return None
+
     def setCurrentText(self, text) -> None:
         for position, (label, _data) in enumerate(self.items):
             if label == text:
