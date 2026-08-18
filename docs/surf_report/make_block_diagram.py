@@ -162,8 +162,8 @@ def build(theme: str) -> plt.Figure:
     # Sits left of centre on purpose: the corridor between this box and the summing
     # junction has to hold the v_fb label, and at the obvious spacing that label
     # overlapped both the box corner and the circle.
-    d.box(265, 252, 205, 76, "live", "27 scalar PI channels",
-          ("in decoupled coordinates", "K_p = 5.5"))
+    d.box(265, 259, 205, 62, "live", "27 scalar PI channels",
+          ("one per controlled sensor",))
 
     # The PI's output needs its own name. Unlabelled, the only nearby symbol was
     # v -- which names the SUM, not the PI's contribution -- so the diagram read
@@ -178,8 +178,8 @@ def build(theme: str) -> plt.Figure:
            ha="center")
 
     d.box(590, 236, 295, 108, "live", "Bounded allocator",
-          ("min ‖W(G u − v)‖² + λ‖u − u_ref‖²",
-           "         + ρ‖u − u_prev‖²",
+          ("min ‖G u − v‖² + λ‖u − u_ref‖²",
+           "        + ρ‖u − u_prev‖²",
            "subject to  0 ≤ u ≤ u_max",
            "project, don't clip"),
           sub_colors=(d.c["sub"], d.c["sub"], d.c["sub"], d.c["accent_red"]))
@@ -218,8 +218,7 @@ def build(theme: str) -> plt.Figure:
     # only symbols an audience has not already been told, and leaving them to the
     # speaker means the equation reads as decoration.
     d.note(630, 516,
-           "W: undershoot weight   ·   λ: damping, scaled to G's own spectrum   ·   "
-           "ρ: rate penalty (0 by default)",
+           "λ: damping, scaled to G's own spectrum   ·   ρ: rate penalty (0 by default)",
            size=9.0, ha="center")
     d.note(630, 546,
            "The feedforward supplies the holding power; the PI only trims it.  "
