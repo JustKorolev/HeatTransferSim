@@ -177,12 +177,18 @@ def build(theme: str) -> plt.Figure:
            "v = r_dev + v_fb   ·   a demand in K; the allocator turns it into W",
            ha="center")
 
-    d.box(590, 236, 295, 108, "live", "Bounded allocator",
+    # The slew limit lives HERE, as a bound inside the solve, not as a limiter
+    # block downstream. Clamping the rate after the fact is the same mistake as
+    # clipping the sign after the fact: the other 26 powers were solved assuming
+    # this one, and nothing re-solves once it is cut back.
+    d.box(590, 228, 295, 124, "live", "Bounded allocator",
           ("min ‖G u − v‖² + λ‖u − u_ref‖²",
            "        + ρ‖u − u_prev‖²",
            "subject to  0 ≤ u ≤ u_max",
+           "and  |u − u_prev| ≤ Δ = slew · dt",
            "project, don't clip"),
-          sub_colors=(d.c["sub"], d.c["sub"], d.c["sub"], d.c["accent_red"]))
+          sub_colors=(d.c["sub"], d.c["sub"], d.c["sub"], d.c["sub"],
+                      d.c["accent_red"]))
 
     d.wire([(885, 290), (942, 290)])
     d.note(913, 272, "u ≥ 0", ha="center", color=d.c["ink"])
@@ -206,15 +212,16 @@ def build(theme: str) -> plt.Figure:
     d.signal(400, 418, "y_f")
 
     # ---------------------------------------------------------- offline feed
-    d.wire([(715, 118), (715, 238)], dashed=True)
-    d.note(728, 218, "defines the decoupling", color=d.c["ghost"])
+    d.wire([(737, 118), (737, 222)], dashed=True)
+    d.note(750, 212, "defines the decoupling", color=d.c["ghost"])
 
     # ---------------------------------------------------------------- caption
     # The allocator's three weights, spelled out once. On the slide these are the
     # only symbols an audience has not already been told, and leaving them to the
     # speaker means the equation reads as decoration.
     d.note(630, 496,
-           "λ: damping, scaled to G's own spectrum   ·   ρ: rate penalty (0 by default)",
+           "λ: damping, scaled to G's own spectrum   ·   ρ: rate penalty (0 by default)"
+           "   ·   Δ: hard slew bound",
            size=9.0, ha="center")
     d.note(630, 526,
            "The feedforward supplies the holding power; the PI only trims it.  "
