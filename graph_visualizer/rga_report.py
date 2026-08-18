@@ -46,6 +46,53 @@ FOOTER_FONTSIZE = 7.5
 SYMLOG_MIN_EXTENT = 10.0
 
 
+# Cost added to a negative RGA element when choosing a pairing. Bristol's rule is
+# never to pair on a negative element, so it has to lose to any finite positive
+# one; large but finite so a plant with no positive option still returns something
+# rather than failing the assignment outright.
+NEGATIVE_PAIRING_PENALTY = 1.0e6
+
+
+def select_pairing(RGA: np.ndarray) -> np.ndarray:
+    """Which heater each sensor would be paired with, if one insists on pairing.
+
+    NOT the index diagonal, and this distinction is the whole reason the function
+    exists. ``sensor_ids`` and ``heater_ids`` are each sorted by node id
+    INDEPENDENTLY, so G[i, i] pairs the i-th sensor with the i-th heater purely by
+    sort order -- an arbitrary partner with no physical relationship. Reading the
+    diagonal as "the pairing" measures a scheme nobody would ever choose.
+
+    On the 27x27 cryostat the index diagonal reads 24 of 27 NEGATIVE, i.e. "per-
+    pair control is impossible", while the actual best pairing is a clean
+    permutation whose elements are ALL positive (min 1.22, median 1.77). Opposite
+    conclusions from the same matrix.
+
+    Chooses by Bristol's rule -- pair on elements positive and closest to 1 --
+    solved as an assignment so each heater is used at most once. Returns an array
+    of heater column indices, one per sensor, or -1 where no heater was available
+    (fewer heaters than sensors).
+
+    Cost is |log lambda|, not |lambda - 1|. The two agree near 1 and disagree
+    exactly where it matters: |lambda - 1| rates a pairing of 0.007 as barely
+    worse than one of 2, so the assignment happily sold one channel down to
+    almost no authority to shave a little off several others. |log lambda| is
+    symmetric in the RATIO -- lambda and 1/lambda cost the same, which is the
+    right symmetry for a gain ratio -- and diverges as lambda approaches zero.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    R = np.asarray(RGA, dtype=float)
+    if R.size == 0:
+        return np.zeros(R.shape[0], dtype=int) - 1
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cost = np.abs(np.log(np.where(R > 0.0, R, np.nan)))
+    cost = np.where(np.isfinite(cost), cost, NEGATIVE_PAIRING_PENALTY)
+    rows, cols = linear_sum_assignment(cost)
+    pairing = np.full(R.shape[0], -1, dtype=int)
+    pairing[rows] = cols
+    return pairing
+
+
 def rga_summary(
     G: np.ndarray,
     RGA: np.ndarray,
@@ -54,35 +101,33 @@ def rga_summary(
 ) -> dict[str, Any]:
     """The numbers the figure states, in a form other tools can read.
 
-    The diagonal is reported ONLY for a square matrix. With unequal counts there
-    is no one-heater-per-sensor pairing for it to describe, and a number that
-    reads like a pairing verdict when none exists is worse than no number --
-    the same rule ``exact_dc_gain`` applies when it logs the diagonal.
+    Reported at the SELECTED pairing (see :func:`select_pairing`), not at the
+    index diagonal -- the diagonal pairs partners by sort order and answers a
+    question about a scheme nobody proposed.
     """
     G = np.asarray(G, dtype=float)
     RGA = np.asarray(RGA, dtype=float)
-    square = G.shape[0] == G.shape[1] and RGA.shape[0] == RGA.shape[1]
+    n_s, n_h = G.shape
 
-    # How much of a heater's total steady influence lands on its NOMINALLY paired
-    # sensor. This is the plain-magnitude companion to the RGA: the RGA says the
-    # pairing inverts, this says how little there was to invert in the first place.
+    pairing = select_pairing(RGA)
+    paired = pairing >= 0
+    rows = np.nonzero(paired)[0]
+    values = RGA[rows, pairing[rows]] if rows.size else np.array([])
+    finite = values[np.isfinite(values)] if values.size else values
+
+    # How much of everything reaching a sensor comes from its PAIRED heater. The
+    # plain-magnitude companion to the RGA, and it has to use the same pairing or
+    # the two halves of the figure describe different schemes.
     row_sums = np.abs(G).sum(axis=1)
     with np.errstate(divide="ignore", invalid="ignore"):
-        paired_fraction = (
-            np.where(row_sums > 0.0, np.abs(np.diag(G)) / np.maximum(row_sums, 1e-300), np.nan)
-            if square
-            else np.array([])
-        )
-    paired_fraction = paired_fraction[np.isfinite(paired_fraction)] if paired_fraction.size else paired_fraction
-
-    diag = np.diag(RGA) if square else np.array([])
-    finite_diag = diag[np.isfinite(diag)] if diag.size else diag
+        share = np.full(n_s, np.nan)
+        share[rows] = np.abs(G[rows, pairing[rows]]) / np.maximum(row_sums[rows], 1e-300)
 
     summary: dict[str, Any] = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "n_sensors": int(G.shape[0]),
-        "n_heaters": int(G.shape[1]),
-        "square": bool(square),
+        "n_sensors": int(n_s),
+        "n_heaters": int(n_h),
+        "n_paired": int(rows.size),
         # cond() is a decoration on this report, not its point, and its SVD raises
         # outright on a degenerate G. Losing the whole verdict because the
         # conditioning number could not be computed would be the wrong trade.
@@ -90,28 +135,58 @@ def rga_summary(
         "max_abs_rga": float(np.max(np.abs(RGA))) if RGA.size else 0.0,
         "sensor_ids": [int(v) for v in sensor_ids],
         "heater_ids": [int(v) for v in heater_ids],
+        "pairing": [
+            {
+                "sensor_id": int(sensor_ids[int(i)]),
+                "heater_id": int(heater_ids[int(pairing[i])]),
+                "rga": float(RGA[int(i), int(pairing[i])]),
+                "paired_influence_fraction": float(share[int(i)]),
+            }
+            for i in rows
+        ],
+        # Whether the arbitrary sort-order pairing happens to coincide with the
+        # chosen one. Recorded because a report that silently switched pairings
+        # between runs would be impossible to compare.
+        "pairing_is_index_diagonal": bool(
+            n_s == n_h and rows.size == n_s and np.array_equal(pairing, np.arange(n_s))
+        ),
     }
-    if square and finite_diag.size:
+    if finite.size:
         summary.update(
             {
-                "rga_diag": [float(v) for v in diag],
-                "rga_diag_min": float(finite_diag.min()),
-                "rga_diag_max": float(finite_diag.max()),
-                "rga_diag_negative": int((finite_diag < 0).sum()),
-                # ||Lambda - I||_sum: the standard scalar measure of how far this
-                # plant is from being diagonally controllable. 0 is perfect.
-                "rga_number": float(np.abs(RGA - np.eye(RGA.shape[0])).sum()),
+                "rga_paired": [float(v) for v in values],
+                "rga_paired_min": float(finite.min()),
+                "rga_paired_max": float(finite.max()),
+                "rga_paired_median": float(np.median(finite)),
+                "rga_paired_negative": int((finite < 0).sum()),
+                # Bristol's workable band. Outside it a loop still functions but
+                # fights its neighbours and is very sensitive to model error.
+                "rga_paired_workable": int(((finite >= 0.5) & (finite <= 2.0)).sum()),
+                "rga_paired_above_5": int((finite > 5.0).sum()),
             }
         )
-        if paired_fraction.size:
-            summary["median_paired_influence_fraction"] = float(np.median(paired_fraction))
+        if n_s == n_h:
+            # ||Lambda - I||_sum only means "distance from decoupled" when the
+            # identity IS the pairing, so it is reported for the square case and
+            # relative to the chosen permutation.
+            target = np.zeros_like(RGA)
+            target[rows, pairing[rows]] = 1.0
+            summary["rga_number"] = float(np.abs(RGA - target).sum())
+        else:
+            summary["rga_number"] = None
+        finite_share = share[np.isfinite(share)]
+        if finite_share.size:
+            summary["median_paired_influence_fraction"] = float(np.median(finite_share))
     else:
         summary.update(
             {
-                "rga_diag": None,
-                "rga_diag_min": None,
-                "rga_diag_max": None,
-                "rga_diag_negative": None,
+                "rga_paired": None,
+                "rga_paired_min": None,
+                "rga_paired_max": None,
+                "rga_paired_median": None,
+                "rga_paired_negative": None,
+                "rga_paired_workable": None,
+                "rga_paired_above_5": None,
                 "rga_number": None,
             }
         )
@@ -128,13 +203,13 @@ def _safe_cond(G: np.ndarray) -> float:
 
 
 def has_pairing_verdict(summary: dict[str, Any]) -> bool:
-    """Whether the diagonal is allowed to be stated as a pairing answer.
+    """Whether a pairing could be formed and scored at all.
 
-    Square is necessary but not sufficient: a diagonal that came out non-finite
-    has no verdict in it either, and every caller that formats the numbers has to
-    agree on that or one of them will print "None of 27 negative".
+    Needs at least one sensor assigned a heater with a finite relative gain.
+    Fewer heaters than sensors leaves some sensors unpaired, which is a real
+    result rather than a failure -- but with none paired there is nothing to say.
     """
-    return bool(summary.get("square")) and summary.get("rga_diag_negative") is not None
+    return bool(summary.get("n_paired")) and summary.get("rga_paired_negative") is not None
 
 
 def verdict_lines(summary: dict[str, Any]) -> list[str]:
@@ -142,33 +217,44 @@ def verdict_lines(summary: dict[str, Any]) -> list[str]:
     n_s, n_h = summary["n_sensors"], summary["n_heaters"]
     lines = [f"G is {n_s} controlled sensor(s) x {n_h} heater(s), cond(G) = {summary['cond_G']:.4g}"]
     if not has_pairing_verdict(summary):
-        reason = (
-            f"{n_s}x{n_h} is not square, so there is no one-heater-per-sensor pairing "
-            "for it to describe"
-            if not summary["square"]
-            else "its diagonal is not finite"
+        lines.append(
+            f"No pairing could be scored: {n_h} heater(s) for {n_s} sensor(s), "
+            "or no finite relative gain to choose on."
         )
-        lines.append(f"RGA diagonal not reported: {reason}.")
         return lines
-    negative = summary["rga_diag_negative"]
+    paired, negative = summary["n_paired"], summary["rga_paired_negative"]
     lines.append(
-        f"RGA diagonal: {negative} of {n_s} NEGATIVE (min {summary['rga_diag_min']:+.4g}, "
-        f"max {summary['rga_diag_max']:+.4g}); RGA number ||L-I||_sum = {summary['rga_number']:.4g}"
+        f"Best pairing ({paired} of {n_s} sensors): RGA median "
+        f"{summary['rga_paired_median']:.3g}, range {summary['rga_paired_min']:+.3g} to "
+        f"{summary['rga_paired_max']:+.3g}; {negative} negative, "
+        f"{summary['rga_paired_workable']} inside the workable 0.5-2 band, "
+        f"{summary['rga_paired_above_5']} above 5."
     )
+    if not summary.get("pairing_is_index_diagonal"):
+        lines.append(
+            "Chosen by assignment, NOT the matrix diagonal: sensor and heater ids are sorted "
+            "independently, so G's diagonal pairs partners by sort order rather than by physics."
+        )
     fraction = summary.get("median_paired_influence_fraction")
     if fraction is not None:
         lines.append(
-            f"Median share of a heater's steady influence landing on its own sensor: "
-            f"{fraction * 100.0:.2g}%"
+            f"Median share of what reaches a sensor that comes from its paired heater: "
+            f"{fraction * 100.0:.3g}%  (even spreading over {n_h} heaters would give "
+            f"{100.0 / max(n_h, 1):.3g}%)"
         )
     if negative:
         lines.append(
-            "A negative diagonal entry means that pairing's gain changes sign once the other "
-            "loops close, so a PID tuned open-loop drives the WRONG WAY. This is why the "
-            "scheme decouples through G rather than pairing."
+            f"{negative} pairing(s) are NEGATIVE: that loop's gain changes sign once the others "
+            "close, so a PID tuned open-loop drives the WRONG WAY there."
+        )
+    elif summary["rga_paired_above_5"]:
+        lines.append(
+            f"No sign reversal, so per-pair SISO is not ruled out -- but "
+            f"{summary['rga_paired_above_5']} loop(s) above 5 fight their neighbours hard and "
+            "are very sensitive to model error."
         )
     else:
-        lines.append("No sign reversal on the diagonal: per-pair SISO is not ruled out here.")
+        lines.append("No sign reversal and no extreme interaction: per-pair SISO is viable here.")
     return lines
 
 
@@ -195,14 +281,20 @@ def render_rga_figure(
     from matplotlib.figure import Figure
 
     RGA = np.asarray(RGA, dtype=float)
-    # The diagonal panel appears only when the diagonal is a pairing verdict, on
+    # The bar panel appears only when a pairing could actually be scored, on
     # exactly the same test the text uses -- otherwise the figure would show a bar
     # chart the footer says means nothing.
-    square = has_pairing_verdict(summary)
+    scored = has_pairing_verdict(summary)
     n_s, n_h = RGA.shape
+    pairs = summary.get("pairing") or []
+    heater_index = {int(h): j for j, h in enumerate(heater_ids)}
+    sensor_index = {int(s): i for i, s in enumerate(sensor_ids)}
+    pair_rows = np.array([sensor_index[int(p["sensor_id"])] for p in pairs], dtype=int)
+    pair_cols = np.array([heater_index[int(p["heater_id"])] for p in pairs], dtype=int)
+    pair_values = np.array([float(p["rga"]) for p in pairs], dtype=float)
 
     header = title if not subtitle else f"{title}\n{subtitle}"
-    width, height = (13.5, 7.2) if square else (9.5, 7.0)
+    width, height = (13.5, 7.2) if scored else (9.5, 7.0)
     fig = Figure(figsize=(width, height))
     FigureCanvasAgg(fig)
 
@@ -215,8 +307,8 @@ def render_rga_figure(
     footer_lines = _wrap_footer(verdict_lines(summary), width, FOOTER_FONTSIZE)
     footer_in = len(footer_lines) * FOOTER_FONTSIZE * 1.5 / 72.0
     grid = fig.add_gridspec(
-        1, 2 if square else 1,
-        width_ratios=[1.5, 1.0] if square else None,
+        1, 2 if scored else 1,
+        width_ratios=[1.5, 1.0] if scored else None,
         wspace=0.42,
         left=1.05 / width,
         # The colorbar hangs off the right of the last column, and its rotated label
@@ -227,7 +319,7 @@ def render_rga_figure(
         top=1.0 - 0.72 / height,
     )
     ax_map = fig.add_subplot(grid[0, 0])
-    ax_diag = fig.add_subplot(grid[0, 1]) if square else None
+    ax_diag = fig.add_subplot(grid[0, 1]) if scored else None
 
     # Symmetric log about zero: RGA entries here span several decades (the plant is
     # ill-conditioned, and pinv amplifies its weak directions), so a linear map
@@ -246,36 +338,43 @@ def render_rga_figure(
     bar = fig.colorbar(image, ax=ax_map, fraction=0.046, pad=0.03)
     bar.set_label("RGA element (symlog)", fontsize=8)
     bar.ax.tick_params(labelsize=7)
-    ax_map.set_title("RGA elements — blue is negative, i.e. sign reversal", fontsize=10)
+    ax_map.set_title("RGA elements — squares mark the chosen pairing", fontsize=10)
     ax_map.set_xlabel("heater node id", fontsize=9)
     ax_map.set_ylabel("controlled sensor node id", fontsize=9)
     apply_channel_ticks(ax_map.set_xticks, ax_map.set_xticklabels, heater_ids, rotation=90)
     apply_channel_ticks(ax_map.set_yticks, ax_map.set_yticklabels, sensor_ids, rotation=0)
-    if square:
-        # Mark the pairing the diagonal is a verdict on, so "the diagonal" is a
-        # visible object in the heatmap rather than something to count cells for.
+    if pair_cols.size:
+        # Mark the cells the verdict is actually about. These are NOT the diagonal:
+        # on this plant the chosen pairing is a permutation, and marking the
+        # diagonal instead drew a line through cells nobody proposed pairing on.
         ax_map.plot(
-            np.arange(n_h), np.arange(n_s),
-            linestyle="none", marker="s", markersize=3.0,
-            markerfacecolor="none", markeredgecolor="black", markeredgewidth=0.6,
+            pair_cols, pair_rows,
+            linestyle="none", marker="s", markersize=3.5,
+            markerfacecolor="none", markeredgecolor="black", markeredgewidth=0.8,
         )
 
     if ax_diag is not None:
-        diag = np.diag(RGA)
-        colors = ["#c1272d" if value < 0 else "#2f6f9f" for value in diag]
-        positions = np.arange(n_s)
-        ax_diag.barh(positions, diag, color=colors, height=0.75)
+        values = np.full(n_s, np.nan)
+        values[pair_rows] = pair_values
+        colors = [
+            "#c1272d" if v < 0 else ("#e08214" if v > 2.0 else "#2f6f9f")
+            for v in np.nan_to_num(values)
+        ]
+        ax_diag.barh(np.arange(n_s), np.nan_to_num(values), color=colors, height=0.75)
         ax_diag.axvline(1.0, color="#2a8a4a", linewidth=1.2, linestyle="--", label="ideal (1)")
+        ax_diag.axvspan(0.5, 2.0, color="#2a8a4a", alpha=0.10, label="workable 0.5-2")
         ax_diag.axvline(0.0, color="black", linewidth=0.8)
-        scale, scale_kwargs = diagonal_axis_scale(diag)
+        scale, scale_kwargs = diagonal_axis_scale(values[np.isfinite(values)])
         ax_diag.set_xscale(scale, **scale_kwargs)
         ax_diag.set_ylim(n_s - 0.5, -0.5)          # match the heatmap's row order
         # Thinned on the same rule as the heatmap, so the two panels' row labels
         # stay in step instead of one of them silently going unreadable.
         apply_channel_ticks(ax_diag.set_yticks, ax_diag.set_yticklabels, sensor_ids, rotation=0)
-        ax_diag.set_xlabel(f"diagonal RGA element ({scale})", fontsize=9)
+        ax_diag.set_xlabel(f"RGA at the paired heater ({scale})", fontsize=9)
         ax_diag.set_title(
-            f"Pairing verdict: {summary['rga_diag_negative']} of {n_s} negative", fontsize=10
+            f"Best pairing: {summary['rga_paired_negative']} negative, "
+            f"{summary['rga_paired_workable']} of {summary['n_paired']} workable",
+            fontsize=10,
         )
         ax_diag.grid(True, axis="x", alpha=0.3)
         ax_diag.legend(fontsize=7, loc="lower right")

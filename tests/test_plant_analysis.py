@@ -252,18 +252,33 @@ def test_report_states_the_headline_numbers(tmp_path):
     stats = compute_plant_analysis(G, [10, 11], [20, 21], metadata={"run_name": "demo"})
     text = report_markdown(stats, [], [])
     assert "# Plant analysis — demo" in text
-    assert "2 of 2 negative" in text
+    assert "not** the matrix diagonal" in text
     assert "Niederlinski index" in text
     assert "Skipped" in text          # no operating point was supplied
 
 
-def test_niederlinski_is_negative_when_diagonal_control_cannot_be_stable():
-    """det(G) / prod(G_ii) < 0 rules out a stable diagonal controller with
-    integral action outright -- a stronger statement than the RGA's, and
-    independent of it."""
-    G = np.array([[1.0, 2.0], [1.1, 1.0]])            # det = -1.2, product = 1
+def test_niederlinski_is_evaluated_at_the_chosen_pairing():
+    """det / prod(paired gains) rules out a stable decentralised controller with
+    integral action when negative. It is defined FOR A PAIRING, so G's columns are
+    permuted into the chosen one first -- on the raw matrix it would answer for
+    the sort-order pairing instead, which is a different question.
+
+    Here the sort-order diagonal would give -1.2 ("impossible"); at the pairing
+    actually chosen it is +0.545, which excludes nothing.
+    """
+    G = np.array([[1.0, 2.0], [1.1, 1.0]])
     pairing = compute_plant_analysis(G, [10, 11], [20, 21])["pairing"]
-    assert pairing["niederlinski_index"] == pytest.approx(-1.2)
+    assert pairing["niederlinski_index"] == pytest.approx(0.5455, abs=1e-3)
+
+
+def test_paired_influence_uses_the_chosen_partner(tmp_path):
+    """The magnitude companion has to use the same pairing as the RGA, or the two
+    halves of the pairing figure describe different schemes. Sensor 10's partner
+    is heater 21 at 2.0 K/W of a 3.0 row sum, not heater 20 at 1.0."""
+    G = np.array([[1.0, 2.0], [1.1, 1.0]])
+    result = compute_plant_analysis(G, [10, 11], [20, 21])["pairing"]
+    assert result["paired_heater_ids"] == [21, 20]
+    assert result["paired_influence_fraction"][0] == pytest.approx(2.0 / 3.0)
 
 
 def test_enabled_sensor_filter_narrows_the_whole_analysis(tmp_path):
@@ -271,9 +286,11 @@ def test_enabled_sensor_filter_narrows_the_whole_analysis(tmp_path):
     analysis = write_plant_analysis(gain_folder, enabled_sensor_ids=[471300, 471301])
     assert analysis.stats["n_sensors"] == 2
     assert analysis.stats["excluded_sensor_ids"] == [471302, 471303]
-    # No longer square, so the pairing verdict goes with it.
-    assert analysis.stats["pairing"]["rga_summary"]["rga_diag"] is None
-    assert "pairing.png" not in {p.name for p in analysis.figures}
+    # Two sensors against four heaters is still pairable -- each sensor gets its
+    # own and the spare heaters go unused -- so the verdict survives the filter.
+    summary = analysis.stats["pairing"]["rga_summary"]
+    assert summary["n_paired"] == 2
+    assert len({p["heater_id"] for p in summary["pairing"]}) == 2
 
 
 def test_empty_selection_is_refused_rather_than_analysed(tmp_path):

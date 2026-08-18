@@ -207,7 +207,10 @@ def figure_pairing(path: Path, stats: dict[str, Any]) -> Path | None:
         return None
     sensor_ids = stats["sensor_ids"]
     share = np.asarray(pairing["paired_influence_fraction"], dtype=float) * 100.0
-    diag = np.asarray(summary["rga_diag"], dtype=float)
+    diag = np.full(len(sensor_ids), np.nan)
+    lookup = {int(s_): i for i, s_ in enumerate(sensor_ids)}
+    for entry in summary.get("pairing") or []:
+        diag[lookup[int(entry["sensor_id"])]] = float(entry["rga"])
 
     fig = _figure(12.0, 5.4)
     grid = fig.add_gridspec(2, 1, hspace=0.05)
@@ -227,25 +230,28 @@ def figure_pairing(path: Path, stats: dict[str, Any]) -> Path | None:
     ax_share.set_ylabel("paired influence\n[% of row]", fontsize=8)
     ax_share.tick_params(labelbottom=False)
     ax_share.set_title(
-        "Share of a heater's steady influence landing on its own sensor "
-        f"(median {np.median(share):.2g}%)",
+        "Share of what reaches a sensor that comes from its PAIRED heater "
+        f"(median {np.nanmedian(share):.3g}%)",
         fontsize=9,
     )
 
     ax_diag = fig.add_subplot(grid[1, 0], sharex=ax_share)
     _bar_channels(
-        ax_diag, diag, sensor_ids,
-        color=[NEGATIVE if v < 0 else POSITIVE for v in diag],
+        ax_diag, np.nan_to_num(diag), sensor_ids,
+        color=[NEGATIVE if v < 0 else (ACCENT if v > 2.0 else POSITIVE)
+               for v in np.nan_to_num(diag)],
     )
-    scale, scale_kwargs = diagonal_axis_scale(diag)
+    ax_diag.axhspan(0.5, 2.0, color="#2a8a4a", alpha=0.10)
+    scale, scale_kwargs = diagonal_axis_scale(diag[np.isfinite(diag)])
     ax_diag.set_yscale(scale, **scale_kwargs)
     ax_diag.axhline(1.0, color="#2a8a4a", linewidth=1.1, linestyle="--")
     ax_diag.axhline(0.0, color="black", linewidth=0.8)
     ax_diag.set_ylabel(f"RGA diagonal\n({scale})", fontsize=8)
     ax_diag.set_xlabel("controlled sensor node id", fontsize=9)
     ax_diag.set_title(
-        f"RGA diagonal — {summary['rga_diag_negative']} of {len(sensor_ids)} negative "
-        "(red = gain reverses once the other loops close)",
+        f"RGA at each sensor's paired heater — {summary['rga_paired_negative']} negative, "
+        f"{summary['rga_paired_workable']} of {summary['n_paired']} inside the workable 0.5-2 band "
+        "(amber = above 2, fights its neighbours)",
         fontsize=9,
     )
     fig.suptitle("Per-pair SISO viability", fontsize=11)
@@ -512,18 +518,24 @@ def report_markdown(stats: dict[str, Any], figures: Sequence[Path], tables: Sequ
     add(f"- cond(G) = **{spectrum['condition_number']:.4g}**; effective rank "
         + ", ".join(f"{v} at tol {k.split('_')[1]}" for k, v in spectrum["effective_rank"].items()))
     if has_pairing_verdict(summary):
-        add(f"- RGA diagonal: **{summary['rga_diag_negative']} of {stats['n_sensors']} negative** "
-            f"(min {summary['rga_diag_min']:+.4g}) — per-pair SISO is ruled out")
+        add(f"- Best pairing (chosen by assignment, **not** the matrix diagonal): RGA median "
+            f"**{summary['rga_paired_median']:.3g}**, range {summary['rga_paired_min']:+.3g} to "
+            f"{summary['rga_paired_max']:+.3g}")
+        add(f"- **{summary['rga_paired_negative']} negative**, "
+            f"**{summary['rga_paired_workable']} of {summary['n_paired']}** inside the workable "
+            f"0.5-2 band, **{summary['rga_paired_above_5']}** above 5")
         if summary.get("median_paired_influence_fraction") is not None:
-            add(f"- Median share of a heater's influence landing on its own sensor: "
-                f"**{summary['median_paired_influence_fraction'] * 100:.2g}%**")
+            add(f"- Median share of what reaches a sensor that comes from its paired heater: "
+                f"**{summary['median_paired_influence_fraction'] * 100:.3g}%** "
+                f"(even spreading over {stats['n_heaters']} heaters would give "
+                f"{100.0 / max(stats['n_heaters'], 1):.3g}%)")
         if pairing.get("niederlinski_index") is not None:
             verdict = "unstable" if pairing["niederlinski_index"] < 0 else "not excluded"
-            add(f"- Niederlinski index = **{pairing['niederlinski_index']:.4g}** "
-                f"— diagonal control with integral action is {verdict}")
+            add(f"- Niederlinski index at that pairing = **{pairing['niederlinski_index']:.4g}** "
+                f"— decentralised control with integral action is {verdict}")
     else:
-        add(f"- RGA diagonal not reported ({stats['n_sensors']}x{stats['n_heaters']} is not square, "
-            "so there is no one-heater-per-sensor pairing to describe)")
+        add(f"- No pairing could be scored ({stats['n_heaters']} heater(s) for "
+            f"{stats['n_sensors']} sensor(s))")
     bounded = lift.get("nonnegative")
     if bounded:
         add(f"- Asking for +1 K on every sensor leaves **{bounded['residual_rms_K_per_K']:.4g} K rms "

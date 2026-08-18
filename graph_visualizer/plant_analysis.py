@@ -218,30 +218,51 @@ def _pairing(G: np.ndarray, sensor_ids: Sequence[int], heater_ids: Sequence[int]
 
     RGA = relative_gain_array(G)
     summary = rga_summary(G, RGA, sensor_ids, heater_ids)
-    square = G.shape[0] == G.shape[1]
     result: dict[str, Any] = {"rga_summary": summary, "RGA": RGA}
 
-    if square:
+    # Every per-channel quantity below is indexed by SENSOR and evaluated at that
+    # sensor's chosen partner -- never at G[i, i]. The two id lists are sorted
+    # independently, so the matrix diagonal pairs partners by sort order.
+    pairs = summary.get("pairing") or []
+    heater_index = {int(h): j for j, h in enumerate(heater_ids)}
+    partner = np.full(G.shape[0], -1, dtype=int)
+    for position, entry in zip(
+        [list(sensor_ids).index(int(p["sensor_id"])) for p in pairs], pairs
+    ):
+        partner[position] = heater_index[int(entry["heater_id"])]
+
+    if (partner >= 0).any():
         row_sums = np.abs(G).sum(axis=1)
-        diag = np.abs(np.diag(G))
+        share = np.full(G.shape[0], np.nan)
+        rows = np.nonzero(partner >= 0)[0]
         with np.errstate(divide="ignore", invalid="ignore"):
-            share = np.where(row_sums > 0, diag / np.maximum(row_sums, 1e-300), np.nan)
+            share[rows] = np.abs(G[rows, partner[rows]]) / np.maximum(row_sums[rows], 1e-300)
         result["paired_influence_fraction"] = [float(v) for v in share]
-        # Niederlinski: negative means a diagonal controller with integral action
-        # CANNOT be stable, whatever its tuning -- a stronger statement than the
-        # RGA's, and independent of it. Via slogdet because det of a 27x27 gain
-        # matrix in K/W overflows a float outright.
-        sign_det, logabs_det = np.linalg.slogdet(G)
-        sign_prod = float(np.prod(np.sign(np.diag(G))))
-        with np.errstate(divide="ignore", invalid="ignore"):
-            log_prod = float(np.log(np.abs(np.diag(G))).sum())
-        if sign_prod != 0.0 and np.isfinite(log_prod) and np.isfinite(logabs_det):
-            result["niederlinski_index"] = float(sign_det * sign_prod * np.exp(logabs_det - log_prod))
-        else:
-            result["niederlinski_index"] = None
+        result["paired_heater_ids"] = [
+            int(heater_ids[int(j)]) if j >= 0 else None for j in partner
+        ]
     else:
         result["paired_influence_fraction"] = None
-        result["niederlinski_index"] = None
+        result["paired_heater_ids"] = None
+
+    # Niederlinski: negative means a decentralised controller with integral action
+    # CANNOT be stable, whatever its tuning -- a stronger statement than the RGA's,
+    # and independent of it. Defined for a square plant under a chosen pairing, so
+    # G's columns are permuted into that pairing first; computing it on the raw
+    # matrix would test the sort-order pairing instead. Via slogdet because det of
+    # a 27x27 gain matrix in K/W overflows a float outright.
+    result["niederlinski_index"] = None
+    if G.shape[0] == G.shape[1] and (partner >= 0).all():
+        permuted = G[:, partner]
+        sign_det, logabs_det = np.linalg.slogdet(permuted)
+        diag = np.diag(permuted)
+        sign_prod = float(np.prod(np.sign(diag)))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_prod = float(np.log(np.abs(diag)).sum())
+        if sign_prod != 0.0 and np.isfinite(log_prod) and np.isfinite(logabs_det):
+            result["niederlinski_index"] = float(
+                sign_det * sign_prod * np.exp(logabs_det - log_prod)
+            )
     return result
 
 

@@ -1,9 +1,10 @@
 """The RGA section: the numbers, the verdict wording, and when it may be stated.
 
 The point of the RGA is a verdict -- "can this plant be paired one heater per
-sensor?" -- so most of these tests are about when that verdict is allowed to be
-stated at all. A number that reads like a pairing answer when no pairing exists
-is worse than no number, which is why the non-square cases assert on ABSENCE.
+sensor?" -- and the verdict is only meaningful once you say WHICH pairing. The
+matrix diagonal is not it: the two id lists are sorted independently, so G[i, i]
+pairs partners by sort order. Most of these tests are about choosing the pairing
+rather than assuming it, and about when the verdict may be stated at all.
 
 Where the files land is :mod:`plant_report`'s decision; see test_plant_analysis.
 """
@@ -16,6 +17,7 @@ import pytest
 from graph_visualizer.modal_reduction import relative_gain_array
 from graph_visualizer.rga_report import (
     diagonal_axis_scale,
+    select_pairing,
     has_pairing_verdict,
     render_rga_figure,
     rga_summary,
@@ -39,51 +41,70 @@ def test_rga_matches_the_textbook_two_by_two():
 def test_identity_plant_pairs_perfectly():
     G = np.diag([2.0, 5.0, 0.5])
     summary = rga_summary(G, relative_gain_array(G), [1, 2, 3], [4, 5, 6])
-    assert summary["rga_diag_negative"] == 0
+    assert summary["rga_paired_negative"] == 0
+    assert summary["rga_paired_median"] == pytest.approx(1.0)
+    assert summary["pairing_is_index_diagonal"] is True
     assert summary["rga_number"] == pytest.approx(0.0, abs=1e-9)
-    assert "not ruled out" in verdict_lines(summary)[-1]
+    assert "viable" in verdict_lines(summary)[-1]
 
 
-def test_summary_counts_the_negative_diagonal():
+def test_the_pairing_is_chosen_not_assumed_to_be_the_diagonal():
+    """The bug this whole mechanism exists for, in miniature.
+
+    sensor and heater ids are sorted independently, so G[i, i] pairs partners by
+    sort order. Here that diagonal is NEGATIVE on both channels -- "per-pair
+    control is impossible" -- while the anti-diagonal pairing is +1.83 on both,
+    i.e. entirely workable. Reading the diagonal gives the opposite conclusion to
+    the correct one, which is exactly what happened on the 27x27 cryostat.
+    """
     G = np.array([[1.0, 2.0], [1.1, 1.0]])
-    summary = rga_summary(G, relative_gain_array(G), [10, 11], [20, 21])
-    assert summary["square"] is True
-    assert summary["rga_diag_negative"] == 2
-    assert summary["rga_diag_min"] < 0.0
-    assert "WRONG WAY" in " ".join(verdict_lines(summary))
+    RGA = relative_gain_array(G)
+    assert np.diag(RGA) == pytest.approx([-0.8333, -0.8333], abs=1e-3)
+
+    summary = rga_summary(G, RGA, [10, 11], [20, 21])
+    assert summary["pairing_is_index_diagonal"] is False
+    assert [(p["sensor_id"], p["heater_id"]) for p in summary["pairing"]] == [(10, 21), (11, 20)]
+    assert summary["rga_paired_negative"] == 0
+    assert summary["rga_paired_median"] == pytest.approx(1.8333, abs=1e-3)
+    assert "viable" in " ".join(verdict_lines(summary))
+    assert "NOT the matrix diagonal" in " ".join(verdict_lines(summary))
 
 
-def test_non_square_withholds_the_diagonal():
-    """Unequal counts mean there is no one-heater-per-sensor pairing, so the
-    diagonal is not a pairing statement and must not be reported as one."""
+def test_more_heaters_than_sensors_can_still_be_paired():
+    """Unequal counts are not a reason to withhold a verdict: with heaters to
+    spare every sensor still gets its own, and only the leftovers go unused."""
     G = np.array([[1.0, 1.0, 0.5], [1.0, 1.1, 0.4]])
     summary = rga_summary(G, relative_gain_array(G), [10, 11], [20, 21, 22])
-    assert summary["square"] is False
-    assert has_pairing_verdict(summary) is False
-    assert summary["rga_diag"] is None
-    assert summary["rga_number"] is None
-    assert "not reported" in verdict_lines(summary)[1]
+    assert has_pairing_verdict(summary) is True
+    assert summary["n_paired"] == 2
+    assert len({p["heater_id"] for p in summary["pairing"]}) == 2      # no heater reused
 
 
-def test_square_but_non_finite_diagonal_still_withholds_the_verdict():
-    """Square is necessary but not sufficient. A diagonal that came out non-finite
-    holds no verdict either, and saying "None of 27 negative" would be worse than
-    saying nothing. cond() raises outright on this input, so this also pins that
-    the summary survives a degenerate G rather than propagating LinAlgError."""
+def test_fewer_heaters_than_sensors_leaves_some_unpaired():
+    G = np.array([[1.0], [0.4], [0.2]])
+    summary = rga_summary(G, relative_gain_array(G), [10, 11, 12], [20])
+    assert summary["n_paired"] == 1
+    assert summary["n_sensors"] == 3
+
+
+def test_non_finite_rga_still_withholds_the_verdict():
+    """A relative gain that came out non-finite holds no verdict, and saying
+    "0 negative" would be worse than saying nothing. cond() raises outright on
+    this input, so this also pins that the summary survives a degenerate G rather
+    than propagating LinAlgError."""
     summary = rga_summary(
         np.full((2, 2), np.nan), np.full((2, 2), np.nan), [10, 11], [20, 21]
     )
-    assert summary["square"] is True
     assert has_pairing_verdict(summary) is False
     assert np.isnan(summary["cond_G"])
-    assert "not reported" in verdict_lines(summary)[1]
+    assert "No pairing could be scored" in verdict_lines(summary)[1]
 
 
 def test_diagonal_axis_stays_linear_when_the_whole_diagonal_is_small():
-    """A plant with no paired authority has every diagonal entry inside +/-1.
-    symlog then spends the axis on empty decades and every bar collapses into the
-    linear region, so the figure reads "nothing here" when the finding is that
-    every pairing reverses. Measured on the real 27x27: min -0.669, max +0.001."""
+    """symlog spends the axis on empty decades when every value sits inside +/-1,
+    collapsing every bar into the linear region so the figure reads "nothing
+    here". These are the sort-order diagonal values off the real 27x27, which is
+    where the effect was first seen."""
     scale, kwargs = diagonal_axis_scale([-0.6686, -0.0004, 0.0011, -0.117])
     assert scale == "linear" and kwargs == {}
 
@@ -99,9 +120,9 @@ def test_diagonal_axis_ignores_non_finite_entries():
 
 
 def test_figure_renders_both_layouts(tmp_path):
-    """Square gets the diagonal panel; non-square must not, and must still draw."""
+    """Both shapes are pairable here, so both get the bar panel and must draw."""
     square = np.array([[1.0, 2.0], [1.1, 1.0]])
-    summary = rga_summary(square, relative_gain_array(square), [10, 11], [20, 21])
+    summary = rga_summary(square, relative_gain_array(square), [10, 11], [20, 21])  # noqa: E501
     path = render_rga_figure(
         tmp_path / "square.png", relative_gain_array(square), [10, 11], [20, 21], summary
     )
