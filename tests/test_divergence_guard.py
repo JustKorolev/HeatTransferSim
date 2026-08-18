@@ -136,8 +136,13 @@ def test_drift_compares_against_the_power_that_drove_the_step() -> None:
                         np.ones(2), [], np.array([]), [], [], thr)
     drift = runner._series.get("energy_drift_rel", [])
     assert drift, "drift series must be populated"
+    # Drift is only defined once there is a previous power sample, so the first two
+    # entries are the NaN pad _AlignedSeries inserts to keep the column lined up
+    # with time_s. Without that pad this column was written two rows early.
+    assert len(drift) == len(runner._series["time_s"]), "column must align with time_s"
+    assert np.isnan(drift[:2]).all(), f"the undefined rows must be NaN, not data: {drift}"
     # Every recorded step conserved energy exactly -> drift ~0, not ~0.13.
-    assert max(drift) < 1e-9, f"off-by-one reintroduced: {drift}"
+    assert np.nanmax(drift) < 1e-9, f"off-by-one reintroduced: {drift}"
 
 
 class _Osc:

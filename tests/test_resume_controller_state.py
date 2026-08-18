@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from graph_visualizer.simulation_runner import (
+    _AlignedSeries,
     _optional_state_arrays,
     _restore_controller_state,
 )
@@ -76,6 +77,13 @@ def test_state_from_a_different_controller_is_not_applied() -> None:
 
 
 # --- which state a resume actually starts from -------------------------------- #
+class _State:
+    """Stands in for SimulationModel.SimulationState: only time_s is read here."""
+
+    def __init__(self, time_s=0.0):
+        self.time_s = float(time_s)
+
+
 class _Prep:
     def __init__(self, n=4):
         self.node_ids = np.arange(n)
@@ -85,9 +93,15 @@ class _Prep:
         self.controller_mimo_pi_integral = None
         self.controller_mimo_pi_passive_K = None
         self.controller_modal_integral = None
+        # set_temperatures stamps a fresh history entry at t=0; the resume has to
+        # put the clock back, so the stub has to have a clock to put back.
+        self.history = [_State(0.0)]
+        self.history_index = 0
 
     def set_temperatures(self, t):
         self.temperatures = np.asarray(t, dtype=float).copy()
+        self.history = [_State(0.0)]
+        self.history_index = 0
 
 
 def _runner(tmp_path, uniform_K):
@@ -99,6 +113,7 @@ def _runner(tmp_path, uniform_K):
     r.cfg = type("Cfg", (), {"initial_temperature_uniform_K": uniform_K})()
     r._initial_state = None
     r.events = []
+    r._series = _AlignedSeries()
     r._log_event = lambda kind, msg: r.events.append((kind, msg))
     return r
 
@@ -138,3 +153,199 @@ def test_the_restored_temperatures_are_logged(tmp_path) -> None:
     r._resume_if_checkpoint(_Prep())
     resumed = [m for k, m in r.events if k == "resumed"]
     assert resumed and "min=70.00" in resumed[0] and "max=100.00" in resumed[0], resumed
+
+
+# --- the clock, the baseline, and the history --------------------------------- #
+def test_a_resume_puts_the_clock_back(tmp_path) -> None:
+    """set_temperatures stamps its history entry at t=0, and step_forward builds
+    state.time_s as self.time_s + dt. Left at zero, a resumed run restarts its time
+    axis on top of the reloaded history and measures t_final_s from the resume, so
+    it silently runs another full duration."""
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])
+    r = _runner(tmp_path, uniform_K=None)
+    p = _Prep()
+    r._resume_if_checkpoint(p)
+    assert p.history[p.history_index].time_s == 123.0
+
+
+def test_a_resume_rebases_the_metric_baseline(tmp_path) -> None:
+    """initial_temperatures_K is what the first step measures dT/dt and energy drift
+    against. Left at the graph's on-disk temperatures, a resume from 50 K on a graph
+    saved at 293 K reports ~8 K/s for a jump that never happened."""
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])
+    r = _runner(tmp_path, uniform_K=None)
+    p = _Prep()
+    assert p.initial_temperatures_K.tolist() == [293.0] * 4, "the stale baseline"
+    r._resume_if_checkpoint(p)
+    assert p.initial_temperatures_K.tolist() == [70.0, 71.0, 72.0, 73.0]
+
+
+def _write_series(tmp_path, times, **cols):
+    np.savez(tmp_path / "timeseries.npz", time_s=np.asarray(times, float),
+             **{k: np.asarray(v, float) for k, v in cols.items()})
+
+
+def test_a_resume_carries_the_earlier_timeseries_forward(tmp_path) -> None:
+    """_write_timeseries rewrites the file from self._series with mode "w". With that
+    dict starting empty, the first flush after a resume REPLACED hours of history
+    with the few rows since resuming -- the opposite of what the tooltip promises."""
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])
+    _write_series(tmp_path, [0.0, 60.0, 120.0], avg_temp_K=[50.0, 51.0, 52.0])
+    r = _runner(tmp_path, uniform_K=None)
+    r._resume_if_checkpoint(_Prep())
+    assert r._series["time_s"] == [0.0, 60.0, 120.0]
+    assert r._series["avg_temp_K"] == [50.0, 51.0, 52.0]
+    assert any("3 earlier timeseries row(s)" in m for k, m in r.events if k == "resumed")
+
+
+def test_samples_past_the_checkpoint_are_dropped(tmp_path) -> None:
+    """Both are flushed together but a kill can land between them, leaving samples
+    beyond the state being resumed from. Keeping them puts a backwards step in the
+    time axis."""
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])          # time_s = 123.0
+    _write_series(tmp_path, [0.0, 60.0, 120.0, 180.0, 240.0])
+    r = _runner(tmp_path, uniform_K=None)
+    r._resume_if_checkpoint(_Prep())
+    assert r._series["time_s"] == [0.0, 60.0, 120.0], r._series["time_s"]
+
+
+def test_no_earlier_timeseries_is_reported_not_silent(tmp_path) -> None:
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])
+    r = _runner(tmp_path, uniform_K=None)
+    r._resume_if_checkpoint(_Prep())
+    assert any("no earlier timeseries" in m for k, m in r.events if k == "resumed")
+
+
+def test_an_unreadable_timeseries_does_not_kill_the_resume(tmp_path) -> None:
+    """Losing the history is bad; losing the run because the history is corrupt is
+    worse, and a resume is exactly when a file may be half-written."""
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])
+    (tmp_path / "timeseries.npz").write_bytes(b"not an npz")
+    r = _runner(tmp_path, uniform_K=None)
+    r._resume_if_checkpoint(_Prep())
+    assert r._series == {}
+    assert any(k == "resume_series_error" for k, _ in r.events), r.events
+
+
+# --- column alignment --------------------------------------------------------- #
+def test_a_column_first_seen_after_a_resume_is_front_padded() -> None:
+    """_collect appends time_s first, then setdefault-appends the rest. A key that
+    appears for the first time at row i must already hold i values or its whole
+    column is shifted by i in the csv/npz -- silently: the file parses and the plot
+    just draws the wrong curve."""
+    s = _AlignedSeries()
+    s["time_s"] = [0.0, 60.0, 120.0]          # reloaded history
+    s.setdefault("time_s", []).append(180.0)  # _collect's first act
+    s.setdefault("heater_9_W", []).append(1.5)
+    assert len(s["heater_9_W"]) == len(s["time_s"]) == 4
+    assert np.isnan(s["heater_9_W"][:3]).all()
+    assert s["heater_9_W"][3] == 1.5
+
+
+def test_alignment_costs_nothing_on_a_fresh_run() -> None:
+    """The first row of a fresh run must not be padded: time_s is already length 1
+    by the time the other keys are created."""
+    s = _AlignedSeries()
+    s.setdefault("time_s", []).append(0.0)
+    s.setdefault("avg_temp_K", []).append(50.0)
+    assert s["avg_temp_K"] == [50.0]
+
+
+# --- provenance --------------------------------------------------------------- #
+def _provenance_runner(tmp_path, uniform_K):
+    from graph_visualizer.simulation_runner import RunConfig, SimulationRunner
+
+    r = object.__new__(SimulationRunner)
+    r.out_dir = tmp_path
+    r.ckpt_dir = tmp_path / "checkpoints"
+    r.graph_name = "g"
+    r.graph_folder = tmp_path
+    r.cfg = RunConfig(graph_folder=str(tmp_path), initial_temperature_uniform_K=uniform_K)
+    r._initial_state = None
+    return r
+
+
+def test_provenance_says_checkpoint_not_uniform_on_a_resume(tmp_path) -> None:
+    """The initial temperature is IGNORED on a resume, so recording it as the start
+    state is how a resumed run later reads as though it began cold from a uniform
+    field -- and that is the one field anyone checks to find out."""
+    import json
+
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])
+    _provenance_runner(tmp_path, uniform_K=50.1)._write_config_and_provenance()
+    p = json.loads((tmp_path / "provenance.json").read_text(encoding="utf-8"))
+    assert p["initial_state"]["source"] == "checkpoint"
+    assert p["initial_state"]["initial_temperature_uniform_K_ignored"] == 50.1
+    assert p["resumed"] is True
+
+
+def test_a_fresh_run_still_records_its_uniform_start(tmp_path) -> None:
+    import json
+
+    _provenance_runner(tmp_path, uniform_K=50.1)._write_config_and_provenance()
+    p = json.loads((tmp_path / "provenance.json").read_text(encoding="utf-8"))
+    assert p["initial_state"] == {"source": "uniform", "temperature_K": 50.1}
+    assert "resumed" not in p
+
+
+def test_a_resume_keeps_the_earlier_provenance(tmp_path) -> None:
+    """A resume reuses the directory, so this is the only surviving record that the
+    first leg ran at all -- config.json is a dump of the CURRENT config."""
+    import json
+
+    _provenance_runner(tmp_path, uniform_K=50.1)._write_config_and_provenance()
+    first = json.loads((tmp_path / "provenance.json").read_text(encoding="utf-8"))
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])
+    _provenance_runner(tmp_path, uniform_K=50.1)._write_config_and_provenance()
+    second = json.loads((tmp_path / "provenance.json").read_text(encoding="utf-8"))
+    assert second["previous"]["initial_state"] == first["initial_state"]
+
+
+def test_resuming_a_run_that_logged_fewer_columns(tmp_path) -> None:
+    """Real folders on this machine carry 106 or 107 columns depending on when they
+    ran. Resuming a 106-column run with the 107th now being logged must front-pad the
+    new column, not start it at row 0 next to rows from hours earlier."""
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])
+    _write_series(tmp_path, [0.0, 60.0, 120.0], avg_temp_K=[50.0, 51.0, 52.0])
+    r = _runner(tmp_path, uniform_K=None)
+    r._resume_if_checkpoint(_Prep())
+    # ... the run continues, and _collect appends time_s first each step.
+    r._series.setdefault("time_s", []).append(180.0)
+    r._series.setdefault("avg_temp_K", []).append(53.0)
+    r._series.setdefault("integral_held_count", []).append(1.0)   # new since that run
+    n = len(r._series["time_s"])
+    assert {len(v) for v in r._series.values()} == {n}, "every column must stay aligned"
+    assert np.isnan(r._series["integral_held_count"][:3]).all()
+    assert r._series["integral_held_count"][3] == 1.0
+
+
+def test_a_column_that_stopped_being_logged_still_aligns(tmp_path) -> None:
+    """The mirror case: a heater disabled since the earlier leg. Its old samples must
+    stay on their own rows, so the gap goes at the END of that column."""
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])
+    np.savez(tmp_path / "timeseries.npz", time_s=np.array([0.0, 60.0, 120.0]),
+             heater_9_W=np.array([1.0, 2.0]))   # short: stopped after two rows
+    r = _runner(tmp_path, uniform_K=None)
+    r._resume_if_checkpoint(_Prep())
+    assert len(r._series["heater_9_W"]) == 3
+    assert r._series["heater_9_W"][:2] == [1.0, 2.0]
+    assert np.isnan(r._series["heater_9_W"][2])
+
+
+def test_the_earlier_parameter_file_is_kept_on_a_resume(tmp_path) -> None:
+    """A resume reuses the directory, and the tab writes the form's parameters into
+    it before launching -- destroying the only record of what the earlier leg ran
+    with, which is what its half of the timeseries has to be read against."""
+    from graph_visualizer.headless_run_tab import HeadlessRunTab
+
+    path = tmp_path / "simulation_parameters.json"
+    path.write_text('{"mimo_pi_kp": 5.5}', encoding="utf-8")
+    first = HeadlessRunTab._preserve_prior_parameters(path)
+    assert first is not None and first.name == "simulation_parameters.leg1.json"
+    assert first.read_text(encoding="utf-8") == '{"mimo_pi_kp": 5.5}'
+
+    # Resumed twice: the second leg must not overwrite the first's archive.
+    path.write_text('{"mimo_pi_kp": 2.0}', encoding="utf-8")
+    second = HeadlessRunTab._preserve_prior_parameters(path)
+    assert second.name == "simulation_parameters.leg2.json"
+    assert first.read_text(encoding="utf-8") == '{"mimo_pi_kp": 5.5}', "leg1 clobbered"

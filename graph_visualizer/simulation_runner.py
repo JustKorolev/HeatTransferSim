@@ -291,7 +291,7 @@ class SimulationRunner:
         self.plots_dir = self.out_dir / "plots"
         self.events_path = self.out_dir / "events.log"
         self.status_path = self.out_dir / "status.json"
-        self._series: dict[str, list[float]] = {}
+        self._series: dict[str, list[float]] = _AlignedSeries()
         self._stop = False  # set by SIGTERM/SIGINT or cancel_event
         self._exit_status = "running"
         self._last_step_profile: dict[str, float] = {}
@@ -1693,17 +1693,75 @@ class SimulationRunner:
             return
         data = np.load(ckpts[-1])
         temps = np.asarray(data["temperatures_K"], dtype=float)
+        t0 = float(data["time_s"])
+        # set_temperatures resets the controller integrators and stamps the new
+        # history entry at t=0, so BOTH have to be put back after it, not before.
         prepared.set_temperatures(temps)
+        # The baseline the first post-resume step measures dT/dt and energy drift
+        # against. Left alone it is still the graph's on-disk temperatures, so the
+        # first logged row reports a rate and a drift for a jump that never
+        # happened -- a resume from 50 K on a graph saved at 293 K invents 8 K/s.
+        prepared.initial_temperatures_K = temps.copy()
+        # Restore the clock. step_forward computes state.time_s as
+        # self.time_s + dt, and self.time_s reads history[history_index], which
+        # set_temperatures just zeroed. Without this a resume restarts at t=0: the
+        # time axis folds back over the reloaded history and t_final_s is measured
+        # from the resume, so the run silently does another full duration.
+        if prepared.history:
+            prepared.history[prepared.history_index].time_s = t0
         restored = _restore_controller_state(prepared, data)
+        reloaded = self._reload_series(t0)
         self._log_event(
             "resumed",
-            f"from {ckpts[-1].name} at t={float(data['time_s']):.1f}s; "
+            f"from {ckpts[-1].name} at t={t0:.1f}s; "
             f"restored temperatures min={temps.min():.2f} mean={temps.mean():.2f} "
             f"max={temps.max():.2f} K"
             + (f"; controller state restored ({restored})" if restored else
                "; NO controller state in this checkpoint (written before it was saved) -- "
-               "the controller starts cold and must re-wind its integral"),
+               "the controller starts cold and must re-wind its integral")
+            + (f"; {reloaded} earlier timeseries row(s) carried forward" if reloaded else
+               "; no earlier timeseries to carry forward (it will start at this point)"),
         )
+
+    def _reload_series(self, t0: float) -> int:
+        """Load this run's saved timeseries back into memory, up to ``t0``.
+
+        _write_timeseries rewrites timeseries.csv/npz from self._series with mode
+        "w". On a resume that dict starts empty, so the first flush REPLACED hours
+        of history with the handful of rows since resuming -- the run's own tooltip
+        promises the timeseries continues in place, and it did the opposite.
+
+        Truncated at the checkpoint's time because the two are flushed together but
+        a kill can land between them, leaving samples past the state being resumed
+        from. Keeping those would put a backwards step in the time axis.
+        """
+        path = self.out_dir / "timeseries.npz"
+        if not path.exists():
+            return 0
+        try:
+            with np.load(path) as npz:
+                saved = {k: np.asarray(npz[k], dtype=float).reshape(-1) for k in npz.files}
+        except Exception as exc:  # noqa: BLE001
+            self._log_event(
+                "resume_series_error",
+                f"could not read {path.name} ({exc}); earlier history will not be carried "
+                "forward and the rewritten timeseries will start at the resume point.",
+            )
+            return 0
+        times = saved.get("time_s")
+        if times is None or times.size == 0:
+            return 0
+        keep = int(np.count_nonzero(times <= t0 + 1.0e-9))
+        if keep == 0:
+            return 0
+        for key, values in saved.items():
+            # Pad rather than drop: a column that stopped short in the old file must
+            # still line up with row `keep`, or everything appended after it shifts.
+            column = [float(v) for v in values[:keep]]
+            if len(column) < keep:
+                column += [float("nan")] * (keep - len(column))
+            self._series[key] = column
+        return keep
 
     def _current_time(self, prepared, step, dt) -> float:
         ts = self._series.get("time_s")
@@ -1842,6 +1900,16 @@ class SimulationRunner:
 
     # -- finalize ----------------------------------------------------------- #
     def _write_config_and_provenance(self) -> None:
+        # Read the outgoing provenance BEFORE overwriting it: a resume reuses the
+        # directory, so this is the only record that the earlier leg existed at all
+        # (config.json is a faithful dump of the CURRENT config and cannot carry it).
+        previous = None
+        try:
+            prior = self.out_dir / "provenance.json"
+            if prior.exists():
+                previous = json.loads(prior.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            previous = None
         _atomic_write_json(self.out_dir / "config.json", asdict(self.cfg))
         provenance = {
             "graph_name": self.graph_name,
@@ -1870,6 +1938,22 @@ class SimulationRunner:
                 "source": "uniform",
                 "temperature_K": float(self.cfg.initial_temperature_uniform_K),
             }
+        # A resume takes its state from the checkpoint and IGNORES the initial
+        # temperature (see _prepare). Recording "uniform 50.1 K" here anyway is how
+        # a resumed run later reads as though it started cold from a uniform field.
+        if self._available_checkpoints():
+            provenance["initial_state"] = {
+                "source": "checkpoint",
+                "checkpoint": self._available_checkpoints()[-1].name,
+                "initial_temperature_uniform_K_ignored": (
+                    float(self.cfg.initial_temperature_uniform_K)
+                    if self.cfg.initial_temperature_uniform_K is not None
+                    else None
+                ),
+            }
+            provenance["resumed"] = True
+        if previous is not None:
+            provenance["previous"] = previous
         _atomic_write_json(self.out_dir / "provenance.json", provenance)
         np.random.seed(self.cfg.seed)
 
@@ -2225,6 +2309,28 @@ def _physical_memory_gib() -> float:
     except Exception:  # noqa: BLE001
         pass
     return 0.0
+
+
+class _AlignedSeries(dict):
+    """Series store that keeps every column aligned to the same row index.
+
+    _collect appends time_s FIRST and then setdefault-appends the rest, so a key
+    first seen at row i must already hold i values or every later row of that
+    column is off by i in timeseries.csv/npz. That is silent: the file still
+    parses, the plot still draws, and the curve is simply shifted.
+
+    It matters most on a resume, where the pre-resume history is reloaded and any
+    column that did not exist before (a heater that was disabled, a diagnostic
+    added since) would otherwise start at row 0 alongside rows from hours earlier.
+    """
+
+    def setdefault(self, key, default=None):
+        if key not in self and key != "time_s":
+            pad = max(0, len(self.get("time_s", ())) - 1)
+            if pad:
+                self[key] = [float("nan")] * pad
+                return self[key]
+        return super().setdefault(key, default)
 
 
 def _optional_state_arrays(prepared) -> dict:

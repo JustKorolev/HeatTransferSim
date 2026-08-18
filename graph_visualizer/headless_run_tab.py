@@ -134,9 +134,19 @@ class HeadlessRunTab:
         self.resume_combo.setToolTip(
             "Continue a previous run from its last checkpoint instead of starting over.\n"
             "The run keeps its original output directory, so its plots, events.log and "
-            "timeseries continue in place.\n\n"
-            "Settings below still apply, so this is also how to resume with something "
-            "changed -- e.g. turn the GPU solver off after a crash, or extend the duration."
+            "timeseries continue in place: the earlier rows are reloaded and appended to, "
+            "and the clock picks up from the checkpoint, so t_final_s still means total "
+            "elapsed rather than another full duration.\n\n"
+            "The checkpoint supplies the starting state, so 'initial T K' is IGNORED on a "
+            "resume. provenance.json records that it was overridden and keeps the earlier "
+            "leg under 'previous'; the earlier parameter file is kept as "
+            "simulation_parameters.leg<N>.json.\n\n"
+            "Everything else below still applies, so this is also how to resume with "
+            "something changed -- turn the GPU solver off after a crash, extend the "
+            "duration, retune the controller. Kp/Ki/filter/hold are read fresh every step "
+            "and are safe to change. dt and the CONTROLLER are not: dt changes the loop "
+            "gain, and a G rebuilt with a different sensor count discards the restored "
+            "integral (logged, so check events.log)."
         )
         resume_refresh = self.QtWidgets.QPushButton("Refresh")
         resume_refresh.setMaximumWidth(80)
@@ -483,6 +493,26 @@ class HeadlessRunTab:
             source = "defaults (graph has no saved simulation_parameters.json)"
         self.panel.set_params(params)
         self._params_source = source
+
+    @staticmethod
+    def _preserve_prior_parameters(params_path: Path) -> Path | None:
+        """Copy a resumed run's parameter file aside before it is overwritten.
+
+        Numbered rather than a single .prev so a run resumed more than once keeps
+        every leg. Best-effort: failing to archive the old file must not stop the
+        run, but it is reported so it is not discovered later by its absence.
+        """
+        import shutil
+
+        for index in range(1, 1000):
+            candidate = params_path.with_name(f"simulation_parameters.leg{index}.json")
+            if not candidate.exists():
+                try:
+                    shutil.copy2(params_path, candidate)
+                except OSError:
+                    return None
+                return candidate
+        return None
 
     def _collect_parameters(self):
         """Current form values as a SimulationParameters (unsupported fields keep
@@ -1403,6 +1433,15 @@ class HeadlessRunTab:
         params = self._collect_parameters()
         run_dir.mkdir(parents=True, exist_ok=True)
         params_path = run_dir / "simulation_parameters.json"
+        # A resume reuses the directory, so writing the form's parameters here would
+        # destroy the record of what the EARLIER leg ran with -- and that record is
+        # the only way to interpret its half of the timeseries. Set it aside first.
+        # (The runner does the same for provenance.json, but it cannot help here:
+        # this write happens before the process is even launched.)
+        if resume_dir is not None and params_path.is_file():
+            kept = self._preserve_prior_parameters(params_path)
+            if kept is not None:
+                self._status(f"Earlier parameters kept as {kept.name}.", False)
         try:
             from .simulation_parameters import save_simulation_parameters
 
