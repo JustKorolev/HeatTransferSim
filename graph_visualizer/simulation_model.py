@@ -2258,6 +2258,31 @@ class PreparedSimulation:
         # steady state, so this biases the transient without adding an offset.
         overshoot_scale = max(0.0, float(getattr(self.params, "mimo_pi_overshoot_integral_scale", 1.0)))
         integrand = np.where(error < 0.0, error * overshoot_scale, error)
+        # Conditional integration. The integral trims the residual the feedforward
+        # misses; it is not what finds the operating point, so across a large
+        # approach transient it is pure windup. A 2 K error at Ki = 1e-4 banks
+        # 0.72 K of demand per hour on top of a feedforward already good to 0.6%,
+        # and the excess then leaves only through the passive imbalance at
+        # ~0.8 W/K -- hours of settling bought by a term that helped nothing.
+        #
+        # Gating on |error| keeps the full steady-state authority that simply
+        # lowering Ki would give up. This is a different mechanism from
+        # mimo_pi_antiwindup_gain below, which reacts to the ALLOCATOR falling
+        # short; during an unsaturated climb that correction is ~0, which is why
+        # the existing anti-windup never caught this.
+        #
+        # Applied BEFORE the modal projection: on an approach every channel is far
+        # from setpoint, so the whole integrand is zero and the projection of zero
+        # is zero -- the hold is exact in the case that motivates it. Near the
+        # setpoint, where only a few channels are held, modal mixing can still
+        # move a held channel slightly. That coupling is the point of the
+        # projection, so it is left intact rather than masked afterwards.
+        hold_error_K = max(0.0, float(getattr(self.params, "mimo_pi_integral_hold_error_K", 0.0)))
+        if hold_error_K > 0.0:
+            integral_held = valid & (np.abs(error) > hold_error_K)
+            integrand = np.where(integral_held, 0.0, integrand)
+        else:
+            integral_held = np.zeros(len(sensor_ids), dtype=bool)
         integrand = self._mimo_pi_modal_integrand(integrand, gain, valid)
         candidate = integral + integrand * dt
 
@@ -2406,6 +2431,11 @@ class PreparedSimulation:
                 ),
                 "error_K": [float(v) for v in error],
                 "v_cmd_K": [float(v) for v in v_cmd],
+                # Which channels the error gate is holding, so a run shows when the
+                # integral was released rather than leaving it to be inferred from
+                # the error trace and the threshold.
+                "integral_held": [bool(v) for v in integral_held],
+                "integral_held_count": int(np.count_nonzero(integral_held)),
             }
             # Also into THIS step's dict. The dict is assembled before the integral
             # is committed, so the merge there can only carry the previous step's

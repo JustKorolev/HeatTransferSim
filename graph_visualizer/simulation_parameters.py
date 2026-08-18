@@ -137,6 +137,30 @@ class SimulationParameters:
     # the error is zero at steady state, so both branches agree there and no
     # offset is introduced. 1.0 is symmetric, i.e. the old behaviour.
     mimo_pi_overshoot_integral_scale: float = 1.0
+    # Conditional integration: hold a channel's integral while |error| exceeds this
+    # many kelvin. 0 disables the gate and integrates unconditionally.
+    #
+    # The integral's job here is to trim the small residual the feedforward misses.
+    # It is NOT what finds the operating point -- r_dev does that, and on
+    # no_mli_high_res_v3 it lands within 0.6% (17.40 W predicted, 17.29 W actual).
+    # So during a large approach transient the integral contributes nothing useful
+    # and winds up: a 2 K error at Ki = 1e-4 adds 1e-4 * 2 * 3600 = 0.72 K of
+    # spurious demand per hour of settling, 2.8% of a 26.1 K feedforward. A 48 K
+    # start took 2.33 h to reach a 50 K setpoint and banked ~1.7 K of demand doing
+    # it, which then had to leave through the passive imbalance at ~0.8 W per K.
+    # That is the +0.68 K overshoot and the many hours spent shedding it.
+    #
+    # Lowering Ki fixes the windup but also gives up the steady-state authority.
+    # Gating on the error keeps both: full Ki near the setpoint, none while far
+    # from it. Note this does NOT interact with mimo_pi_antiwindup_gain, which
+    # bleeds the integral when the ALLOCATOR falls short -- a different failure.
+    # During an unsaturated climb that back-calculation is ~0, which is precisely
+    # why the existing anti-windup never caught this.
+    #
+    # Set it above the steady-state error scale and below the startup gap: on
+    # no_mli_high_res_v3 the pack holds ~0.05 K with one channel out at 0.5 K, so
+    # 0.3 is a reasonable choice against a 2 K start.
+    mimo_pi_integral_hold_error_K: float = 0.0
     # Measured override for the passive equilibrium, in kelvin. 0 = derive it from
     # the gain matrix's operating point.
     #

@@ -516,7 +516,7 @@ def test_changing_the_controller_invalidates_the_held_reference(monkeypatch) -> 
 
 
 # --- closed loop -------------------------------------------------------------- #
-def _closed_loop(monkeypatch, *, kp, steps=4000, dt=4.0):
+def _closed_loop(monkeypatch, *, kp, steps=4000, dt=4.0, hold=0.0, trace=False):
     """Run the real law against a first-order plant and return the final error.
 
     A unit test on one step cannot see an integrator that never integrates. This
@@ -526,7 +526,13 @@ def _closed_loop(monkeypatch, *, kp, steps=4000, dt=4.0):
     from graph_visualizer.simulation_model import PreparedSimulation
 
     sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
-    sim.params = replace(sim.params, mimo_pi_kp=kp, mimo_pi_ki=1.0e-2, dt_s=dt)
+    sim.params = replace(
+        sim.params,
+        mimo_pi_kp=kp,
+        mimo_pi_ki=1.0e-2,
+        dt_s=dt,
+        mimo_pi_integral_hold_error_K=hold,
+    )
     monkeypatch.setattr(
         PreparedSimulation, "_mimo_pi_gains",
         lambda self, gain, sids: (np.full(len(sids), kp), np.full(len(sids), 1.0e-2)),
@@ -541,11 +547,13 @@ def _closed_loop(monkeypatch, *, kp, steps=4000, dt=4.0):
         return float(y[0] if int(nid) == 20 else y[1])
 
     monkeypatch.setattr("graph_visualizer.simulation_model.sensor_readout_temperature_K", readout)
+    peak = -np.inf
     for _ in range(steps):
         sim._mimo_pi_controller_power_vector(update_state=True)
         u = np.array(sim.controller_allocator_diagnostics["heater_commands_W"])
         y += (y_passive + G @ u - y) * (dt / tau)     # first-order relaxation
-    return y - 60.0
+        peak = max(peak, float(np.max(y - 60.0)))
+    return (peak, y - 60.0) if trace else y - 60.0
 
 
 def test_the_loop_removes_the_offset_instead_of_drooping(monkeypatch) -> None:
@@ -1001,3 +1009,104 @@ def test_the_integral_does_not_accumulate_in_unreachable_directions() -> None:
     off = replace(sim.params, mimo_lambda_u=0.0)
     sim.params = off
     assert np.allclose(sim._mimo_pi_modal_integrand(weak, gain, valid), weak)
+
+
+# ---------------------------------------------------------------------------
+# Conditional integration (mimo_pi_integral_hold_error_K)
+#
+# The integral trims the residual the feedforward misses; it is not what finds
+# the operating point. Across a large approach it therefore banks demand that
+# helped nothing and must later leave through the passive cooler. A 48 K start
+# against a 50 K setpoint overshot +0.68 K and spent hours shedding it, and
+# lowering Kp makes that WORSE (a slower approach integrates for longer), so
+# the gate is on the error rather than on either gain.
+# ---------------------------------------------------------------------------
+
+
+def _one_step_integral(monkeypatch, *, hold, error_K):
+    """Integral after a single step at a chosen error, gate on, back-calc off.
+
+    mimo_pi_antiwindup_gain is zeroed so the only thing that can move the
+    integral is the error gate: the QP's regularization leaves a small residual
+    shortfall, and the back-calculation would otherwise fold that in and blur an
+    assertion that is meant to be about the gate alone.
+    """
+    from graph_visualizer.simulation_model import PreparedSimulation
+
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    sim.params = replace(
+        sim.params,
+        mimo_pi_integral_hold_error_K=hold,
+        mimo_pi_antiwindup_gain=0.0,
+        dt_s=1.0,
+    )
+    for sid in (20, 21):
+        sim.model.nodes[sid].controller_setpoint_K = 50.0 + error_K
+    monkeypatch.setattr(
+        "graph_visualizer.simulation_model.sensor_readout_temperature_K",
+        lambda model, idx, temps, nid: 50.0,
+    )
+    sim._mimo_pi_controller_power_vector(update_state=True)
+    return np.asarray(sim.controller_mimo_pi_integral, dtype=float)
+
+
+def test_a_large_error_holds_the_integral(monkeypatch) -> None:
+    """10 K of error against a 1 K gate: nothing accumulates."""
+    assert np.allclose(_one_step_integral(monkeypatch, hold=1.0, error_K=10.0), 0.0)
+
+
+def test_a_small_error_still_integrates(monkeypatch) -> None:
+    """The gate must not cost the integral its steady-state authority: inside the
+    threshold it integrates exactly as before."""
+    integral = _one_step_integral(monkeypatch, hold=1.0, error_K=0.5)
+    assert np.allclose(integral, 0.5), integral
+
+
+def test_the_gate_is_off_by_default(monkeypatch) -> None:
+    """0 means integrate unconditionally -- the behaviour every earlier run had."""
+    assert np.allclose(_one_step_integral(monkeypatch, hold=0.0, error_K=10.0), 10.0)
+
+
+def test_the_gate_is_reported_per_channel(monkeypatch) -> None:
+    """A run must show when the integral was released rather than leaving it to be
+    reconstructed from the error trace and the threshold."""
+    from graph_visualizer.simulation_model import PreparedSimulation
+
+    sim = _pi_sim(monkeypatch, enabled_heater_node_ids=None)
+    sim.params = replace(sim.params, mimo_pi_integral_hold_error_K=1.0)
+    sim.model.nodes[20].controller_setpoint_K = 60.0   # 10 K out -> held
+    sim.model.nodes[21].controller_setpoint_K = 50.2   # 0.2 K out -> integrating
+    monkeypatch.setattr(
+        "graph_visualizer.simulation_model.sensor_readout_temperature_K",
+        lambda model, idx, temps, nid: 50.0,
+    )
+    sim._mimo_pi_controller_power_vector(update_state=True)
+    state = sim.controller_mimo_pi_loop_state
+    assert state["integral_held"] == [True, False], state["integral_held"]
+    assert state["integral_held_count"] == 1
+
+
+def test_holding_the_integral_cuts_the_overshoot(monkeypatch) -> None:
+    """The behaviour the parameter exists for. Same gains, same plant, same 10 K
+    approach; the only change is that the integral is not allowed to charge while
+    the error is far outside the band it is meant to trim."""
+    loose, _ = _closed_loop(monkeypatch, kp=0.3, hold=0.0, trace=True)
+    gated, _ = _closed_loop(monkeypatch, kp=0.3, hold=1.0, trace=True)
+    assert gated < 0.5 * loose, (loose, gated)
+
+
+def test_holding_the_integral_keeps_the_steady_state(monkeypatch) -> None:
+    """The point of gating on error rather than lowering Ki: full authority survives
+    at the operating point, so the offset the integral exists to remove still goes."""
+    _, final = _closed_loop(monkeypatch, kp=0.3, hold=1.0, trace=True)
+    assert np.abs(final).max() < 0.05, final
+
+
+def test_lowering_kp_would_have_made_the_overshoot_worse(monkeypatch) -> None:
+    """Documents the counter-intuitive result that motivated gating instead of
+    detuning. Windup scales as ki * e0 * tau_plant / (1 + kp * g_t/g_m): a smaller
+    Kp lengthens the approach, so the integrator charges for longer. Overshoot here
+    is an integral effect, not a proportional one."""
+    slow, _ = _closed_loop(monkeypatch, kp=0.3, trace=True)
+    fast, _ = _closed_loop(monkeypatch, kp=3.0, trace=True)
+    assert slow > fast, (slow, fast)

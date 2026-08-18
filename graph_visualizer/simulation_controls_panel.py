@@ -464,6 +464,32 @@ class SimulationControlsPanel:
             self.mimo_pi_overshoot_spin,
             "MIMO PI overshoot Ki x",
         )
+        self.mimo_pi_integral_hold_spin = self.double_spin(
+            0.0, 1.0e4, float(getattr(self.params, "mimo_pi_integral_hold_error_K", 0.0)), 0.1
+        )
+        self.mimo_pi_integral_hold_spin.setToolTip(
+            "Hold a channel's integral while |error| exceeds this many kelvin. 0 = integrate "
+            "unconditionally.\n\n"
+            "The integral trims the residual the feedforward misses -- it is not what finds "
+            "the operating point, and r_dev lands within 0.6% on no_mli_high_res_v3 "
+            "(17.40 W predicted, 17.29 W actual). Across a large approach transient the "
+            "integral therefore contributes nothing and winds up: a 2 K error at Ki = 1e-4 "
+            "banks 1e-4 * 2 * 3600 = 0.72 K of spurious demand per hour, 2.8% of a 26.1 K "
+            "feedforward. A 48 K start took 2.33 h to reach 50 K and banked ~1.7 K doing it, "
+            "which then had to leave through the passive imbalance at ~0.8 W per K.\n\n"
+            "Lowering Ki fixes the windup and gives up the steady-state authority with it. "
+            "Gating on the error keeps both. Distinct from the back-calculation anti-windup, "
+            "which reacts to the ALLOCATOR falling short: during an unsaturated climb that "
+            "correction is ~0, which is why it never caught this.\n\n"
+            "Set it above the steady-state error scale and below the startup gap. The pack "
+            "holds ~0.05 K with one channel out near 0.5 K, so try 0.3 against a 2 K start."
+        )
+        self._row(
+            run_form,
+            "mimo_pi_integral_hold_error_K",
+            self.mimo_pi_integral_hold_spin,
+            "MIMO PI integral hold K",
+        )
         self.mimo_pi_passive_spin = self.double_spin(
             0.0, 1.0e6, float(getattr(self.params, "mimo_pi_passive_reference_K", 0.0)), 0.5
         )
@@ -1277,6 +1303,7 @@ class SimulationControlsPanel:
             ("mimo_pi_ki_spin", "mimo_pi_ki", 1.0e-3),
             ("mimo_pi_filter_spin", "mimo_pi_measurement_filter_s", 0.0),
             ("mimo_pi_overshoot_spin", "mimo_pi_overshoot_integral_scale", 1.0),
+            ("mimo_pi_integral_hold_spin", "mimo_pi_integral_hold_error_K", 0.0),
             ("mimo_pi_passive_spin", "mimo_pi_passive_reference_K", 0.0),
         ):
             widget = getattr(self, attribute, None)
@@ -1345,6 +1372,8 @@ class SimulationControlsPanel:
             values["mimo_pi_measurement_filter_s"] = float(self.mimo_pi_filter_spin.value())
         if hasattr(self, "mimo_pi_overshoot_spin"):
             values["mimo_pi_overshoot_integral_scale"] = float(self.mimo_pi_overshoot_spin.value())
+        if hasattr(self, "mimo_pi_integral_hold_spin"):
+            values["mimo_pi_integral_hold_error_K"] = float(self.mimo_pi_integral_hold_spin.value())
         if hasattr(self, "mimo_pi_passive_spin"):
             values["mimo_pi_passive_reference_K"] = float(self.mimo_pi_passive_spin.value())
         return replace(base if base is not None else self.params, **values)
