@@ -156,16 +156,26 @@ def build(theme: str) -> plt.Figure:
     d.wire([(34, 290), (178, 290)])
     d.dot(95, 290)
     d.junction(200, 290, [(-28, -12, "+"), (-14, 30, "−")])
-    d.wire([(219, 290), (277, 290)])
-    d.signal(243, 278, "e")
+    d.wire([(219, 290), (262, 290)])
+    d.signal(236, 278, "e")
 
-    d.box(280, 252, 210, 76, "live", "27 scalar PI channels",
+    # Sits left of centre on purpose: the corridor between this box and the summing
+    # junction has to hold the v_fb label, and at the obvious spacing that label
+    # overlapped both the box corner and the circle.
+    d.box(265, 252, 205, 76, "live", "27 scalar PI channels",
           ("in decoupled coordinates", "K_p = 5.5"))
 
-    d.wire([(490, 290), (518, 290)])
+    # The PI's output needs its own name. Unlabelled, the only nearby symbol was
+    # v -- which names the SUM, not the PI's contribution -- so the diagram read
+    # as though the feedforward branch bypassed the junction entirely.
+    d.wire([(470, 290), (519, 290)])
+    d.signal(494, 312, "v_fb", ha="center")
     d.junction(540, 290, [(-28, -12, "+"), (20, -26, "+")])
     d.wire([(559, 290), (587, 290)])
-    d.signal(568, 278, "v")
+    d.signal(570, 278, "v")
+    d.note(540, 366,
+           "v = r_dev + v_fb   —   a demand in K; the allocator turns it into W",
+           ha="center")
 
     d.box(590, 242, 250, 96, "live", "Bounded allocator",
           ("u = argmin ‖G u − v‖² + ‖R u‖²",
