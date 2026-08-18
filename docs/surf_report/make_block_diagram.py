@@ -32,7 +32,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, FancyBboxPatch
 
-W, H = 1180.0, 560.0
+W, H = 1260.0, 580.0
 
 # DejaVu Sans (matplotlib's default) sets roughly 0.84 * fontsize per character,
 # noticeably wider than the browser fonts this layout was first sketched against.
@@ -132,15 +132,15 @@ def build(theme: str) -> plt.Figure:
     d = Diagram(theme)
 
     # ---------------------------------------------------- solved once, offline
-    d.note(470, 24, "— solved once, offline, from the model —",
+    d.note(490, 24, "— solved once, offline, from the model —",
            color=d.c["accent_orange"], ha="center")
     d.box(100, 40, 280, 76, "off", "Passive reference  ŷ_passive",
           ("derived from the cooler curve,", "not measured — 17.40 vs 17.29 W"))
-    d.box(590, 40, 250, 76, "off", "DC gain  G  (27 × 27)",
+    d.box(615, 40, 250, 76, "off", "DC gain  G  (27 × 27)",
           ("solved once from  L T = P", "cond 366,  σ₁ = 81 %"))
 
     # ---------------------------------------------------------- disturbance
-    d.box(900, 138, 220, 58, "plant", "Cryocooler", ("continuous heat removal",))
+    d.box(945, 138, 230, 58, "plant", "Cryocooler", ("continuous heat removal",))
 
     # ------------------------------------------------------ feedforward path
     d.wire([(95, 290), (95, 160), (178, 160)])
@@ -177,33 +177,34 @@ def build(theme: str) -> plt.Figure:
            "v = r_dev + v_fb   —   a demand in K; the allocator turns it into W",
            ha="center")
 
-    d.box(590, 242, 250, 96, "live", "Bounded allocator",
-          ("u = argmin ‖G u − v‖² + ‖R u‖²",
-           "subject to  u ≥ 0",
+    d.box(590, 236, 295, 108, "live", "Bounded allocator",
+          ("min ‖W(G u − v)‖² + λ‖u − u_ref‖²",
+           "         + ρ‖u − u_prev‖²",
+           "subject to  0 ≤ u ≤ u_max",
            "project, don't clip"),
-          sub_colors=(d.c["sub"], d.c["sub"], d.c["accent_red"]))
+          sub_colors=(d.c["sub"], d.c["sub"], d.c["sub"], d.c["accent_red"]))
 
-    d.wire([(840, 290), (897, 290)])
-    d.note(869, 272, "u ≥ 0", ha="center", color=d.c["ink"])
+    d.wire([(885, 290), (942, 290)])
+    d.note(913, 272, "u ≥ 0", ha="center", color=d.c["ink"])
 
-    d.box(900, 242, 220, 96, "plant", "Cryostat",
+    d.box(945, 242, 230, 96, "plant", "Cryostat",
           ("27 heaters, 27 sensors", "~24 h dominant mode",
            "8.6 h power → temperature lag"))
-    d.wire([(1010, 196), (1010, 238)])
+    d.wire([(1060, 196), (1060, 238)])
 
-    d.wire([(1120, 290), (1172, 290)])
-    d.dot(1140, 290)
-    d.signal(1148, 278, "y")
+    d.wire([(1175, 290), (1228, 290)])
+    d.dot(1195, 290)
+    d.signal(1203, 278, "y")
     # Right-anchored to the plant box, not the canvas: anywhere further right and
-    # it runs under the feedback wire dropping at x = 1140, then off the edge.
-    d.note(1120, 372, "27 temps [K]", ha="right")
+    # it runs under the feedback wire dropping at x = 1195, then off the edge.
+    d.note(1175, 372, "27 temps [K]", ha="right")
 
     # --------------------------------------------------------- feedback path
-    d.wire([(1140, 290), (1140, 430), (846, 430)])
+    d.wire([(1195, 290), (1195, 430), (846, 430)])
     d.box(590, 402, 250, 58, "fix", "Measurement filter", ("τ_f = 900 s",))
     d.wire([(590, 430), (200, 430), (200, 313)])
     d.signal(400, 418, "y_f")
-    d.note(715, 484,
+    d.note(715, 486,
            "hides the one-step parasitic path, passes the 34 h mode"
            "   —   K_p:  0.09 → 5.5",
            color=d.c["accent_green"], ha="center")
@@ -213,7 +214,14 @@ def build(theme: str) -> plt.Figure:
     d.note(728, 218, "defines the decoupling", color=d.c["ghost"])
 
     # ---------------------------------------------------------------- caption
-    d.note(560, 526,
+    # The allocator's three weights, spelled out once. On the slide these are the
+    # only symbols an audience has not already been told, and leaving them to the
+    # speaker means the equation reads as decoration.
+    d.note(630, 516,
+           "W: undershoot weight   ·   λ: damping, scaled to G's own spectrum   ·   "
+           "ρ: rate penalty (0 by default)",
+           size=9.0, ha="center")
+    d.note(630, 546,
            "The feedforward supplies the holding power; the PI only trims it.  "
            "Nothing in the live loop inverts G — the allocator solves against it under u ≥ 0.",
            size=9.5, ha="center")
