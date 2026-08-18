@@ -967,3 +967,18 @@ def test_the_measured_passive_reference_round_trips_through_the_panel():
     assert panel.read().mimo_pi_passive_reference_K == 33.2
     panel.mimo_pi_passive_spin.setValue(0.0)
     assert panel.read().mimo_pi_passive_reference_K == 0.0, "0 = derive must survive"
+
+
+def test_the_integral_hold_threshold_round_trips_through_the_panel():
+    """Conditional integration. Built by hand rather than through _add_double, so it
+    sits outside self.inputs and the generic round-trip test above cannot see it --
+    the same blind spot that shipped the measurement filter without a widget."""
+    panel, _form = _build(MODE_HEADLESS)
+    assert hasattr(panel, "mimo_pi_integral_hold_spin")
+
+    panel.set_params(replace(SimulationParameters(), mimo_pi_integral_hold_error_K=0.3))
+    assert panel.mimo_pi_integral_hold_spin.value() == 0.3
+    assert panel.read().mimo_pi_integral_hold_error_K == 0.3
+
+    panel.mimo_pi_integral_hold_spin.setValue(0.0)
+    assert panel.read().mimo_pi_integral_hold_error_K == 0.0, "unconditional must survive"
