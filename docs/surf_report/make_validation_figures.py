@@ -290,7 +290,7 @@ def fig_summary():
     ax.set_yticks(ypos)
     ax.set_yticklabels([r["label"] for r in rows], fontsize=10, color=INK)
     ax.set_xticks([1e-10, 1e-8, 1e-6, 1e-4, 1e-2, 1e0])
-    tidy(ax, xlabel="error / tolerance   (log scale — further left is better)")
+    tidy(ax, xlabel="error ÷ that row's own tolerance   (log scale — further left is better)")
     ax.grid(axis="y", visible=False)
     n_pass = sum(1 for r in rows if r["status"].upper().startswith("PASS"))
     headline = (f"Thermal solver vs. closed-form references: {n_pass}/{len(rows)} within tolerance"
@@ -298,7 +298,7 @@ def fig_summary():
                 f"Thermal solver vs. closed-form references: {n_pass}/{len(rows)} within tolerance, "
                 f"{len(rows) - n_pass} marginal")
     ax.set_title(headline, fontsize=12.5, pad=14, loc="left")
-    ax.annotate("tolerance", xy=(1.0, -0.72), fontsize=9, color=INK2,
+    ax.annotate("each row's own tolerance", xy=(1.0, -0.72), fontsize=9, color=INK2,
                 ha="center", va="center")
     ax.annotate("← round-off floor", xy=(FLOOR, -0.72), xytext=(2, 0),
                 textcoords="offset points", fontsize=8.5, color=MUTED,
