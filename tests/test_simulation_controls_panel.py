@@ -987,3 +987,20 @@ def test_the_integral_hold_threshold_round_trips_through_the_panel():
 
     panel.mimo_pi_integral_hold_spin.setValue(0.0)
     assert panel.read().mimo_pi_integral_hold_error_K == 0.0, "unconditional must survive"
+
+
+def test_the_relative_lambda_floor_round_trips_through_the_panel():
+    """The knob that actually sets lambda. lambda_eff = max(lambda_u,
+    rel * sigma_1^2), and on no_mli_high_res_v3 sigma_1 = 33.0, so the 1e-4 default
+    gives 0.109 -- 100x the configured lambda_u of 1e-3. Without a widget the only
+    exposed lambda control was inert, and the run that stranded a channel in the
+    damped directions had no way to recover it."""
+    panel, _form = _build(MODE_HEADLESS)
+    assert hasattr(panel, "mimo_lambda_rel_spin")
+
+    panel.set_params(replace(SimulationParameters(), mimo_lambda_u_relative=1.0e-5))
+    assert panel.mimo_lambda_rel_spin.value() == 1.0e-5
+    assert panel.read().mimo_lambda_u_relative == 1.0e-5
+
+    panel.mimo_lambda_rel_spin.setValue(0.0)
+    assert panel.read().mimo_lambda_u_relative == 0.0, "no floor at all must survive"

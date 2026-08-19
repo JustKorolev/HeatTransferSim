@@ -423,6 +423,28 @@ class SimulationControlsPanel:
             "model does not contain."
         )
         self._row(run_form, "mimo_pi_ki", self.mimo_pi_ki_spin, "MIMO PI Ki")
+        self.mimo_lambda_rel_spin = self.double_spin(
+            0.0, 1.0, float(getattr(self.params, "mimo_lambda_u_relative", 1.0e-4)), 1.0e-5
+        )
+        self.mimo_lambda_rel_spin.setToolTip(
+            "Singular-value RATIO below which a gain direction is treated as unreachable "
+            "and damped out of the allocation. This is the knob that actually sets lambda.\n\n"
+            "lambda_eff = max(lambda_u, mimo_lambda_u_relative * sigma_1^2), and on "
+            "no_mli_high_res_v3 sigma_1 = 33.0, so the 1e-4 default gives "
+            "lambda_eff = 0.109 -- 100x the configured lambda_u of 1e-3, which is therefore "
+            "inert. Changing 'lambda_u heater effort' does nothing unless it is raised above "
+            "this floor or set to 0 (which disables regularization entirely).\n\n"
+            "Direction k keeps sigma_k^2/(sigma_k^2 + lambda_eff) of its gain. At 1e-4 the "
+            "weakest of the 27 directions (sigma = 0.090) keeps 6.9%, and 14% of the "
+            "commanded deviation is discarded -- which is what strands a channel whose "
+            "correction lives in those directions.\n\n"
+            "LOWER it to recover them, at the cost of conditioning: too low and the allocator "
+            "inverts through near-null directions, which cost 11 W per K and flipped the "
+            "active heater set on 99% of steps. Watch for command_oscillation."
+        )
+        self._row(
+            run_form, "mimo_lambda_u_relative", self.mimo_lambda_rel_spin, "lambda_u rel (ratio)"
+        )
         self.mimo_pi_filter_spin = self.double_spin(
             0.0, 1.0e6, float(getattr(self.params, "mimo_pi_measurement_filter_s", 0.0)), 60.0
         )
@@ -1304,6 +1326,7 @@ class SimulationControlsPanel:
             ("mimo_pi_filter_spin", "mimo_pi_measurement_filter_s", 0.0),
             ("mimo_pi_overshoot_spin", "mimo_pi_overshoot_integral_scale", 1.0),
             ("mimo_pi_integral_hold_spin", "mimo_pi_integral_hold_error_K", 0.0),
+            ("mimo_lambda_rel_spin", "mimo_lambda_u_relative", 1.0e-4),
             ("mimo_pi_passive_spin", "mimo_pi_passive_reference_K", 0.0),
         ):
             widget = getattr(self, attribute, None)
@@ -1374,6 +1397,8 @@ class SimulationControlsPanel:
             values["mimo_pi_overshoot_integral_scale"] = float(self.mimo_pi_overshoot_spin.value())
         if hasattr(self, "mimo_pi_integral_hold_spin"):
             values["mimo_pi_integral_hold_error_K"] = float(self.mimo_pi_integral_hold_spin.value())
+        if hasattr(self, "mimo_lambda_rel_spin"):
+            values["mimo_lambda_u_relative"] = float(self.mimo_lambda_rel_spin.value())
         if hasattr(self, "mimo_pi_passive_spin"):
             values["mimo_pi_passive_reference_K"] = float(self.mimo_pi_passive_spin.value())
         return replace(base if base is not None else self.params, **values)

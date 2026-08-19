@@ -349,3 +349,35 @@ def test_the_earlier_parameter_file_is_kept_on_a_resume(tmp_path) -> None:
     second = HeadlessRunTab._preserve_prior_parameters(path)
     assert second.name == "simulation_parameters.leg2.json"
     assert first.read_text(encoding="utf-8") == '{"mimo_pi_kp": 5.5}', "leg1 clobbered"
+
+
+def test_a_resume_continues_the_step_numbering(tmp_path) -> None:
+    """Checkpoints are NAMED by the step counter. Left at 0, a resumed leg writes
+    ckpt_00000020 onward, which sorts BELOW the ckpt_00001977 it resumed from -- so
+    _available_checkpoints()[-1] keeps returning the old one and _prune_checkpoints
+    (newest 3 by name) deletes the new ones. One run resumed from t=59310 s three
+    times, discarding 11.3 h of completed progress on each.
+    """
+    _write_ckpt(tmp_path, [70.0, 71.0, 72.0, 73.0])          # ckpt_00000042, step=42
+    r = _runner(tmp_path, uniform_K=None)
+    r._resume_if_checkpoint(_Prep())
+    assert r._resume_step == 42
+
+    # ... so the next checkpoint this leg writes sorts ABOVE the one it resumed from.
+    assert f"ckpt_{43:08d}.npz" > "ckpt_00000042.npz"
+
+
+def test_a_fresh_run_starts_its_numbering_at_zero(tmp_path) -> None:
+    r = _runner(tmp_path, uniform_K=None)
+    r._resume_if_checkpoint(_Prep())
+    assert int(getattr(r, "_resume_step", 0)) == 0
+
+
+def test_a_checkpoint_without_a_step_field_still_resumes(tmp_path) -> None:
+    """Old checkpoints must stay resumable; they just restart the numbering."""
+    d = tmp_path / "checkpoints"
+    d.mkdir()
+    np.savez(d / "ckpt_00000042.npz", temperatures_K=np.zeros(4), time_s=123.0)
+    r = _runner(tmp_path, uniform_K=None)
+    r._resume_if_checkpoint(_Prep())
+    assert r._resume_step == 0

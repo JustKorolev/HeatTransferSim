@@ -920,7 +920,9 @@ class SimulationRunner:
         prev_temps = np.asarray(prepared.initial_temperatures_K, dtype=float).copy()
         last_snapshot_t = -1.0e18
         last_ckpt_wall = time.time()
-        step = 0
+        # Continues the resumed leg's numbering; 0 for a fresh run. See
+        # _resume_if_checkpoint: checkpoint FILENAMES are keyed on this.
+        step = int(getattr(self, "_resume_step", 0))
         base_dt = float(params.dt_s)
         accepted = False  # bound before the loop so a 0-iteration run finalizes cleanly
         state = None
@@ -1709,6 +1711,15 @@ class SimulationRunner:
         # from the resume, so the run silently does another full duration.
         if prepared.history:
             prepared.history[prepared.history_index].time_s = t0
+        # Restore the STEP counter too, because checkpoints are NAMED by it.
+        # Left at 0, a resumed leg wrote ckpt_00000020 onward -- which sorts BELOW
+        # the ckpt_00001977 it resumed from, so _available_checkpoints()[-1] kept
+        # returning the old one and _prune_checkpoints() (newest 3 by name) deleted
+        # the new ones. Every later resume therefore went back to the same stale
+        # checkpoint: one run resumed from t=59310 s three times, discarding 11.3 h
+        # of completed progress each time, and the reloaded timeseries was truncated
+        # back to match.
+        self._resume_step = int(data["step"]) if "step" in data else 0
         restored = _restore_controller_state(prepared, data)
         reloaded = self._reload_series(t0)
         self._log_event(
