@@ -54,7 +54,12 @@ def load(run_dir: Path):
     E = np.array([[float(r[c]) for c in controlled] for r in rows], dtype=float)
     M = (np.array([[float(r[c]) for c in monitor] for r in rows], dtype=float)
          if monitor else np.zeros((len(rows), 0)))
-    return hours, E, M, controlled, monitor
+    scalars = {
+        k: np.array([float(r[k]) for r in rows], dtype=float)
+        for k in ("power_in_W", "power_out_W", "net_W", "energy_drift_rel")
+        if k in rows[0]
+    }
+    return hours, E, M, controlled, monitor, scalars
 
 
 def worst_channel(E, labels):
@@ -234,6 +239,75 @@ def fig_outlier_vs_pack(hours, E, labels, out):
     style.save(fig, out)
 
 
+# ------------------------------------------------------------------ figure 5
+def fig_power_balance(hours, sc, out):
+    """Heat in against heat out, and their difference, both linear.
+
+    Linear on both panels: in and out span 22-51 W, one order of magnitude, so a log
+    axis would buy nothing and cost the reader the ability to read a wattage off the
+    page. The difference gets its OWN panel rather than a third line -- it settles at
+    -0.18 W against 22 W of throughput, so on the shared axis it is the zero line.
+    """
+    p_in, p_out, net = sc["power_in_W"], sc["power_out_W"], sc["net_W"]
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(9.8, 6.0), sharex=True,
+                                 gridspec_kw={"height_ratios": [1.55, 1.0]})
+    a1.plot(hours, p_in, "-", color=style.ORANGE, lw=1.8, zorder=4, label="heater power in")
+    a1.plot(hours, p_out, "-", color=style.BLUE, lw=1.8, zorder=3, label="cryocooler lift out")
+    a1.annotate(f"{p_in[-1]:.1f} W in / {p_out[-1]:.1f} W out at {hours[-1]:.0f} h",
+                xy=(hours[-1], p_out[-1]), xytext=(-6, 40), textcoords="offset points",
+                ha="right", fontsize=9, color=style.INK2)
+    a1.legend(frameon=False, fontsize=9, loc="upper right")
+    style.tidy(a1, None, "power  [W]", "Closing the 5 K offset costs a 51 W peak, settling to 23 W")
+    a2.fill_between(hours, 0.0, net, where=net >= 0, color=style.ORANGE, alpha=0.35, lw=0)
+    a2.fill_between(hours, 0.0, net, where=net < 0, color=style.BLUE, alpha=0.35, lw=0)
+    a2.plot(hours, net, "-", color=style.INK2, lw=1.4, zorder=4)
+    a2.axhline(0.0, color=style.AXIS, lw=1.2, zorder=3)
+    top = max(2.0, float(np.percentile(net, 98)) * 1.2)
+    a2.set_ylim(min(-1.6, net.min() * 1.2), top)
+    if net.max() > top:
+        a2.annotate(f"peak {net.max():+.1f} W, clipped", xy=(hours[int(net.argmax())], top),
+                    xytext=(8, -12), textcoords="offset points", fontsize=9,
+                    color=style.MUTED)
+    style.tidy(a2, "time (h)", "net = in − out  [W]",
+               f"Net settles to {net[-1]:+.2f} W: the structure is still equilibrating")
+    fig.tight_layout()
+    style.save(fig, out)
+
+
+# ------------------------------------------------------------------ figure 6
+def fig_energy_drift(hours, sc, out):
+    """First-law residual per step, log in the residual.
+
+    The second figure that needs a log scale. |net − dU/dt| normalised runs from
+    4.3e-07 to 3.0e-02 -- 4.8 decades -- so linear would show the startup steps and
+    render the entire settled run as a flat line on zero, which is exactly the part
+    that has to be checked. The thresholds are drawn because the number is
+    meaningless without them: it is a discretisation residual, not an error, and
+    "small" only means anything against what would be acted on.
+    """
+    drift = sc["energy_drift_rel"]
+    ok = np.isfinite(drift) & (drift > 0.0)
+    fig, ax = plt.subplots(figsize=(9.8, 4.4))
+    ax.plot(hours[ok], drift[ok], "-", color=style.BLUE, lw=1.0, alpha=0.85, zorder=3)
+    for level, colour, label in ((0.10, style.WARNING, "0.10  logged as a warning"),
+                                 (0.90, style.ORANGE, "0.90  aborts the run")):
+        ax.axhline(level, color=colour, ls="--", lw=1.3, zorder=4)
+        ax.annotate(label, xy=(hours[ok][0], level), xytext=(3, 4),
+                    textcoords="offset points", fontsize=9, color=colour)
+    median = float(np.median(drift[ok]))
+    ax.axhline(median, color=style.GOOD, ls=":", lw=1.4, zorder=4)
+    ax.annotate(f"median {median:.1e}", xy=(hours[ok][0], median), xytext=(3, -14),
+                textcoords="offset points", fontsize=9, color=style.GOOD)
+    ax.set_yscale("log")
+    ax.set_ylim(drift[ok].min() / 3.0, 2.0)
+    peak = float(drift[ok].max())
+    style.tidy(ax, "time (h)", "|net power − dU/dt| / max(|·|)   [log]",
+               f"Energy conservation: peak {peak:.1e} ({0.10/peak:.0f}x inside the "
+               f"warning), median {median:.1e} ({0.10/median:.0f}x)")
+    fig.tight_layout()
+    style.save(fig, out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dir", type=Path)
@@ -246,7 +320,7 @@ def main():
         style.use_dark()
     style.OUT = args.out or (args.run_dir / "plots")
 
-    hours, E, M, labels, monitor = load(args.run_dir)
+    hours, E, M, labels, monitor, scalars = load(args.run_dir)
     j61, name = worst_channel(E, labels)
     others = np.delete(E, j61, axis=1)
     print(f"{len(hours)} samples over {hours[-1]:.2f} h; "
@@ -258,6 +332,10 @@ def main():
     fig_convergence(hours, E, M, labels, "ctl_2_convergence")
     fig_final_distribution(hours, E, labels, "ctl_3_final_distribution")
     fig_outlier_vs_pack(hours, E, labels, "ctl_4_outlier_vs_pack")
+    if {"power_in_W", "power_out_W", "net_W"} <= set(scalars):
+        fig_power_balance(hours, scalars, "ctl_5_power_balance")
+    if "energy_drift_rel" in scalars:
+        fig_energy_drift(hours, scalars, "ctl_6_energy_drift")
 
 
 if __name__ == "__main__":
