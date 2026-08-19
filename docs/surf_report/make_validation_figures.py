@@ -556,7 +556,7 @@ def fig_two_block():
     a2.axhspan(-tol, tol, color=GRID, alpha=BAND_ALPHA, zorder=1, label=f"tolerance  ±{tol:g} K")
     a2.axhline(0.0, color=AXIS, lw=1.0, zorder=2)
     tidy(a2, "time (s)", "simulated − analytical (K)",
-         "Early-transient overshoot: the only case over tolerance")
+         "Simulated relaxation is 0.313% slow, so the gap peaks at t = tau")
     a2.legend(frameon=False, fontsize=9, loc="lower right")
     fig.suptitle("Two-block thermal exchange across a contact conductance",
                  fontsize=12.5, y=1.03, x=0.005, ha="left")

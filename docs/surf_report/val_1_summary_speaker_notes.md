@@ -42,13 +42,15 @@ out to ten-to-the-minus-thirty."
 
 **Pre-empt the amber row (~25 s).**
 "The ninth is amber, and I want to be the one to point at it. Two-block exchange
-across a contact conductance: peak instantaneous error 0.057 K against a 0.050 K
-threshold. Fifteen percent over, and it happens in the first few timesteps. On that
-same case the RMSE passes at 0.044 K, the final equilibrium temperature is right to
-eight times ten-to-the-minus-eleven kelvin, energy conserves to four nanojoules,
-and the interface conductance is reproduced exactly. So it's a transient-resolution
-artifact, not a physics error — and I'd rather report it than tune the tolerance
-until it disappeared."
+across a contact conductance: peak error 0.057 K against a 0.050 K threshold, so
+fifteen percent over. The cause is measurable — the simulation relaxes three tenths
+of a percent slower than the reference, and that shows up as a gap peaking at exactly
+one time constant. The reason is that the reference treats each block as perfectly
+isothermal, while the mesh resolves eight cells per block and carries a small
+internal resistance in series with the contact. On that same case the equilibrium is
+right to ten-to-the-minus-eleven kelvin and energy conserves to four nanojoules. So
+it's an idealisation in the reference, not an error in the solver — and I'd rather
+report it than tune the tolerance until it disappeared."
 
 **The row that matters most (~15 s).**
 "The row I'd point to for this project is the cryo regime — heater, radiation and
@@ -106,10 +108,15 @@ heater, ambient radiation and conduction all active. The imbalance stays at
 1.8 millijoules.
 
 **"Is the amber case going to bite you?"**
-It's a peak error during the first few timesteps of a contact-coupled transient.
-The real simulation runs for 28 to 70 hours and the quantity I care about is the
-steady tracking error, which on that same case is exact to 1e-10 K. If I needed
-that peak, I'd shrink dt — it's a resolution knob, not a model defect.
+No, and it is not a time-resolution problem — dt/tau is 1.4e-3 there, so shrinking dt
+does nothing. Fitting both curves gives tau_sim = 138.416 s against
+tau_ana = 137.984 s, 0.313% slow, and two exponentials differing by that much differ
+most at t = tau by Delta0 * eps / e = 0.1150 K, against 0.1145 K observed — so the
+mechanism is pinned, not guessed. The reference is a LUMPED two-body model, so it
+assumes zero internal resistance within each block; the mesh resolves 8 cells per
+block and does not. Refining the mesh moves further from that reference, not closer
+— one cell per block would match it exactly. The quantity this project depends on is
+the steady tracking error, and the equilibrium on that case is exact to 8e-11 K.
 
 **"Which of these is closest to what you actually ran?"**
 Cryo regime, and global energy conservation. The first is the operating point
