@@ -883,10 +883,11 @@ class HeadlessRunTab:
     def _analysis_heater_caps(self) -> dict[int, float] | float:
         """Per-heater max power, defaulting to the Controller section's value.
 
-        Mirrors what the run itself does (``_controller_heater_max_power``): a
-        heater with its own limit uses it, everything else falls back to the one
-        number on the left. Analysing against a different budget than the run
-        would use is how a report ends up disagreeing with the loop it describes.
+        Mirrors what the run itself does (``_controller_heater_max_power``): the
+        Controller section's figure is a CEILING on every heater, a heater rated
+        below it keeps its lower rating, and only a per-heater entry in the heater
+        table may exceed it. Analysing against a different budget than the run would
+        use is how a report ends up disagreeing with the loop it describes.
         """
         from .simulation_parameters import SimulationParameters
 

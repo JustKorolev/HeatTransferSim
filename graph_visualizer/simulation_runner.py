@@ -524,9 +524,61 @@ class SimulationRunner:
         self._warn_if_disconnected()
         self._report_quarantine(prepared)
         self._check_actuator_connectivity(prepared, params)
+        self._report_heater_limits(prepared, params)
         self._warn_if_unforced(prepared, params, has_controller, cryo_idx)
         self._resume_if_checkpoint(prepared)
         return prepared, params, C_diag, sensors, heaters, cryo_idx
+
+    def _report_heater_limits(self, prepared, params) -> None:
+        """Say which heater ceiling is actually in force, per heater.
+
+        The run that prompted this had eight heaters commanded above the 1.5 W it was
+        configured with, one of them to 12.4 W, and nothing in any artifact said so:
+        the ceiling was a fallback, the overrides were applied by mutating the node,
+        and the effective limit appeared nowhere. A limit the operator cannot see is
+        a limit they will be surprised by.
+        """
+        model = getattr(prepared, "model", None)
+        heater_ids = [int(v) for v in getattr(prepared, "heater_node_ids", ()) or ()]
+        if model is None or not heater_ids:
+            return
+        ceiling = max(0.0, float(getattr(params, "mimo_default_heater_max_power_W", 0.0) or 0.0))
+        clamped, explicit = [], []
+        for node_id in heater_ids:
+            node = model.nodes.get(node_id)
+            heater = getattr(node, "heater", None) if node is not None else None
+            if heater is None:
+                continue
+            efficiency = float(getattr(heater, "heater_efficiency", 1.0) or 1.0)
+            rated = float(getattr(heater, "heater_max_power_W", 0.0) or 0.0) * efficiency
+            limit = simulation_model._controller_heater_max_power(node, params)
+            if bool(getattr(heater, simulation_model.EXPLICIT_MAX_POWER_ATTR, False)):
+                explicit.append((node_id, limit))
+            elif ceiling > 0.0 and rated > ceiling + 1.0e-12:
+                clamped.append((node_id, rated, limit))
+        if clamped:
+            detail = ", ".join(f"{i} {r:.3g}->{l:.3g}W" for i, r, l in clamped[:8])
+            self._log_event(
+                "heater_limits",
+                f"{len(clamped)} heater(s) rated above the {ceiling:g} W ceiling were "
+                f"clamped to it: {detail}" + (", ..." if len(clamped) > 8 else "")
+                + ". Name a heater in the run's heater table to let it exceed the ceiling.",
+            )
+        if explicit:
+            self._log_event(
+                "heater_limits",
+                f"{len(explicit)} heater(s) exceed or replace the ceiling by explicit "
+                f"override: " + ", ".join(f"{i} {l:.3g}W" for i, l in explicit),
+            )
+        total = sum(
+            simulation_model._controller_heater_max_power(model.nodes[i], params)
+            for i in heater_ids if model.nodes.get(i) is not None
+        )
+        self._log_event(
+            "heater_limits",
+            f"total commandable heater power {total:.3g} W across {len(heater_ids)} heater(s) "
+            f"(ceiling {ceiling:g} W each unless overridden).",
+        )
 
     def _report_quarantine(self, prepared) -> None:
         """Log which cells were quarantined and which heaters it cost.
@@ -736,6 +788,11 @@ class SimulationRunner:
             for name in self._HEATER_OVERRIDE_FIELDS:
                 if name in fields:
                     setattr(heater, name, float(fields[name]))
+                    if name == "heater_max_power_W":
+                        # Mark it, so the global ceiling steps aside for a limit the
+                        # run asked for by name. Without this the override is
+                        # indistinguishable from the graph's build-time rating.
+                        setattr(heater, simulation_model.EXPLICIT_MAX_POWER_ATTR, True)
             for name in self._HEATER_NODE_OVERRIDE_FIELDS:
                 if name in fields:
                     setattr(node, name, float(fields[name]))

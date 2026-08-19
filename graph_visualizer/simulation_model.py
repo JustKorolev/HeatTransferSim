@@ -3703,15 +3703,42 @@ def _rls_ff_update(
     return P_new, dM_new, integral_new, alpha
 
 
+# Set on a heater when the RUN explicitly named its max power (the headless tab's
+# heater table -> heater_overrides). Needed because the override is applied by
+# mutating the node, which otherwise makes "the user asked for 120 W" and "the graph
+# was built with 120 W" indistinguishable by the time the controller reads it.
+EXPLICIT_MAX_POWER_ATTR = "heater_max_power_W_is_explicit"
+
+
 def _controller_heater_max_power(node: Any, params: SimulationParameters) -> float:
+    """This heater's commandable ceiling in W.
+
+    mimo_default_heater_max_power_W is a CEILING on every heater, not a fallback for
+    heaters that happen to lack a rating. It used to be the latter, which made the
+    field silently inert on this graph: most nodes carry a build-time rating, so
+    setting 1.5 W still let the allocator command 12.4 W into one heater -- 8x the
+    figure the run was configured with, and nothing reported it.
+
+    Precedence, highest first:
+      1. a per-heater override from the run's heater table -- wins outright, so a
+         deliberate 120 W still works under a 1.5 W global;
+      2. otherwise min(the node's own rating, the global) -- a heater rated BELOW
+         the global keeps its lower rating, because that is a hardware fact and the
+         global is only meant to stop the allocator concentrating load;
+      3. the global alone, for a node with no rating at all.
+
+    A global of 0 means "no ceiling", which keeps the old behaviour for runs that
+    never set it.
+    """
     heater = getattr(node, "heater", None)
-    max_power = (
-        float(getattr(heater, "heater_max_power_W", 0.0))
-        * float(getattr(heater, "heater_efficiency", 1.0))
-    )
-    if max_power <= 0.0:
-        max_power = float(params.mimo_default_heater_max_power_W)
-    return max(0.0, max_power)
+    efficiency = float(getattr(heater, "heater_efficiency", 1.0) or 1.0)
+    rated = float(getattr(heater, "heater_max_power_W", 0.0) or 0.0) * efficiency
+    ceiling = max(0.0, float(getattr(params, "mimo_default_heater_max_power_W", 0.0) or 0.0))
+    if bool(getattr(heater, EXPLICIT_MAX_POWER_ATTR, False)):
+        return max(0.0, rated)
+    if rated > 0.0:
+        return max(0.0, min(rated, ceiling) if ceiling > 0.0 else rated)
+    return ceiling
 
 
 def _controller_heater_slew_rate(node: Any, params: SimulationParameters) -> float:

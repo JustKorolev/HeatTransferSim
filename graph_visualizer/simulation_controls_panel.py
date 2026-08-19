@@ -673,17 +673,17 @@ class SimulationControlsPanel:
             self._add_double(cooler_form, name, label, minimum, maximum, step)
         self._add_checkbox(cooler_form, "cryocooler_enabled", "Enabled")
 
-        # Read by BOTH the MIMO PI and modal-LQR schemes. Called "defaults" rather
-        # than "limits" because that is what the heater-power field actually is: a
-        # per-node heater_max_power_W wins outright, and this is used only when the
-        # node has none (see _controller_heater_max_power). The slew rate is the
-        # exception -- it has no per-node equivalent and does apply to every heater
-        # -- so its own label and tooltip say so.
+        # Read by BOTH the MIMO PI and modal-LQR schemes. Both fields are CEILINGS on
+        # every heater, not fallbacks for heaters that lack a rating: the power field
+        # used to be the latter, which made it silently inert on a graph whose nodes
+        # carry build-time ratings (1.5 W configured, 12.4 W commanded). A heater
+        # rated below the ceiling keeps its lower rating; only a per-heater entry in
+        # the run's heater table may exceed it. See _controller_heater_max_power.
         controller_box, controller_form = self._add_section(
-            form, "controller_limits", "Controller (defaults)"
+            form, "controller_limits", "Controller (limits)"
         )
         for name, label, minimum, maximum, step in (
-            ("mimo_default_heater_max_power_W", "default max heater power W", 0.0, 1.0e9, 1.0),
+            ("mimo_default_heater_max_power_W", "max heater power W (all heaters)", 0.0, 1.0e9, 1.0),
             ("mimo_heater_slew_rate_W_per_s", "hard slew W/s (all heaters)", 0.0, 1.0e9, 1.0),
         ):
             self._add_double(controller_form, name, label, minimum, maximum, step)

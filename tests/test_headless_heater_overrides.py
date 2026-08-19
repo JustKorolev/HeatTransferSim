@@ -369,3 +369,81 @@ def test_a_failing_loader_does_not_blank_the_rest_of_the_tab(tmp_path, monkeypat
     assert any("boom" in message for message, _ in said), said
     assert tab.heater_table.rowCount() == 1, "the heater table still loaded"
     assert "roles:" in tab.graph_info.text(), "the info line was still written"
+
+
+# --- the global figure is a CEILING, not a fallback --------------------------- #
+class _Heater:
+    def __init__(self, max_power_W=0.0, efficiency=1.0):
+        self.heater_max_power_W = max_power_W
+        self.heater_efficiency = efficiency
+
+
+class _HeaterNode:
+    def __init__(self, **kw):
+        self.heater = _Heater(**kw)
+
+
+def _limit(node, ceiling):
+    from dataclasses import replace as _replace
+
+    from graph_visualizer.simulation_model import _controller_heater_max_power
+    from graph_visualizer.simulation_parameters import SimulationParameters
+
+    params = _replace(SimulationParameters(), mimo_default_heater_max_power_W=ceiling)
+    return _controller_heater_max_power(node, params)
+
+
+def test_a_graph_rated_heater_is_clamped_to_the_global_ceiling() -> None:
+    """The reported bug: the field was a FALLBACK, so a node carrying a build-time
+    rating ignored it entirely. A run configured for 1.5 W commanded 12.4 W into one
+    heater -- 8x -- and no artifact said so."""
+    assert _limit(_HeaterNode(max_power_W=12.5), 1.5) == 1.5
+
+
+def test_a_heater_rated_below_the_ceiling_keeps_its_own_rating() -> None:
+    """The ceiling stops the allocator concentrating load; it must not RAISE a
+    heater past what the hardware can take."""
+    assert _limit(_HeaterNode(max_power_W=0.8), 1.5) == 0.8
+
+
+def test_an_unrated_heater_takes_the_ceiling() -> None:
+    assert _limit(_HeaterNode(), 1.5) == 1.5
+
+
+def test_an_explicit_override_may_exceed_the_ceiling() -> None:
+    """A deliberate 120 W has to keep working under a 1.5 W global, which is the
+    whole reason the override needs marking: it is applied by mutating the node, so
+    without the mark it looks exactly like a graph rating."""
+    from graph_visualizer.simulation_model import EXPLICIT_MAX_POWER_ATTR
+
+    node = _HeaterNode(max_power_W=120.0)
+    setattr(node.heater, EXPLICIT_MAX_POWER_ATTR, True)
+    assert _limit(node, 1.5) == 120.0
+
+
+def test_efficiency_still_scales_the_limit() -> None:
+    assert _limit(_HeaterNode(max_power_W=4.0, efficiency=0.5), 10.0) == 2.0
+
+
+def test_a_zero_ceiling_means_no_ceiling() -> None:
+    """Runs that never set the field must behave as before rather than having every
+    rated heater silently clamped to zero."""
+    assert _limit(_HeaterNode(max_power_W=12.5), 0.0) == 12.5
+    assert _limit(_HeaterNode(), 0.0) == 0.0
+
+
+def test_applying_an_override_marks_it_as_explicit(tmp_path) -> None:
+    """End to end through the runner's override path, since that is what turns a
+    table entry into the mark the limit rule reads."""
+    from graph_visualizer import simulation_model
+    from graph_visualizer.simulation_runner import SimulationRunner
+
+    r = object.__new__(SimulationRunner)
+    r.cfg = type("Cfg", (), {"heater_overrides": {7: {"heater_max_power_W": 120.0}}})()
+    r.events = []
+    r._log_event = lambda kind, msg: r.events.append((kind, msg))
+    node = _HeaterNode(max_power_W=2.0)
+    r._apply_heater_overrides(type("M", (), {"nodes": {7: node}})())
+    assert node.heater.heater_max_power_W == 120.0
+    assert getattr(node.heater, simulation_model.EXPLICIT_MAX_POWER_ATTR, False) is True
+    assert _limit(node, 1.5) == 120.0, "an override must survive the ceiling"

@@ -544,7 +544,7 @@ def test_both_modes_build_identical_sections_in_identical_order():
         "Environment",
         "Material Properties",
         "Cryocooler",
-        "Controller (defaults)",
+        "Controller (limits)",
         "Controller Design (modal LQR / MIMO PI G)",
         "MIMO Thermal-Rate QP",
         "Solver",
