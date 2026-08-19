@@ -1672,35 +1672,10 @@ class SimulationRunner:
                 pass  # a locked or already-removed file is not worth failing a run over
 
     def _available_checkpoints(self) -> list:
-        """This run directory's checkpoints, oldest first. One definition, used by
-        both the resume and the start-state decision, so they cannot disagree.
-
-        Ordered by the time_s INSIDE each file, not by filename. Filenames are keyed
-        on the step counter, and a leg resumed before the counter was restored
-        numbered its checkpoints from 0 -- so files written HOURS later sort before
-        the one they resumed from. Sorting by name then picked the stale checkpoint
-        forever: one run resumed from t=59310 s three times while a t=100020 s
-        checkpoint sat in the same directory. Reading the field fixes directories
-        already in that state, which renumbering future writes cannot.
-
-        Falls back to the name for any file that will not open, so a corrupt or
-        half-written checkpoint neither vanishes silently nor breaks the ordering.
-        """
-        if not self.ckpt_dir.exists():
-            return []
-        paths = sorted(self.ckpt_dir.glob("ckpt_*.npz"))
-
-        def stamp(path):
-            try:
-                with np.load(path) as data:
-                    return (1, float(data["time_s"]))
-            except Exception:  # noqa: BLE001
-                # Sorts BEFORE every readable file: the list is oldest-first and the
-                # caller takes the last, so an unreadable checkpoint is kept as a
-                # spare but can never be the one chosen.
-                return (0, 0.0)
-
-        return sorted(paths, key=lambda p: (stamp(p), p.name))
+        """This run directory's checkpoints, oldest first. See available_checkpoints:
+        the ordering lives at module level so the runner and the GUI cannot disagree
+        about which checkpoint a resume will actually use."""
+        return available_checkpoints(self.ckpt_dir)
 
     def _resume_if_checkpoint(self, prepared) -> None:
         # Resume only from a checkpoint under a PRE-EXISTING run dir passed as
@@ -2368,6 +2343,59 @@ def _physical_memory_gib() -> float:
     except Exception:  # noqa: BLE001
         pass
     return 0.0
+
+
+def available_checkpoints(ckpt_dir) -> list:
+    """A run directory's checkpoints, oldest first, newest LAST.
+
+    Ordered by the time_s INSIDE each file, not by filename. Filenames are keyed on
+    the step counter, and a leg resumed before that counter was restored numbered its
+    checkpoints from 0 -- so files written HOURS later sort before the one they
+    resumed from. Sorting by name then picked the stale checkpoint forever: one run
+    resumed from t=59310 s three times while a t=100020 s checkpoint sat in the same
+    directory. Reading the field repairs directories already in that state, which
+    renumbering future writes cannot.
+
+    Unreadable files sort BEFORE every readable one. The caller takes the last entry,
+    so a corrupt checkpoint is kept as a spare and can never be the one chosen.
+
+    Module level on purpose: the runner resumes from this, and the headless tab
+    LABELS the resume dropdown from it. Two implementations meant the GUI advertised
+    "resume at step 1977, t=59310s" for a run the engine would have resumed
+    elsewhere -- and the label is the only thing the user sees before committing
+    hours to a run.
+    """
+    ckpt_dir = Path(ckpt_dir)
+    if not ckpt_dir.exists():
+        return []
+    paths = sorted(ckpt_dir.glob("ckpt_*.npz"))
+
+    def stamp(path):
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                return (1, float(data["time_s"]))
+        except Exception:  # noqa: BLE001
+            return (0, 0.0)
+
+    return sorted(paths, key=lambda p: (stamp(p), p.name))
+
+
+def newest_checkpoint(ckpt_dir):
+    """(path, step, time_s) of the newest USABLE checkpoint, or None.
+
+    Walks newest-first and skips any file that opens but lacks the arrays a resume
+    needs, so what the GUI shows is what the engine will actually load.
+    """
+    for candidate in reversed(available_checkpoints(ckpt_dir)):
+        try:
+            with np.load(candidate, allow_pickle=False) as data:
+                step = int(data["step"]) if "step" in data else 0
+                return candidate, step, float(data["time_s"]), int(
+                    np.asarray(data["temperatures_K"]).size
+                )
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 class _AlignedSeries(dict):

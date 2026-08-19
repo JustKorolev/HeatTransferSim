@@ -1293,16 +1293,20 @@ class HeadlessRunTab:
         Reads only the two scalar arrays, so listing many runs stays cheap even
         though each checkpoint holds a full multi-million-node temperature field.
         """
-        checkpoints = sorted((run_dir / "checkpoints").glob("ckpt_*.npz"))
-        if not checkpoints:
-            return None
+        # The SAME selection the engine will make. This used to sort by filename and
+        # take the last, which is the stale-checkpoint bug: the dropdown advertised
+        # "resume at step 1977, t=59310s" while a t=100020 s checkpoint sat beside
+        # it. The label is the only thing the user sees before committing hours.
         try:
-            import numpy as np
+            from .simulation_runner import newest_checkpoint
 
-            with np.load(checkpoints[-1], allow_pickle=False) as data:
-                return int(data["step"]), float(data["time_s"])
+            found = newest_checkpoint(run_dir / "checkpoints")
         except Exception:  # noqa: BLE001 - a truncated checkpoint just is not offered
             return None
+        if found is None:
+            return None
+        _path, step, time_s, _n = found
+        return step, time_s
 
     def resumable_runs(self, graph_name: str) -> list[tuple[Path, int, float]]:
         """Runs of ``graph_name`` that have a checkpoint, newest first."""

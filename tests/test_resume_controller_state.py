@@ -442,3 +442,43 @@ def test_every_checkpoint_unreadable_stops_the_run(tmp_path) -> None:
     r = _runner(tmp_path, uniform_K=None)
     with pytest.raises(_HardFailure):
         r._resume_if_checkpoint(_Prep())
+
+
+# --- the dropdown label must match what the engine will do -------------------- #
+def test_the_dropdown_label_matches_the_checkpoint_the_engine_picks(tmp_path) -> None:
+    """The reported symptom: the resume dropdown said "resume at step 1977,
+    t=59310s" while a t=100020 s checkpoint sat in the same directory. The tab had
+    its OWN filename-sorted copy of the selection, so the label described a resume
+    the engine would not perform -- and the label is all the user sees before
+    committing hours to a run."""
+    from graph_visualizer.headless_run_tab import HeadlessRunTab
+    from graph_visualizer.simulation_runner import newest_checkpoint
+
+    d = tmp_path / "checkpoints"
+    d.mkdir()
+    # Exactly the real state: leg 1 numbered high, the resumed leg numbered from 0.
+    np.savez(d / "ckpt_00001977.npz", temperatures_K=np.full(4, 60.0), time_s=59310.0, step=1977)
+    np.savez(d / "ckpt_00001357.npz", temperatures_K=np.full(4, 46.0), time_s=100020.0, step=1357)
+
+    assert HeadlessRunTab.describe_checkpoint(tmp_path) == (1357, 100020.0)
+    path, step, time_s, _n = newest_checkpoint(d)
+    assert (step, time_s) == (1357, 100020.0)
+    assert path.name == "ckpt_00001357.npz"
+
+
+def test_the_label_skips_a_checkpoint_the_engine_would_skip(tmp_path) -> None:
+    """A file that opens but lacks temperatures_K is unusable for a resume, so the
+    label must not advertise it either."""
+    from graph_visualizer.headless_run_tab import HeadlessRunTab
+
+    d = tmp_path / "checkpoints"
+    d.mkdir()
+    np.savez(d / "ckpt_00000010.npz", temperatures_K=np.full(4, 46.0), time_s=100020.0, step=10)
+    np.savez(d / "ckpt_00000020.npz", time_s=100050.0, step=20)      # no temperatures
+    assert HeadlessRunTab.describe_checkpoint(tmp_path) == (10, 100020.0)
+
+
+def test_a_run_with_no_checkpoints_is_not_offered(tmp_path) -> None:
+    from graph_visualizer.headless_run_tab import HeadlessRunTab
+
+    assert HeadlessRunTab.describe_checkpoint(tmp_path) is None
