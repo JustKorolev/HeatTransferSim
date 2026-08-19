@@ -11,6 +11,7 @@ run had already achieved.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from graph_visualizer.simulation_runner import (
     _AlignedSeries,
@@ -381,3 +382,63 @@ def test_a_checkpoint_without_a_step_field_still_resumes(tmp_path) -> None:
     r = _runner(tmp_path, uniform_K=None)
     r._resume_if_checkpoint(_Prep())
     assert r._resume_step == 0
+
+
+def test_the_newest_checkpoint_is_chosen_by_time_not_by_filename(tmp_path) -> None:
+    """Filenames are keyed on the step counter, and a leg resumed before that counter
+    was restored numbered from 0 -- so files written hours later sort BEFORE the one
+    they resumed from. This is the state real run directories are already in, and
+    renumbering future writes cannot repair them."""
+    d = tmp_path / "checkpoints"
+    d.mkdir()
+    np.savez(d / "ckpt_00001977.npz", temperatures_K=np.full(4, 60.0), time_s=59310.0, step=1977)
+    np.savez(d / "ckpt_00001357.npz", temperatures_K=np.full(4, 46.0), time_s=100020.0, step=1357)
+    r = _runner(tmp_path, uniform_K=None)
+    p = _Prep()
+    r._resume_if_checkpoint(p)
+    assert p.history[p.history_index].time_s == 100020.0, "resumed from the stale one"
+    assert p.temperatures.tolist() == [46.0] * 4
+
+
+def test_an_unreadable_checkpoint_never_wins(tmp_path) -> None:
+    """A half-written file must not strand the run at a state it cannot load, but it
+    must not disappear either -- the spares exist for exactly this."""
+    d = tmp_path / "checkpoints"
+    d.mkdir()
+    np.savez(d / "ckpt_00000010.npz", temperatures_K=np.full(4, 46.0), time_s=100020.0, step=10)
+    (d / "ckpt_00000099.npz").write_bytes(b"truncated")
+    r = _runner(tmp_path, uniform_K=None)
+    p = _Prep()
+    assert len(r._available_checkpoints()) == 2, "the bad file is kept as a spare"
+    r._resume_if_checkpoint(p)
+    assert p.temperatures.tolist() == [46.0] * 4
+
+
+def test_a_corrupt_newest_checkpoint_falls_back_to_a_spare(tmp_path) -> None:
+    """_CHECKPOINTS_KEPT exists so a corrupt write does not strand the run, but
+    nothing acted on it: only the newest was opened, so a half-written newest failed
+    the resume outright with two good spares sitting beside it."""
+    d = tmp_path / "checkpoints"
+    d.mkdir()
+    np.savez(d / "ckpt_00000010.npz", temperatures_K=np.full(4, 46.0), time_s=100020.0, step=10)
+    np.savez(d / "ckpt_00000020.npz", temperatures_K=np.full(4, 47.0), time_s=100050.0, step=20)
+    np.savez(d / "ckpt_00000030.npz", time_s=100080.0, step=30)   # opens, no temperatures
+    r = _runner(tmp_path, uniform_K=None)
+    p = _Prep()
+    r._resume_if_checkpoint(p)
+    assert p.temperatures.tolist() == [47.0] * 4, "should use the newest READABLE one"
+    assert any(k == "resume_checkpoint_unusable" for k, _ in r.events), r.events
+
+
+def test_every_checkpoint_unreadable_stops_the_run(tmp_path) -> None:
+    """Silently starting over from the initial temperature is the failure this whole
+    area exists to prevent, so an all-corrupt directory must abort loudly."""
+    from graph_visualizer.simulation_runner import _HardFailure
+
+    d = tmp_path / "checkpoints"
+    d.mkdir()
+    for step in (10, 20):
+        (d / f"ckpt_{step:08d}.npz").write_bytes(b"nope")
+    r = _runner(tmp_path, uniform_K=None)
+    with pytest.raises(_HardFailure):
+        r._resume_if_checkpoint(_Prep())

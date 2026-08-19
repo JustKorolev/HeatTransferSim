@@ -1673,10 +1673,34 @@ class SimulationRunner:
 
     def _available_checkpoints(self) -> list:
         """This run directory's checkpoints, oldest first. One definition, used by
-        both the resume and the start-state decision, so they cannot disagree."""
+        both the resume and the start-state decision, so they cannot disagree.
+
+        Ordered by the time_s INSIDE each file, not by filename. Filenames are keyed
+        on the step counter, and a leg resumed before the counter was restored
+        numbered its checkpoints from 0 -- so files written HOURS later sort before
+        the one they resumed from. Sorting by name then picked the stale checkpoint
+        forever: one run resumed from t=59310 s three times while a t=100020 s
+        checkpoint sat in the same directory. Reading the field fixes directories
+        already in that state, which renumbering future writes cannot.
+
+        Falls back to the name for any file that will not open, so a corrupt or
+        half-written checkpoint neither vanishes silently nor breaks the ordering.
+        """
         if not self.ckpt_dir.exists():
             return []
-        return sorted(self.ckpt_dir.glob("ckpt_*.npz"))
+        paths = sorted(self.ckpt_dir.glob("ckpt_*.npz"))
+
+        def stamp(path):
+            try:
+                with np.load(path) as data:
+                    return (1, float(data["time_s"]))
+            except Exception:  # noqa: BLE001
+                # Sorts BEFORE every readable file: the list is oldest-first and the
+                # caller takes the last, so an unreadable checkpoint is kept as a
+                # spare but can never be the one chosen.
+                return (0, 0.0)
+
+        return sorted(paths, key=lambda p: (stamp(p), p.name))
 
     def _resume_if_checkpoint(self, prepared) -> None:
         # Resume only from a checkpoint under a PRE-EXISTING run dir passed as
@@ -1693,7 +1717,31 @@ class SimulationRunner:
                 "checkpoints are missing or the run directory is not the one intended.",
             )
             return
-        data = np.load(ckpts[-1])
+        # Newest first, falling back through the spares. _CHECKPOINTS_KEPT exists so
+        # that a corrupt write does not strand the run, but nothing acted on that:
+        # only the newest was ever opened, so a half-written newest file failed the
+        # resume outright with two good spares sitting beside it.
+        data = chosen = None
+        for candidate in reversed(ckpts):
+            try:
+                data = np.load(candidate)
+                _ = data["temperatures_K"], data["time_s"]
+            except Exception as exc:  # noqa: BLE001
+                self._log_event(
+                    "resume_checkpoint_unusable",
+                    f"{candidate.name} could not be read ({exc}); trying the next spare.",
+                )
+                data = None
+                continue
+            chosen = candidate
+            break
+        if data is None or chosen is None:
+            raise _HardFailure(
+                f"every checkpoint under {self.ckpt_dir} is unreadable "
+                f"({len(ckpts)} tried). Resuming would silently start over from the "
+                "initial temperature, so this stops instead."
+            )
+        ckpts = ckpts[: ckpts.index(chosen) + 1]
         temps = np.asarray(data["temperatures_K"], dtype=float)
         t0 = float(data["time_s"])
         # set_temperatures resets the controller integrators and stamps the new
