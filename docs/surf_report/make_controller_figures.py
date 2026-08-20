@@ -268,39 +268,63 @@ def fig_final_distribution(hours, E, labels, out):
 
 
 # ------------------------------------------------------------------ figure 4
-def fig_outlier_vs_pack(hours, E, labels, out):
-    """The outlier against the band the rest of the pack occupies.
+def fig_pack_envelope(hours, E, labels, out):
+    """The band every controlled channel occupies, and its mean.
 
-    Figure 2 shows it is the floor; this shows WHY the rms will not improve without
-    it. The pack band is min..max of the other channels, so the gap between the band
-    and the outlier is the part of the error no amount of settling removes.
+    Two modes. With nothing excluded it overlays the widest channel, because the
+    gap between it and the band is the part of the rms no amount of settling
+    removes. With channels excluded it is the envelope alone -- still the useful
+    view (how the spread collapses into the target band), and it is what is left
+    once the figure's original subject is gone. Skipping it in that case threw away
+    a figure that stands on its own.
     """
     j61, name = worst_channel(E, labels)
-    others = np.delete(E, j61, axis=1)
+    show_outlier = not EXCLUSION_NOTE
+    band = np.delete(E, j61, axis=1) if show_outlier else E
     fig, ax = plt.subplots(figsize=(9.6, 4.4))
-    ax.fill_between(hours, others.min(axis=1), others.max(axis=1),
+    ax.fill_between(hours, band.min(axis=1), band.max(axis=1),
                     color=style.BLUE, alpha=0.30, lw=0, zorder=2,
-                    label=f"{others.shape[1]} other controlled sensors (min–max)")
-    ax.plot(hours, others.mean(axis=1), "-", color=style.BLUE, lw=1.6, zorder=3,
+                    label=f"{band.shape[1]} controlled sensors (min–max)")
+    ax.plot(hours, band.mean(axis=1), "-", color=style.BLUE, lw=1.6, zorder=3,
             label="their mean")
-    ax.plot(hours, E[:, j61], "-", color=style.ORANGE, lw=2.2, zorder=4, label=name)
+    if show_outlier:
+        ax.plot(hours, E[:, j61], "-", color=style.ORANGE, lw=2.2, zorder=4, label=name)
     ax.axhline(0.0, color=style.AXIS, lw=1.0, zorder=3)
     target_band(ax)
-    # Start after the approach: clipping a -5 K dive at -1.2 K left vertical stubs at
-    # the left edge that read as data. Figure 1 covers the transient.
-    ax.set_xlim(1.0, hours[-1])
-    ax.set_ylim(-1.0, 0.35)
-    # The gap is still opening, slowly -- worth stating on the figure, because the
-    # eye reads two flat lines as "settled" and this one is not.
-    early = hours >= 5.0
-    gap_now = float(others[-1].mean() - E[-1, j61])
-    gap_then = float(others[early][0].mean() - E[early, j61][0])
-    ax.annotate(f"gap {gap_then:.2f} K at 5 h  →  {gap_now:.2f} K at {hours[-1]:.0f} h",
-                xy=(hours[-1], E[-1, j61]), xytext=(-8, -18),
-                textcoords="offset points", ha="right", fontsize=9, color=style.ORANGE)
+    # Start after the approach: clipping a -5 K dive left vertical stubs at the left
+    # edge that read as data. Figure 1 covers the transient.
+    # Start where the band has come within a few target-widths, so nothing clips and
+    # the settled structure fills the view. Basing the limits on t >= 1 h instead let
+    # the -0.9 K tail of the approach set the range and squeezed the result into a
+    # sliver. Figure 1 covers the approach itself.
+    settled_from = 1.0
+    if not show_outlier:
+        inside = np.where((hours > 0.5) & (band.min(axis=1) > -6.0 * TARGET_K))[0]
+        settled_from = float(hours[inside[0]]) if inside.size else 1.0
+    ax.set_xlim(settled_from, hours[-1])
+    m = hours >= settled_from
+    if show_outlier:
+        gap_now = float(band[-1].mean() - E[-1, j61])
+        early = hours >= 5.0
+        gap_then = float(band[early][0].mean() - E[early, j61][0])
+        ax.set_ylim(-1.0, 0.35)
+        # The gap is still opening, slowly -- worth stating, because the eye reads two
+        # nearly-flat lines as settled and this pair is not.
+        ax.annotate(f"gap {gap_then:.2f} K at 5 h  →  {gap_now:.2f} K at {hours[-1]:.0f} h",
+                    xy=(hours[-1], E[-1, j61]), xytext=(-8, -18),
+                    textcoords="offset points", ha="right", fontsize=9, color=style.ORANGE)
+        headline = f"One channel sits {abs(gap_now):.2f} K below the pack and is not closing"
+    else:
+        # Data-driven limits: the hardcoded pair was chosen to fit the outlier, and
+        # without it the band occupies a tenth of that range.
+        lo, hi = float(band[m].min()), float(band[m].max())
+        pad = max(0.25 * (hi - lo), TARGET_K * 0.6)
+        ax.set_ylim(min(lo - pad, -TARGET_K * 1.4), max(hi + pad, TARGET_K * 1.4))
+        lo_f, hi_f = float(band[-1].min()), float(band[-1].max())
+        headline = (f"All {band.shape[1]} channels settle within "
+                    f"{lo_f:+.3f} to {hi_f:+.3f} K of setpoint")
     ax.legend(frameon=False, fontsize=9, loc="lower right")
-    style.tidy(ax, "time (h)", "sensor error  [K]",
-               f"One channel sits {abs(gap_now):.2f} K below the pack and is not closing")
+    style.tidy(ax, "time (h)", "sensor error  [K]", headline)
     fig.tight_layout()
     stamp(fig)
     style.save(fig, out)
@@ -426,10 +450,7 @@ def main():
     fig_transient_and_steady(hours, E, labels, "ctl_1_transient_and_steady")
     fig_convergence(hours, E, M, labels, "ctl_2_convergence")
     fig_final_distribution(hours, E, labels, "ctl_3_final_distribution")
-    if not args.exclude:
-        fig_outlier_vs_pack(hours, E, labels, "ctl_4_outlier_vs_pack")
-    else:
-        print("skipping ctl_4 (outlier vs pack): its subject was excluded")
+    fig_pack_envelope(hours, E, labels, "ctl_4_pack_envelope")
     if {"power_in_W", "power_out_W", "net_W"} <= set(scalars):
         fig_power_balance(hours, scalars, "ctl_5_power_balance")
     if "energy_drift_rel" in scalars:
