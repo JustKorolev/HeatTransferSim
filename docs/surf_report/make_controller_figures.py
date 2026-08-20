@@ -42,6 +42,48 @@ def target_band(ax, horizontal=True):
         line(edge, color=style.INK2, ls=":", lw=0.9, alpha=0.7, zorder=2)
 
 
+# Stamped on every figure whenever channels are dropped. An exclusion that is not
+# on the face of the figure is one that gets quoted without its caveat: the run this
+# was built for held 25 channels to 0.098 K, and dropping one reports 0.037 K for a
+# configuration that was not run -- the dropped channel was in the loop, so its error
+# was pulling on the allocation for all the others.
+EXCLUSION_NOTE = ""
+
+
+def apply_exclusions(E, labels, spec):
+    """Drop channels named in ``spec`` (sensor ids, series names, or "worst").
+
+    Cleaner to do here than in each figure, and it sets EXCLUSION_NOTE once so no
+    figure can forget to disclose it.
+    """
+    global EXCLUSION_NOTE
+    if not spec:
+        return E, labels
+    wanted = {t.strip() for t in spec.split(",") if t.strip()}
+    keep, dropped = [], []
+    worst = int(np.argmax(np.abs(E[-1]))) if "worst" in wanted else None
+    for j, col in enumerate(labels):
+        series = col[:-6]                       # "sensor_61_err_K" -> "sensor_61"
+        token = series.replace("sensor_", "")
+        if j == worst or series in wanted or token in wanted:
+            dropped.append(series)
+        else:
+            keep.append(j)
+    if not dropped:
+        raise SystemExit(f"--exclude {spec!r} matched no channel of {len(labels)}")
+    EXCLUSION_NOTE = (f"{len(dropped)} of {len(labels)} controlled channels excluded "
+                      f"from these figures and from the rms")
+    print(f"excluded {len(dropped)}: {', '.join(dropped)}")
+    return E[:, keep], [labels[j] for j in keep]
+
+
+def stamp(fig):
+    """Put the exclusion note on the figure itself, bottom-left, small and permanent."""
+    if EXCLUSION_NOTE:
+        fig.text(0.005, -0.02, EXCLUSION_NOTE, fontsize=8.5, color=style.WARN_TEXT,
+                 ha="left", va="top")
+
+
 def load(run_dir: Path):
     manifest = {r["series"]: r for r in csv.DictReader(open(run_dir / "sensors.csv"))}
     rows = list(csv.DictReader(open(run_dir / "timeseries.csv")))
@@ -62,10 +104,17 @@ def load(run_dir: Path):
     return hours, E, M, controlled, monitor, scalars
 
 
+# Deliberately generic. Naming one sensor on a slide invites "what is wrong with
+# that one" when the point is the distribution, and the identity means nothing to an
+# audience. The channel stays in every figure and in every quoted rms -- it is
+# relabelled, not removed, because dropping it while still quoting the 25-channel rms
+# would attribute its error to the other 24.
+OUTLIER_LABEL = "widest channel"
+
+
 def worst_channel(E, labels):
-    """The channel with the largest |error| at the end -- the one that sets the rms."""
-    j = int(np.argmax(np.abs(E[-1])))
-    return j, labels[j][:-6].replace("_", " ")
+    """Index of the channel with the largest |error| at the end -- it sets the rms."""
+    return int(np.argmax(np.abs(E[-1]))), OUTLIER_LABEL
 
 
 def rms(a, axis=None):
@@ -91,11 +140,13 @@ def fig_transient_and_steady(hours, E, labels, out):
         (a2, (max(0.0, hours[-1] - 5.0), hours[-1]), "Steady state, last 5 h (note the axis)"),
     ):
         m = (hours >= lo) & (hours <= hi)
+        highlight = j61 if not EXCLUSION_NOTE else None
         for j in range(E.shape[1]):
-            if j == j61:
+            if j == highlight:
                 continue
             ax.plot(hours[m], E[m, j], "-", color=style.BLUE, lw=0.9, alpha=0.55, zorder=2)
-        ax.plot(hours[m], E[m, j61], "-", color=style.ORANGE, lw=1.8, zorder=4)
+        if highlight is not None:
+            ax.plot(hours[m], E[m, highlight], "-", color=style.ORANGE, lw=1.8, zorder=4)
         ax.axhline(0.0, color=style.AXIS, lw=1.0, zorder=3)
         # Only on the steady panel: at a 5 K scale the band is under 2% of the view,
         # so drawing it there adds a line at zero and no information.
@@ -106,16 +157,17 @@ def fig_transient_and_steady(hours, E, labels, out):
         style.tidy(ax, "time (h)",
                    "sensor error  (measured − setpoint)  [K]" if ax is a1 else None, title)
         ax.set_xlim(lo, hi)
-    a2.legend(handles=[
-        Line2D([], [], color=style.BLUE, lw=1.4, alpha=0.8,
-               label=f"{E.shape[1]-1} controlled sensors"),
-        Line2D([], [], color=style.ORANGE, lw=1.8, label=name),
-        Line2D([], [], color=style.GRID, lw=7, alpha=style.BAND_ALPHA,
-               label=f"±{TARGET_K:g} K target"),
-    ], frameon=False, fontsize=9, loc="center right")
-    fig.suptitle("Closed-loop tracking: 25 controlled sensors", fontsize=12.5, y=1.03,
-                 x=0.005, ha="left")
+    handles = [Line2D([], [], color=style.BLUE, lw=1.4, alpha=0.8,
+                      label=f"{E.shape[1] - (0 if EXCLUSION_NOTE else 1)} controlled sensors")]
+    if not EXCLUSION_NOTE:
+        handles.append(Line2D([], [], color=style.ORANGE, lw=1.8, label=name))
+    handles.append(Line2D([], [], color=style.GRID, lw=7, alpha=style.BAND_ALPHA,
+                          label=f"±{TARGET_K:g} K target"))
+    a2.legend(handles=handles, frameon=False, fontsize=9, loc="lower left")
+    fig.suptitle(f"Closed-loop tracking: {E.shape[1]} controlled sensors",
+                 fontsize=12.5, y=1.03, x=0.005, ha="left")
     fig.tight_layout()
+    stamp(fig)
     style.save(fig, out)
 
 
@@ -135,8 +187,9 @@ def fig_convergence(hours, E, M, labels, out):
     fig, ax = plt.subplots(figsize=(9.6, 4.6))
     m = hours > 0
     ax.plot(hours[m], rms(E[m], axis=1), "-", color=style.BLUE, lw=2.2, zorder=4)
-    ax.plot(hours[m], rms(others[m], axis=1), "--", color=style.GOOD, lw=2.0, zorder=5)
-    ax.plot(hours[m], np.abs(E[m, j61]), "-", color=style.ORANGE, lw=1.6, zorder=3)
+    if not EXCLUSION_NOTE:
+        ax.plot(hours[m], rms(others[m], axis=1), "--", color=style.GOOD, lw=2.0, zorder=5)
+        ax.plot(hours[m], np.abs(E[m, j61]), "-", color=style.ORANGE, lw=1.6, zorder=3)
     if M.shape[1]:
         ax.plot(hours[m], rms(M[m], axis=1), ":", color=style.WARNING, lw=1.6, zorder=2)
     ax.axhline(TARGET_K, color=style.INK2, ls="--", lw=1.3, zorder=6)
@@ -148,20 +201,29 @@ def fig_convergence(hours, E, M, labels, out):
     # rms where it dips to ~0.02 K, cutting off the best part of the result.
     floor = min(rms(np.delete(E, j61, axis=1)[m], axis=1).min(), TARGET_K)
     ax.set_ylim(floor / 2.5, np.abs(E).max() * 1.6)
-    handles = [
-        Line2D([], [], color=style.BLUE, lw=2.2, label="rms over all 25"),
-        Line2D([], [], color=style.GOOD, lw=2.0, ls="--",
-               label=f"rms over 24 (excl. {name})"),
-        Line2D([], [], color=style.ORANGE, lw=1.6, label=f"{name}  |e|"),
-    ]
+    handles = [Line2D([], [], color=style.BLUE, lw=2.2,
+                      label=f"rms over all {E.shape[1]}")]
+    if not EXCLUSION_NOTE:
+        handles += [
+            Line2D([], [], color=style.GOOD, lw=2.0, ls="--",
+                   label=f"rms over {E.shape[1]-1} (excl. the widest)"),
+            Line2D([], [], color=style.ORANGE, lw=1.6, label=f"{name}  |e|"),
+        ]
     if M.shape[1]:
         handles.append(Line2D([], [], color=style.WARNING, lw=1.6, ls=":",
                               label=f"rms over {M.shape[1]} monitor (not controlled)"))
     ax.legend(handles=handles, frameon=False, fontsize=9, loc="lower left",
               bbox_to_anchor=(0.0, 0.0))
-    style.tidy(ax, "time (h, log)", "|error|  [K, log]",
-               "Convergence: one channel sets the floor, the other 24 are 2.7x below it")
+    settled = float(rms(E[-1]))
+    if EXCLUSION_NOTE:
+        headline = (f"Convergence: rms over {E.shape[1]} channels settles at "
+                    f"{settled:.3f} K, {TARGET_K/settled:.1f}x inside target")
+    else:
+        headline = (f"Convergence: one channel sets the {settled:.3f} K floor, the other "
+                    f"{E.shape[1]-1} are {settled/rms(others[-1]):.1f}x below it")
+    style.tidy(ax, "time (h, log)", "|error|  [K, log]", headline)
     fig.tight_layout()
+    stamp(fig)
     style.save(fig, out)
 
 
@@ -178,7 +240,9 @@ def fig_final_distribution(hours, E, labels, out):
     final = E[window].mean(axis=0)
     spread = E[window].std(axis=0)
     order = np.argsort(final)
-    names = [labels[j][:-6].replace("sensor_", "s") for j in order]
+    # Rank, not identity: the sensor names carry no meaning for a reader and naming
+    # the outlier is the thing this figure most invites.
+    names = [str(k + 1) for k in range(len(order))]
     y = np.arange(len(order))
     fig, ax = plt.subplots(figsize=(9.2, 6.2))
     target_band(ax, horizontal=False)
@@ -192,12 +256,14 @@ def fig_final_distribution(hours, E, labels, out):
                     mew=1.2, zorder=4)
     ax.set_yticks(y)
     ax.set_yticklabels(names, fontsize=9, color=style.INK2)
+    ax.set_ylabel("controlled channel, ranked by final error", color=style.INK2)
     ax.set_ylim(-0.8, len(order) - 0.2)
     n_in = int(inside.sum())
     style.tidy(ax, f"mean error over the final hour  [K]   "
                    f"(bars: 1σ; dotted band ±{TARGET_K:g} K)", None,
                f"{n_in} of {len(order)} controlled sensors inside ±{TARGET_K:g} K")
     fig.tight_layout()
+    stamp(fig)
     style.save(fig, out)
 
 
@@ -234,8 +300,9 @@ def fig_outlier_vs_pack(hours, E, labels, out):
                 textcoords="offset points", ha="right", fontsize=9, color=style.ORANGE)
     ax.legend(frameon=False, fontsize=9, loc="lower right")
     style.tidy(ax, "time (h)", "sensor error  [K]",
-               f"{name} sits {abs(gap_now):.2f} K below the pack and is not closing")
+               f"One channel sits {abs(gap_now):.2f} K below the pack and is not closing")
     fig.tight_layout()
+    stamp(fig)
     style.save(fig, out)
 
 
@@ -271,6 +338,7 @@ def fig_power_balance(hours, sc, out):
     style.tidy(a2, "time (h)", "net = in − out  [W]",
                f"Net settles to {net[-1]:+.2f} W: the structure is still equilibrating")
     fig.tight_layout()
+    stamp(fig)
     style.save(fig, out)
 
 
@@ -278,16 +346,35 @@ def fig_power_balance(hours, sc, out):
 def fig_energy_drift(hours, sc, out):
     """First-law residual per step, log in the residual.
 
-    The second figure that needs a log scale. |net − dU/dt| normalised runs from
-    4.3e-07 to 3.0e-02 -- 4.8 decades -- so linear would show the startup steps and
-    render the entire settled run as a flat line on zero, which is exactly the part
-    that has to be checked. The thresholds are drawn because the number is
-    meaningless without them: it is a discretisation residual, not an error, and
-    "small" only means anything against what would be acted on.
+    The second figure that needs a log scale. The residual runs 4.3e-07 to 3.0e-02 --
+    4.8 decades -- so linear would show the startup steps and render the entire
+    settled run as a flat line on zero, which is exactly the part that has to be
+    checked. The thresholds are drawn because the number is meaningless without them:
+    it is a discretisation residual, not an error, and "small" only means anything
+    against what would be acted on.
+
+    The quantity is DIMENSIONLESS but it is not a percentage throughout, which is the
+    easiest thing to get wrong about it. The denominator is
+    max(|net_W|, |dU/dt|, 1.0), so once the plant nears equilibrium the 1 W floor
+    wins and the ratio stops being a fraction OF anything -- it becomes an absolute
+    residual in watts. On this run the floor is active for 79% of the samples, from
+    1.9 h onward, so the shaded region is milliwatts and only the unshaded part left
+    of it is a true fraction of the power.
     """
     drift = sc["energy_drift_rel"]
-    ok = np.isfinite(drift) & (drift > 0.0)
+    ok = np.isfinite(drift) & (np.asarray(drift) > 0.0)
     fig, ax = plt.subplots(figsize=(9.8, 4.4))
+    # Mark where the normalisation changes meaning.
+    net = sc.get("net_W")
+    if net is not None:
+        floored = np.abs(net) < 1.0
+        start = hours[np.argmax(floored & (hours > 0.5))] if floored.any() else None
+        if start is not None and start < hours[-1]:
+            ax.axvspan(start, hours[-1], color=style.GRID, alpha=0.55, lw=0, zorder=0)
+            ax.annotate("denominator floored at 1 W from here:\nread this region as watts, "
+                        "not as a fraction",
+                        xy=(start, 1.0), xytext=(6, -2), textcoords="offset points",
+                        fontsize=8.5, color=style.MUTED, va="top")
     ax.plot(hours[ok], drift[ok], "-", color=style.BLUE, lw=1.0, alpha=0.85, zorder=3)
     for level, colour, label in ((0.10, style.WARNING, "0.10  logged as a warning"),
                                  (0.90, style.ORANGE, "0.90  aborts the run")):
@@ -301,10 +388,12 @@ def fig_energy_drift(hours, sc, out):
     ax.set_yscale("log")
     ax.set_ylim(drift[ok].min() / 3.0, 2.0)
     peak = float(drift[ok].max())
-    style.tidy(ax, "time (h)", "|net power − dU/dt| / max(|·|)   [log]",
+    style.tidy(ax, "time (h)",
+               "|net power − dU/dt| / max(|net|, |dU/dt|, 1 W)   [log, dimensionless]",
                f"Energy conservation: peak {peak:.1e} ({0.10/peak:.0f}x inside the "
                f"warning), median {median:.1e} ({0.10/median:.0f}x)")
     fig.tight_layout()
+    stamp(fig)
     style.save(fig, out)
 
 
@@ -313,6 +402,10 @@ def main():
     ap.add_argument("run_dir", type=Path)
     ap.add_argument("--dark", action="store_true",
                     help="render for a dark slide on a transparent background")
+    ap.add_argument("--exclude", default="",
+                    help="comma-separated sensor ids / series names to drop from the "
+                         "figures AND the rms, or 'worst' for the widest channel. "
+                         "Every figure is stamped with the exclusion.")
     ap.add_argument("--out", type=Path, default=None,
                     help="output directory (default: <run_dir>/plots)")
     args = ap.parse_args()
@@ -321,17 +414,22 @@ def main():
     style.OUT = args.out or (args.run_dir / "plots")
 
     hours, E, M, labels, monitor, scalars = load(args.run_dir)
+    E, labels = apply_exclusions(E, labels, args.exclude)
     j61, name = worst_channel(E, labels)
     others = np.delete(E, j61, axis=1)
     print(f"{len(hours)} samples over {hours[-1]:.2f} h; "
           f"{E.shape[1]} controlled, {M.shape[1]} monitor")
     print(f"rms all {E.shape[1]}: {rms(E[-1]):.4f} K | "
-          f"rms without {name}: {rms(others[-1]):.4f} K | {name}: {E[-1, j61]:+.4f} K")
+          f"rms excluding the widest: {rms(others[-1]):.4f} K | "
+          f"widest ({labels[j61][:-6]}): {E[-1, j61]:+.4f} K")
 
     fig_transient_and_steady(hours, E, labels, "ctl_1_transient_and_steady")
     fig_convergence(hours, E, M, labels, "ctl_2_convergence")
     fig_final_distribution(hours, E, labels, "ctl_3_final_distribution")
-    fig_outlier_vs_pack(hours, E, labels, "ctl_4_outlier_vs_pack")
+    if not args.exclude:
+        fig_outlier_vs_pack(hours, E, labels, "ctl_4_outlier_vs_pack")
+    else:
+        print("skipping ctl_4 (outlier vs pack): its subject was excluded")
     if {"power_in_W", "power_out_W", "net_W"} <= set(scalars):
         fig_power_balance(hours, scalars, "ctl_5_power_balance")
     if "energy_drift_rel" in scalars:
