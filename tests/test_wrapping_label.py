@@ -136,3 +136,89 @@ def test_setting_new_text_reclaims_the_height() -> None:
         pytest.skip(output)
     before, after = (int(value) for value in output.split())
     assert after > before, f"height did not grow with the text ({before} -> {after})"
+
+
+# --------------------------------------------------------------------------- #
+# Status labels
+# --------------------------------------------------------------------------- #
+STATUS = """
+    class Qt:
+        QtCore = QtCore
+        QtWidgets = QtWidgets
+
+    from graph_visualizer.simulation_controls_panel import MODE_LIVE, SimulationControlsPanel
+
+    panel = SimulationControlsPanel(Qt, mode=MODE_LIVE)
+    host = QtWidgets.QWidget()
+    panel.build(QtWidgets.QFormLayout(host))
+    label = panel.modal_design_status_label
+    label.setFixedWidth(360)
+
+    LONG = ("MIMO PI gain matrix unavailable (the gain matrix references 12 node ids "
+            "not in this graph -- it was built for a different graph, so its constants "
+            "would not mean anything here); scheme not active. Re-run the sys ID.")
+"""
+
+
+def test_a_long_status_message_expands_the_label_instead_of_being_cut_off() -> None:
+    """These are the messages that matter most when something has gone wrong -- a
+    gain matrix that does not match the graph, an export that refused. Truncating
+    them hid the reason."""
+    output = _run(
+        STATUS
+        + """
+    label.setText("Idle.")
+    QtWidgets.QApplication.processEvents()
+    short = label.sizeHint().height()
+    label.setText(LONG)
+    QtWidgets.QApplication.processEvents()
+    print(short, label.sizeHint().height(), label.maximumHeight())
+    """
+    )
+    if _skipped(output):
+        pytest.skip(output)
+    short, long_height, maximum = (int(value) for value in output.split())
+    assert long_height > short, f"the label did not grow ({short} -> {long_height})"
+    assert maximum > 10000, f"a maximum height of {maximum} would clip it again"
+
+
+def test_a_short_message_keeps_a_two_line_floor() -> None:
+    """Without a floor the row collapses and shuffles everything below it on every
+    status update."""
+    output = _run(
+        STATUS
+        + """
+    label.setText("Idle.")
+    QtWidgets.QApplication.processEvents()
+    print(label.minimumHeight(), label.fontMetrics().lineSpacing())
+    """
+    )
+    if _skipped(output):
+        pytest.skip(output)
+    minimum, line = (int(value) for value in output.split())
+    assert minimum >= line * 2, f"floor {minimum}px is under two {line}px lines"
+
+
+def test_the_floor_is_re_measured_after_a_ui_scale_change() -> None:
+    """The floor is in pixels, from the font at build time; at a larger scale a
+    stale floor is less than two lines."""
+    output = _run(
+        STATUS
+        + """
+    before = label.minimumHeight()
+    big = QtGui.QFont(QtWidgets.QApplication.font())
+    big.setPointSizeF(18.0)
+    QtWidgets.QApplication.setFont(big)
+    for widget in QtWidgets.QApplication.allWidgets():
+        try:
+            widget.setFont(big)
+        except Exception:
+            pass
+    panel.repin_two_line_labels()
+    print(before, label.minimumHeight())
+    """
+    )
+    if _skipped(output):
+        pytest.skip(output)
+    before, after = (int(value) for value in output.split())
+    assert after > before, f"floor did not grow with the font ({before} -> {after})"

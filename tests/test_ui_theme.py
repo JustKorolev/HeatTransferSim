@@ -13,12 +13,15 @@ import pytest
 
 from graph_visualizer.ui_theme import (
     MAX_DECIMALS,
+    MAX_UI_SCALE,
     MIN_DECIMALS,
-    UI_SCALES,
+    MIN_UI_SCALE,
+    UI_SCALE_STEP,
     choose_font_family,
     clamp_scale,
     decimals_for,
     point_size_for,
+    step_scale,
     widen_decimals_for,
 )
 
@@ -144,35 +147,50 @@ def test_no_preferred_font_falls_back_to_qts_default() -> None:
 # --------------------------------------------------------------------------- #
 # Scale
 # --------------------------------------------------------------------------- #
-def test_every_offered_scale_survives_a_round_trip() -> None:
-    for scale in UI_SCALES:
+def test_the_slider_range_round_trips() -> None:
+    for scale in range(MIN_UI_SCALE, MAX_UI_SCALE + 1, UI_SCALE_STEP):
         assert clamp_scale(scale) == scale
 
 
-def test_an_unoffered_scale_snaps_to_the_nearest() -> None:
-    """A value restored from settings after the menu changed must still pick
-    something sensible rather than silently reverting to 100%."""
-    assert clamp_scale(107) == 110
-    assert clamp_scale(1000) == max(UI_SCALES)
-    assert clamp_scale(10) == min(UI_SCALES)
-    # An exact tie takes the smaller option, deterministically.
-    assert clamp_scale(105) == 100
+def test_the_range_reaches_forty_percent() -> None:
+    """The bottom exists for displays whose DPI Qt over-estimates: everything is
+    already enlarged before the application gets a say, so the useful correction
+    is downward."""
+    assert MIN_UI_SCALE == 40
+    assert clamp_scale(40) == 40
+    assert clamp_scale(10) == 40
+    assert point_size_for(40) == pytest.approx(3.5)
+
+
+def test_values_off_the_step_snap_onto_it() -> None:
+    """A slider drag lands anywhere; the stored value should not be arbitrary."""
+    assert clamp_scale(63) == 65
+    assert clamp_scale(102) == 100
+    assert clamp_scale(103) == 105
+
+
+def test_out_of_range_is_clamped_not_wrapped() -> None:
+    assert clamp_scale(1000) == MAX_UI_SCALE
+    assert clamp_scale(-50) == MIN_UI_SCALE
 
 
 def test_junk_scale_is_the_default() -> None:
     assert clamp_scale("wat") == 100
     assert clamp_scale(None) == 100
+    assert clamp_scale(float("nan")) == 100
+
+
+def test_keyboard_steps_move_and_stop_at_the_ends() -> None:
+    assert step_scale(100, +1) == 110
+    assert step_scale(100, -1) == 90
+    assert step_scale(MIN_UI_SCALE, -1) == MIN_UI_SCALE
+    assert step_scale(MAX_UI_SCALE, +1) == MAX_UI_SCALE
 
 
 def test_point_size_tracks_the_scale_and_lands_on_half_points() -> None:
     assert point_size_for(100) == pytest.approx(9.0)
     assert point_size_for(200) == pytest.approx(18.0)
-    assert point_size_for(75) == pytest.approx(7.0)
-    for scale in UI_SCALES:
+    for scale in range(MIN_UI_SCALE, MAX_UI_SCALE + 1, UI_SCALE_STEP):
         size = point_size_for(scale)
         assert (size * 2) == int(size * 2), f"{scale}% gave {size}, not a half point"
-
-
-def test_the_scale_menu_is_monotonic_and_contains_100() -> None:
-    assert list(UI_SCALES) == sorted(UI_SCALES)
-    assert 100 in UI_SCALES
+        assert size > 0

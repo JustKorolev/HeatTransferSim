@@ -157,6 +157,24 @@ inside the application:
 Steps that mention a specific control carry a **"Show me this control"** link
 that reveals and flashes the real widget.
 
+### The menus
+
+| Menu | Holds |
+|---|---|
+| **File** | New / Open / Save / Save As, **Export Controller Constants** (`Ctrl+E`), Update Graph, Exit |
+| **View** | The UI scale slider, larger/smaller text, dark mode |
+| **Help** | Control search (`Ctrl+F`), tutorials (`F1`), About |
+
+**View** carries a live **UI scale slider**, 40% to 200%. Drag it and the whole
+interface resizes as you watch; `Ctrl` `+` and `Ctrl` `-` step it, `Ctrl` `0`
+returns to 100%. The setting is remembered between sessions.
+
+It scales by *font size* rather than zooming a picture of the interface, so
+panels, rows and buttons all grow with the text instead of the text overflowing
+boxes that stayed the same size. The range goes well below 100% on purpose: on a
+display whose DPI Qt over-estimates, everything is already too large before the
+application gets a say, and the only useful correction is downward.
+
 ---
 
 ## 5. Your first simulation

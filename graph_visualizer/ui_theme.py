@@ -44,8 +44,15 @@ ASSUMED_LABEL_WIDTH = 350
 #: Point size the UI is designed at, before the View menu's scale is applied.
 BASE_POINT_SIZE = 9.0
 
-#: Offered by View > UI scale. 100% is BASE_POINT_SIZE.
-UI_SCALES: tuple[int, ...] = (75, 90, 100, 110, 125, 150, 175, 200)
+#: View > UI scale is a slider over this range, in percent. 100% is
+#: BASE_POINT_SIZE. The bottom is deliberately far below "small": on a display
+#: whose DPI Qt over-estimates, everything is already enlarged before the
+#: application gets a say, and the only useful correction is downward.
+MIN_UI_SCALE = 40
+MAX_UI_SCALE = 200
+#: Slider granularity, and how far one Ctrl+plus / Ctrl+minus moves.
+UI_SCALE_STEP = 5
+UI_SCALE_KEY_STEP = 10
 DEFAULT_UI_SCALE = 100
 
 #: Preferred UI fonts, best first. Qt's own default on Windows is a bitmapped
@@ -257,20 +264,26 @@ def choose_font_family(available: Iterable[str], preferred: Sequence[str] = PREF
     return ""
 
 
-def clamp_scale(percent: Any, allowed: Sequence[int] = UI_SCALES) -> int:
-    """Nearest offered scale to ``percent``.
+def clamp_scale(percent: Any) -> int:
+    """``percent`` held inside the slider's range and snapped to its step.
 
-    Snapping rather than clamping, so a value restored from settings that is no
-    longer on the menu still selects something sensible instead of silently
-    reverting to 100%.
+    Junk becomes the default rather than raising: this reads a value out of
+    QSettings, which can hold anything a previous version or a hand-edited file
+    put there, and a bad scale must not stop the window from opening.
     """
     try:
-        wanted = int(round(float(percent)))
+        wanted = float(percent)
     except (TypeError, ValueError):
         return DEFAULT_UI_SCALE
-    if not allowed:
+    if wanted != wanted:  # NaN
         return DEFAULT_UI_SCALE
-    return min(allowed, key=lambda option: (abs(option - wanted), option))
+    snapped = int(round(wanted / UI_SCALE_STEP)) * UI_SCALE_STEP
+    return max(MIN_UI_SCALE, min(MAX_UI_SCALE, snapped))
+
+
+def step_scale(percent: Any, direction: int) -> int:
+    """One keyboard step up (+1) or down (-1) from ``percent``."""
+    return clamp_scale(clamp_scale(percent) + int(direction) * UI_SCALE_KEY_STEP)
 
 
 def point_size_for(scale_percent: Any, base: float = BASE_POINT_SIZE) -> float:

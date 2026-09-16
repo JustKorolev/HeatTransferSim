@@ -407,18 +407,92 @@ class GraphVisualizerApp:
             panel = getattr(getattr(self, attribute, None), "panel", None)
             if panel is not None and hasattr(panel, "repin_two_line_labels"):
                 panel.repin_two_line_labels()
-        for percent, action in getattr(self, "_ui_scale_actions", {}).items():
-            action.setChecked(percent == scale)
+        self._sync_ui_scale_widgets(scale)
         if announce:
             self._set_status(f"UI scale {scale}% ({self.ui_font_family}).")
 
     def step_ui_scale(self, direction: int) -> None:
-        """Move one step up or down the offered scales."""
-        from .ui_theme import UI_SCALES, clamp_scale
+        """One keyboard step up or down from the current scale."""
+        from .ui_theme import step_scale
 
-        current = clamp_scale(getattr(self, "ui_scale", 100))
-        index = UI_SCALES.index(current)
-        self.set_ui_scale(UI_SCALES[max(0, min(len(UI_SCALES) - 1, index + direction))])
+        self.set_ui_scale(step_scale(getattr(self, "ui_scale", 100), direction))
+
+    def _build_ui_scale_slider(self, menu: Any) -> Any:
+        """A live slider embedded in the View menu.
+
+        A QWidgetAction rather than a list of checkable percentages: scale is a
+        continuous quantity and the only way to judge it is to watch the window
+        change, which a slider lets you do by dragging. The menu deliberately
+        stays open while dragging -- closing on the first move would make it
+        impossible to tune.
+        """
+        from .ui_theme import MAX_UI_SCALE, MIN_UI_SCALE, UI_SCALE_STEP
+
+        container = self.QtWidgets.QWidget()
+        layout = self.QtWidgets.QHBoxLayout(container)
+        layout.setContentsMargins(12, 4, 12, 4)
+        layout.setSpacing(8)
+
+        caption = self.QtWidgets.QLabel("UI scale")
+        layout.addWidget(caption)
+
+        self.ui_scale_slider = self.QtWidgets.QSlider(self.QtCore.Qt.Horizontal)
+        self.ui_scale_slider.setMinimum(MIN_UI_SCALE)
+        self.ui_scale_slider.setMaximum(MAX_UI_SCALE)
+        self.ui_scale_slider.setSingleStep(UI_SCALE_STEP)
+        self.ui_scale_slider.setPageStep(UI_SCALE_STEP * 4)
+        self.ui_scale_slider.setTickInterval(20)
+        self.ui_scale_slider.setTickPosition(self.QtWidgets.QSlider.TicksBelow)
+        self.ui_scale_slider.setValue(int(getattr(self, "ui_scale", 100)))
+        self.ui_scale_slider.setMinimumWidth(180)
+        self.ui_scale_slider.setToolTip(
+            f"Resize the whole interface, {MIN_UI_SCALE}% to {MAX_UI_SCALE}%.\n"
+            "Ctrl+plus / Ctrl+minus step it; Ctrl+0 returns to 100%."
+        )
+        self.ui_scale_slider.valueChanged.connect(self._handle_ui_scale_slider)
+        layout.addWidget(self.ui_scale_slider, 1)
+
+        self.ui_scale_value_label = self.QtWidgets.QLabel(f"{getattr(self, 'ui_scale', 100)}%")
+        # Fixed width, so the row does not twitch as the number changes width --
+        # and the label is itself being resized by the thing it is reporting.
+        self.ui_scale_value_label.setMinimumWidth(48)
+        self.ui_scale_value_label.setAlignment(
+            self.QtCore.Qt.AlignRight | self.QtCore.Qt.AlignVCenter
+        )
+        layout.addWidget(self.ui_scale_value_label)
+
+        # QWidgetAction is in QtWidgets -- unlike QAction and QActionGroup, which
+        # moved to QtGui in Qt 6. It holds a widget, so it stayed behind.
+        action = self.QtWidgets.QWidgetAction(menu)
+        action.setDefaultWidget(container)
+        menu.addAction(action)
+        self.ui_scale_action = action
+        return action
+
+    def _handle_ui_scale_slider(self, value: int) -> None:
+        """Apply a slider drag, without the slider fighting its own update.
+
+        set_ui_scale writes the snapped value back to the slider, which would
+        re-enter this slot and stop a drag dead. The guard is what makes dragging
+        feel continuous.
+        """
+        if getattr(self, "_syncing_ui_scale", False):
+            return
+        self.set_ui_scale(value, announce=False)
+
+    def _sync_ui_scale_widgets(self, scale: int) -> None:
+        slider = getattr(self, "ui_scale_slider", None)
+        label = getattr(self, "ui_scale_value_label", None)
+        self._syncing_ui_scale = True
+        try:
+            if slider is not None and slider.value() != scale:
+                slider.setValue(int(scale))
+            if label is not None:
+                label.setText(f"{int(scale)}%")
+        except Exception:  # noqa: BLE001 - the menu may not be built yet
+            pass
+        finally:
+            self._syncing_ui_scale = False
 
     def _build_menu_bar(self) -> None:
         """File, View and Help.
@@ -431,7 +505,6 @@ class GraphVisualizerApp:
         """
         from .help_center import HelpCenter
         from .help_search import TUTORIALS
-        from .ui_theme import UI_SCALES
 
         self.help_center = HelpCenter(self)
         menu_bar = self.window.menuBar()
@@ -470,28 +543,7 @@ class GraphVisualizerApp:
 
         # --- View ---
         view_menu = menu_bar.addMenu("&View")
-        scale_menu = view_menu.addMenu("UI &scale")
-        # QActionGroup lives in QtGui in Qt 6, not QtWidgets as it did in Qt 5.
-        try:
-            from PySide6 import QtGui
-        except ImportError:  # pragma: no cover - other bindings
-            from qtpy import QtGui
-        scale_group = QtGui.QActionGroup(self.window)
-        scale_group.setExclusive(True)
-        self._ui_scale_actions = {}
-        current_scale = getattr(self, "ui_scale", 100)
-        for percent in UI_SCALES:
-            action = scale_menu.addAction(f"{percent}%")
-            action.setCheckable(True)
-            action.setChecked(percent == current_scale)
-            scale_group.addAction(action)
-            # Bound per iteration: a bare closure captures the loop variable, and
-            # every entry would then apply the last scale.
-            action.triggered.connect(
-                lambda _checked=False, value=percent: self.set_ui_scale(value)
-            )
-            self._ui_scale_actions[percent] = action
-
+        self._build_ui_scale_slider(view_menu)
         view_menu.addSeparator()
         bigger = view_menu.addAction("Larger text")
         bigger.setShortcuts(["Ctrl++", "Ctrl+="])

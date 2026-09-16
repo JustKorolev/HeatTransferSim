@@ -298,33 +298,48 @@ class SimulationControlsPanel:
         return box, self.QtWidgets.QFormLayout(box)
 
     def pin_two_line_label(self, label: Any) -> None:
-        """Lock a status label to a fixed two-line height so runtime messages of
-        varying length can't change its size and shove the rest of the panel around.
-        Text longer than two lines wraps then clips (is cut off), not expands.
+        """Give a status label a two-line FLOOR, and let it grow past that.
 
-        The height is in PIXELS, measured from the font in use when the panel was
-        built, so View > UI scale would otherwise leave these labels at the old
-        size and clip their text at any scale above 100%. Every pinned label is
-        remembered so :meth:`repin_two_line_labels` can re-measure them.
+        It used to be a fixed height, so anything longer than two lines was simply
+        cut off -- and the messages here are the ones that matter most when
+        something has gone wrong, like a gain matrix that does not match the graph
+        or an export that refused. Truncating those hid the reason.
+
+        Two lines stay the minimum so a short message does not make the row
+        collapse and shuffle everything below it on every status update; a longer
+        one expands. The floor is in PIXELS, measured from the current font, so
+        :meth:`repin_two_line_labels` re-measures after a View > UI scale change.
         """
         label.setWordWrap(True)
         label.setAlignment(self.QtCore.Qt.AlignTop | self.QtCore.Qt.AlignLeft)
-        two_lines = label.fontMetrics().lineSpacing() * 2 + 6
-        label.setFixedHeight(int(two_lines))
-        label.setSizePolicy(self.QtWidgets.QSizePolicy.Preferred, self.QtWidgets.QSizePolicy.Fixed)
         self._pinned_labels.append(label)
+        self._apply_label_floor(label)
+
+    def _apply_label_floor(self, label: Any) -> None:
+        """Two lines of the current font as a minimum height, with no maximum."""
+        try:
+            two_lines = int(label.fontMetrics().lineSpacing() * 2 + 6)
+        except Exception:  # noqa: BLE001 - a stub label has no font metrics
+            return
+        try:
+            # setMinimumHeight, NOT setFixedHeight: a fixed height is also a
+            # maximum, which is what was clipping the long messages.
+            label.setMaximumHeight(16777215)  # Qt's QWIDGETSIZE_MAX, undoing any pin
+            label.setMinimumHeight(two_lines)
+            label.setSizePolicy(
+                self.QtWidgets.QSizePolicy.Preferred, self.QtWidgets.QSizePolicy.Minimum
+            )
+        except Exception:  # noqa: BLE001 - not a full QWidget
+            pass
 
     def repin_two_line_labels(self) -> None:
-        """Re-measure every pinned label against the current font.
+        """Re-measure every status label's floor against the current font.
 
-        Called after a UI scale change; without it, larger text is clipped by a
-        height that was measured for the smaller font.
+        Called after a UI scale change; without it a label keeps a minimum
+        measured for the old font, which at a larger scale is less than two lines.
         """
         for label in list(self._pinned_labels):
-            try:
-                label.setFixedHeight(int(label.fontMetrics().lineSpacing() * 2 + 6))
-            except Exception:  # noqa: BLE001 - a deleted or stubbed label
-                continue
+            self._apply_label_floor(label)
 
     # -- internal building blocks ------------------------------------------- #
     def _act(self, name: str) -> Callable[..., Any] | None:
