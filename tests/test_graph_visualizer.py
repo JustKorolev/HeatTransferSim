@@ -58,6 +58,7 @@ from graph_visualizer.role_assignment import (
     normalize_role_match_text,
 )
 from graph_visualizer.role_pairing import assign_heater_to_sensor, recompute_heater_sensor_pairing
+from graph_visualizer.simulation_controls_panel import NO_CONTROLLER_LABEL
 from graph_visualizer.role_warnings import has_role_warning, role_warning_reasons
 from graph_visualizer.simulation_model import PreparedSimulation, prepare_simulation
 from graph_visualizer.simulation_parameters import (
@@ -1927,8 +1928,10 @@ class GraphVisualizerModelTests(unittest.TestCase):
 
             # Nothing generated yet: Modal LQR is not offered at all.
             tab._refresh_controller_choices()
-            self.assertEqual([t for t, _d in tab.controller_scheme_combo.items], ["PID + QP allocator"])
-            self.assertEqual(tab._controller_selected_scheme(), "pid_qp")
+            self.assertEqual(
+                [t for t, _d in tab.controller_scheme_combo.items], [NO_CONTROLLER_LABEL]
+            )
+            self.assertEqual(tab._controller_selected_scheme(), "none")
             self.assertEqual(tab._modal_controller_path_value(), "")
 
             # Two builds that differ only in operating point are listed separately.
@@ -1936,7 +1939,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
             second = write_artifact(folder, r=8, n_modes=60, T_op=293.15)
             tab._refresh_controller_choices(second)
             labels = [t for t, _d in tab.controller_scheme_combo.items]
-            self.assertEqual(labels[0], "PID + QP allocator")
+            self.assertEqual(labels[0], NO_CONTROLLER_LABEL)
             self.assertEqual(
                 sorted(labels[1:]),
                 sorted(
@@ -1957,9 +1960,9 @@ class GraphVisualizerModelTests(unittest.TestCase):
             tab._refresh_controller_choices()
             self.assertEqual(
                 [t for t, _d in tab.controller_scheme_combo.items],
-                ["PID + QP allocator", "Modal LQR r=33 / 120 modes / T_op=55 K"],
+                [NO_CONTROLLER_LABEL, "Modal LQR r=33 / 120 modes / T_op=55 K"],
             )
-            self.assertEqual(tab._controller_selected_scheme(), "pid_qp")
+            self.assertEqual(tab._controller_selected_scheme(), "none")
 
             # A non-artifact .npz in the folder is ignored rather than offered.
             np.savez(folder / "modal_controller_bogus.npz", something_else=np.zeros(3))
@@ -2102,7 +2105,7 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertAlmostEqual(tab.params.modal_integral_gain, 0.05)
         # It is now a selectable row in the dropdown, labelled with those descriptors.
         labels = [text for text, _data in tab.controller_scheme_combo.items]
-        self.assertEqual(labels[0], "PID + QP allocator")
+        self.assertEqual(labels[0], NO_CONTROLLER_LABEL)
         self.assertEqual(len(labels), 2)
         self.assertRegex(labels[1], r"^Modal LQR r=\d+ / \d+ modes / T_op=150 K$")
         self.assertEqual(tab.controller_scheme_combo.currentData(), tab.params.modal_controller_path)
@@ -2877,11 +2880,33 @@ class GraphVisualizerModelTests(unittest.TestCase):
                 self.render_count += 1
                 return True
 
+        # The cross-section controls are read on every view change: the cut keeps or
+        # drops WHOLE cells at mesh-build time, so the handler has to know where it
+        # sits. With no model loaded it must still not rebuild anything.
+        class Toggle:
+            def isChecked(self) -> bool:
+                return False
+
+        class Slider:
+            def value(self) -> int:
+                return 50
+
+        class AxisCombo:
+            def currentText(self) -> str:
+                return "Z"
+
         tab = object.__new__(HeatTransferSimulationTab)
         tab.viewer = Viewer()
+        tab.model = None
+        tab.cross_section_toggle = Toggle()
+        tab.cross_section_slider = Slider()
+        tab.cross_section_axis_combo = AxisCombo()
         sync_calls = []
         tab._sync_view_controls_to_viewer = lambda: sync_calls.append(True)
         tab._draw_current = lambda reset_camera=False: (_ for _ in ()).throw(AssertionError("redrew voxels"))
+        tab._schedule_cross_section_redraw = lambda: (_ for _ in ()).throw(
+            AssertionError("rebuilt the cross-section mesh with no model loaded")
+        )
 
         tab._handle_visual_control_changed()
 
@@ -3727,12 +3752,22 @@ class GraphVisualizerModelTests(unittest.TestCase):
             def done(self) -> bool:
                 return True
 
+        class InputMode:
+            def currentText(self) -> str:
+                return "zero"
+
         tab = object.__new__(HeatTransferSimulationTab)
         tab.prepared = object()
         tab.params = SimulationParameters()
         tab.timer = Timer()
         tab.simulation_future = Future()
         tab._simulation_reinitialize_pending = False
+        # play() runs two guards before applying anything: the large-graph
+        # visualization warning (reads model) and the missing-controller-artifact
+        # confirmation (reads the input mode). Both must pass silently here, so that
+        # what this test observes is the ORDER of apply vs step, not a dialog.
+        tab.model = None
+        tab.input_mode = InputMode()
         events = []
         tab._apply_pending_runtime_changes = lambda: events.append("apply") or True
         tab._playback_timer_interval_ms = lambda: 25

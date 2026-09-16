@@ -70,6 +70,8 @@ class HeadlessRunTab:
         self._modal_build_folder: Path | None = None
         self._gain_build_process: subprocess.Popen | None = None
         self._gain_build_folder: Path | None = None
+        self._controller_export_process: subprocess.Popen | None = None
+        self._controller_export_target: Path | None = None
         self._log_size = 0
         self._params_source = "defaults"
         self._pending_log_note = ""
@@ -232,6 +234,7 @@ class HeadlessRunTab:
                 # too: its spins set what gets built, and this runs the same
                 # reduction in a separate process instead of in this window.
                 "build_modal_controller": self.build_modal_controller,
+                "export_controller": self.export_controller_constants,
             },
             # Autosave: every edit goes straight back to the graph's
             # simulation_parameters.json, so settings survive closing the app.
@@ -786,6 +789,82 @@ class HeadlessRunTab:
         else:
             self.modal_design_status_label.setText(f"Failed (exit {code}).")
             self._status(f"Modal controller build failed (exit {code}); see {log}.", True)
+
+    # -- controller export (separate process, no graph in this window) -------- #
+    def export_controller_constants(self) -> None:
+        """Run ``export_controller.py`` against the selected graph, out of process.
+
+        The simulation tab does this inline because it already holds the model.
+        This tab deliberately never loads one -- that is the whole point of it --
+        so the export runs where the graph can be read without putting a
+        multi-million-cell model in the GUI's address space.
+        """
+        if (
+            self._controller_export_process is not None
+            and self._controller_export_process.poll() is None
+        ):
+            self._status("A controller export is already running.", True)
+            return
+        folder = self._selected_folder()
+        if folder is None:
+            self._status("Select a graph first.", True)
+            return
+        # Flush the panel into the graph's simulation_parameters.json, which is
+        # exactly the file the CLI reads, so the export sees the settings on screen
+        # without having to pass them across the process boundary. Autosave already
+        # does this on every edit; this makes it certain rather than likely.
+        if not self.persist_parameters():
+            self._status(
+                "Could not save the current settings, so the export would describe "
+                "a different controller. Nothing was written.",
+                True,
+            )
+            return
+        target = folder / "controller_export"
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve().parent.parent / "export_controller.py"),
+            "--graph",
+            str(folder),
+            "-o",
+            str(target),
+        ]
+        log_path = folder / "controller_export.log"
+        try:
+            handle = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 - held for the process
+            self._controller_export_process = subprocess.Popen(
+                command, stdout=handle, stderr=subprocess.STDOUT, cwd=str(Path.cwd())
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._status(f"Could not start the controller export: {exc}", True)
+            return
+        self._controller_export_target = target
+        self.export_controller_button.setEnabled(False)
+        self.export_controller_status_label.setText(f"Exporting {folder.name}…")
+        self._status(
+            f"Exporting the controller for {folder.name}. Separate process; "
+            f"progress in {log_path.name}.",
+            False,
+        )
+
+    def _poll_controller_export(self) -> None:
+        proc = getattr(self, "_controller_export_process", None)
+        if proc is None or proc.poll() is None:
+            return
+        code = proc.returncode
+        target = self._controller_export_target
+        self._controller_export_process = None
+        self.export_controller_button.setEnabled(True)
+        if code == 0 and target is not None:
+            self.export_controller_status_label.setText(f"Wrote {target.name}/.")
+            self._status(f"Controller exported to {target}.", False)
+        else:
+            self.export_controller_status_label.setText(f"Failed (exit {code}).")
+            self._status(
+                f"Controller export failed (exit {code}); see controller_export.log "
+                "in the graph folder.",
+                True,
+            )
 
     # -- DC gain generation (separate process, no graph in this window) ------- #
     def build_gain_matrix(self) -> None:
@@ -1865,6 +1944,7 @@ class HeadlessRunTab:
         self._poll_refresh()
         self._poll_modal_build()
         self._poll_gain_build()
+        self._poll_controller_export()
         if self.run_dir is None:
             return
         self._tail_log()

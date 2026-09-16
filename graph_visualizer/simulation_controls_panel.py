@@ -127,6 +127,11 @@ _EXPORTED_LIVE_ONLY = (
     "legend_label",
 )
 _EXPORTED_SHARED = (
+    # Shown in both modes, like the modal build above it: the live tab exports
+    # inline from the model it already holds, the headless tab shells out to
+    # export_controller.py so it still never loads a graph.
+    "export_controller_button",
+    "export_controller_status_label",
     "input_mode",
     "controller_scheme_combo",
     "mimo_pi_kp_spin",
@@ -718,12 +723,14 @@ class SimulationControlsPanel:
         self._build_modal_design_controls(form)
 
         mimo_box, mimo_form = self._add_section(form, "mimo", "MIMO Thermal-Rate QP")
+        # The three role_contact_tolerance_* spins used to sit here. They are
+        # OCTREE-BUILD settings -- graph_builder reads them off its own CLI args to
+        # decide which cells a heater/sensor part contacts -- and nothing in the
+        # simulation ever read the copies on SimulationParameters. Editing them mid-run
+        # looked like it retuned the allocator and did nothing at all.
         for name, label, minimum, maximum, step in (
             ("mimo_lambda_u", "lambda_u heater effort", 0.0, 1.0e9, 0.001),
             ("mimo_rho_du", "rho_du power change", 0.0, 1.0e9, 0.01),
-            ("role_contact_tolerance_mm", "role contact tol mm", 0.0, 1.0e9, 1.0e-6),
-            ("role_contact_tolerance_max_mm", "role contact max mm", 0.0, 1.0e9, 0.1),
-            ("role_contact_tolerance_growth_factor", "role contact growth", 1.01, 1.0e6, 0.1),
             ("mimo_integral_abs_max", "integral abs max", 0.0, 1.0e12, 1.0),
         ):
             self._add_double(mimo_form, name, label, minimum, maximum, step)
@@ -833,6 +840,28 @@ class SimulationControlsPanel:
         self.modal_design_status_label = self.QtWidgets.QLabel("Idle.")
         self.pin_two_line_label(self.modal_design_status_label)
         self._row(design_form, "modal_status", self.modal_design_status_label, "status")
+
+        # Deployment. The controller that runs here is spread across the gain
+        # matrix, the preset beside it and a dozen fields on this panel; rebuilding
+        # it by hand somewhere else is where the mistakes live.
+        self.export_controller_button = self._button(
+            "Export Controller Constants",
+            "export_controller",
+            "Write the SELECTED controller out as a C header plus a JSON twin: G, its "
+            "regularized inverse, per-sensor Kp/Ki, setpoints, per-heater power and slew "
+            "limits, and every loop-shaping constant, with provenance naming the gain "
+            "matrix they came from.\n\n"
+            "Needs a gain matrix, because the decoupling lives in G -- Kp and Ki alone do "
+            "not define this controller.\n\n"
+            "The header is data only. It states the control law in a comment and says "
+            "exactly how far its inverse is from the allocator that runs here."
+        )
+        self._row(design_form, "export_controller", self.export_controller_button)
+        self.export_controller_status_label = self.QtWidgets.QLabel("Idle.")
+        self.pin_two_line_label(self.export_controller_status_label)
+        self._row(
+            design_form, "export_controller_status", self.export_controller_status_label, "export"
+        )
 
     def _build_solver_controls(self, form: Any) -> None:
         """Implicit-solver knobs. Hidden in the live tab (which keeps whatever the

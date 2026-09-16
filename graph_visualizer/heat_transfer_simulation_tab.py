@@ -18,6 +18,7 @@ try:  # pragma: no cover - import path depends on the installed Qt binding.
 except Exception:  # pragma: no cover
     from qtpy import QtGui
 
+from .controller_export import ControllerExportError, export_controller
 from .diagnostics import log_event, log_exception
 from .graph_io import has_generated_role_contact_edges, load_graph_folder, save_graph_folder
 from .matrix_builder import build_matrices, refresh_geometry_edges, refresh_radiation_from_exposed_faces
@@ -332,6 +333,7 @@ class HeatTransferSimulationTab:
             "randomize_setpoints": self._randomize_sensor_setpoints,
             "controller_scheme_selected": self._handle_controller_scheme_selection,
             "build_modal_controller": self.build_modal_controller,
+            "export_controller": self.export_controller_constants,
             "play": self.play,
             "pause": self.pause,
             "reset": self.reset,
@@ -1292,6 +1294,50 @@ class HeatTransferSimulationTab:
             self.modal_design_status_label.setText(f"Failed: {exc}")
             self._status(f"Modal controller build failed: {exc}", True)
             log_exception("modal controller build failed", exc)
+
+    def export_controller_constants(self) -> None:
+        """Write the selected controller out as a C header plus a JSON twin.
+
+        Runs inline: the graph is already in memory here, and the work is one SVD
+        and one small solve on a matrix that is at most a few dozen square. The
+        Headless Run tab launches the CLI in a subprocess instead, because it
+        deliberately never holds a graph.
+        """
+        if self.model is None:
+            self._status("Load a graph before exporting the controller.", True)
+            self.export_controller_status_label.setText("No graph loaded.")
+            return
+        # Read the panel back first, so the export describes what is on screen --
+        # not whatever was last committed to self.params.
+        self.params = self._read_params()
+        default_root = self.folder if self.folder is not None else Path.cwd()
+        chosen = self.QtWidgets.QFileDialog.getExistingDirectory(
+            self.widget, "Export Controller Constants To", str(default_root / "controller_export")
+        )
+        if not chosen:
+            return
+        try:
+            json_path, header_path, constants = export_controller(
+                self.model,
+                self.params,
+                Path(chosen),
+                graph_name=str(getattr(self.model.metadata, "graph_name", "") or ""),
+            )
+        except ControllerExportError as exc:
+            self.export_controller_status_label.setText(str(exc))
+            self._status(f"Controller export failed: {exc}", True)
+            return
+        except Exception as exc:  # noqa: BLE001 - surface to the panel
+            self.export_controller_status_label.setText(f"Failed: {exc}")
+            self._status(f"Controller export failed: {exc}", True)
+            log_exception("controller export failed", exc)
+            return
+        summary = (
+            f"{constants.n_sensors} sensor(s) x {constants.n_heaters} heater(s), "
+            f"cond(G)={constants.cond_G:.3g}"
+        )
+        self.export_controller_status_label.setText(f"Wrote {header_path.name}. {summary}")
+        self._status(f"Controller exported to {chosen}. {summary}")
 
     def _modal_controller_output_path(self) -> Path:
         # Descriptor-named so builds that differ in order/modes/operating point sit
@@ -2331,9 +2377,6 @@ class HeatTransferSimulationTab:
             mimo_lambda_u=float(self.inputs["mimo_lambda_u"].value()),
             mimo_rho_du=float(self.inputs["mimo_rho_du"].value()),
             mimo_heater_slew_rate_W_per_s=float(self.inputs["mimo_heater_slew_rate_W_per_s"].value()),
-            role_contact_tolerance_mm=float(self.inputs["role_contact_tolerance_mm"].value()),
-            role_contact_tolerance_max_mm=float(self.inputs["role_contact_tolerance_max_mm"].value()),
-            role_contact_tolerance_growth_factor=float(self.inputs["role_contact_tolerance_growth_factor"].value()),
             mimo_integral_abs_max=float(self.inputs["mimo_integral_abs_max"].value()),
             enabled_heater_node_ids=(
                 tuple(sorted(int(node_id) for node_id in self.enabled_heater_node_ids))

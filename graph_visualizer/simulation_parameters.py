@@ -61,12 +61,12 @@ class SimulationParameters:
     # is not delivering. Lower it only to encode a REAL constraint (a documented
     # driver ramp, or a deliberate thermal-shock limit) -- not as damping.
     mimo_heater_slew_rate_W_per_s: float = 30.0
-    # Read ONLY by the removed PID+QP allocator (it clamped that scheme's desired
-    # sensor rate before allocation). Kept so existing simulation_parameters.json
-    # files still load; nothing consumes it.
-    role_contact_tolerance_mm: float = 1.0e-6
-    role_contact_tolerance_max_mm: float = 1.0
-    role_contact_tolerance_growth_factor: float = 2.0
+    # role_contact_tolerance_mm / _max_mm / _growth_factor used to live here. They
+    # are OCTREE-BUILD settings that graph_builder takes from its own CLI args, and
+    # the copies here were read by the removed PID+QP allocator and by nothing
+    # since. A saved file that still carries them keeps them: the loader routes
+    # unknown keys into `extras` and writes them back untouched, so no existing
+    # simulation_parameters.json loses anything by their going away.
     mimo_integral_abs_max: float = 1.0e6
     # Passive sensor-drift source for the MIMO feedforward. True (default): a
     # disturbance observer -- estimate drift from the MEASURED sensor rate minus

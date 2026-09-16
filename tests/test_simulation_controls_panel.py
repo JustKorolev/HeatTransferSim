@@ -1004,3 +1004,45 @@ def test_the_relative_lambda_floor_round_trips_through_the_panel():
 
     panel.mimo_lambda_rel_spin.setValue(0.0)
     assert panel.read().mimo_lambda_u_relative == 0.0, "no floor at all must survive"
+
+
+# --- controller export ----------------------------------------------------- #
+def test_the_export_button_exists_and_is_visible_in_both_modes() -> None:
+    """Deployment is not a live-only concern.
+
+    The live tab exports inline from the model it already holds; the headless tab
+    shells out to export_controller.py so it still never loads a graph. Both need
+    the row, and the panel's whole contract is that a row added for one tab cannot
+    silently shift the other.
+    """
+    for mode in (MODE_LIVE, MODE_HEADLESS):
+        panel, _form = _build(mode)
+        panel._apply_mode()
+        assert "export_controller" in panel._rows, mode
+        _form_, widget = panel._rows["export_controller"]
+        assert widget.visible, f"hidden in {mode}"
+        assert widget.text() == "Export Controller Constants"
+
+
+def test_the_export_button_is_wired_to_the_export_action() -> None:
+    calls: list[str] = []
+    panel = SimulationControlsPanel(
+        _QtStub, mode=MODE_LIVE, actions={"export_controller": lambda: calls.append("x")}
+    )
+    panel.build(QFormLayout())
+    panel.export_controller_button.clicked.emit()
+    assert calls == ["x"], "the button did not reach the action"
+
+
+def test_both_tabs_receive_the_export_widgets() -> None:
+    """export_to hands the tabs plain attributes; a missing name is an AttributeError
+    at click time, which is exactly when nobody is watching."""
+    class _Owner:
+        pass
+
+    for mode in (MODE_LIVE, MODE_HEADLESS):
+        panel, _form = _build(mode)
+        owner = _Owner()
+        panel.export_to(owner)
+        assert hasattr(owner, "export_controller_button"), mode
+        assert hasattr(owner, "export_controller_status_label"), mode
