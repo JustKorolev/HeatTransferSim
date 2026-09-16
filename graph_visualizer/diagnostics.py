@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import faulthandler
+import tempfile
 from pathlib import Path
 import sys
 import traceback
@@ -18,9 +19,18 @@ def install_crash_diagnostics(log_path: str | Path | None = None) -> Path:
     global _LOG_HANDLE, _LOG_PATH
     if _LOG_HANDLE is not None and _LOG_PATH is not None:
         return _LOG_PATH
-    path = Path(log_path) if log_path is not None else Path(__file__).resolve().parents[1] / "graph_visualizer_crash.log"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _LOG_HANDLE = path.open("a", encoding="utf-8", buffering=1)
+    # The working directory, not the package's parent. Installed, that parent is
+    # site-packages: often read-only, and the wrong place for a user's crash log
+    # even when it is not. Falls back to the temp directory if the working
+    # directory cannot be written, because failing to open a DIAGNOSTIC file must
+    # never be what stops the application starting.
+    path = Path(log_path) if log_path is not None else Path.cwd() / "graph_visualizer_crash.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _LOG_HANDLE = path.open("a", encoding="utf-8", buffering=1)
+    except OSError:
+        path = Path(tempfile.gettempdir()) / "graph_visualizer_crash.log"
+        _LOG_HANDLE = path.open("a", encoding="utf-8", buffering=1)
     _LOG_PATH = path
     log_event("crash diagnostics enabled", path=str(path))
     try:

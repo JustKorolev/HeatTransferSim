@@ -38,9 +38,9 @@ It answers that in three stages.
 
 | Stage | What it does | Where it lives |
 |---|---|---|
-| **Build** | CAD (GLB or STEP) → octree → a lumped RC thermal graph | `octree_graph/`, run via `build_octree_graph.py` |
+| **Build** | CAD (GLB or STEP) → octree → a lumped RC thermal graph | `octree_graph/`, run via `hts-build-graph` |
 | **Simulate** | Solve that graph forward in time with a controller in the loop | The application, `graph_visualizer/` |
-| **Deploy** | Write the controller out as constants | `export_controller.py`, or a button in the app |
+| **Deploy** | Write the controller out as constants | `hts-export-controller`, or a button in the app |
 
 A short piece of vocabulary used throughout:
 
@@ -58,17 +58,45 @@ A short piece of vocabulary used throughout:
 
 ## 2. Installing and launching
 
+Needs Python 3.11 or newer.
+
 ```powershell
-python -m pip install -r requirements.txt
-python -m graph_visualizer.main
+python -m pip install git+https://github.com/JustKorolev/HeatTransferSim
+heattransfersim
 ```
 
+That is the whole install: `heattransfersim` launches the application from any
+directory. If you intend to change the code, clone it and install in place
+instead:
+
+```powershell
+git clone https://github.com/JustKorolev/HeatTransferSim
+cd HeatTransferSim
+python -m pip install -e ".[dev]"
+```
+
+Installing also puts the pipeline on your PATH as commands:
+
+| Command | Does |
+|---|---|
+| `heattransfersim` | Launch the application |
+| `hts-build-graph` | CAD → octree → thermal graph |
+| `hts-run` | Headless closed-loop run |
+| `hts-export-controller` | Write the controller out as constants |
+| `hts-build-modal` | Reduce a graph and design the modal LQR controller |
+| `hts-build-g` | Solve the DC gain matrix G |
+| `hts-refresh-fast-load` | Rebuild a graph's fast-load artifacts |
+
+These are the same modules the application launches as background jobs, so a
+command and the app's own subprocess run identical code.
+
 If you need the STEP/B-rep build pipeline, it depends on OpenCASCADE, which has
-no pip wheel. Use the conda environment instead:
+no pip wheel on any platform. GLB input needs nothing extra; for STEP, use conda:
 
 ```powershell
 conda env create -f environment.yml
 conda activate heatsim
+python -m pip install -e .
 ```
 
 > **Note.** The graph builder also needs `embreex` for fast ray tests. Without
@@ -76,8 +104,8 @@ conda activate heatsim
 > appearing to hang. Pass `--allow-slow-contains` if you really want the slow
 > path.
 
-The application does not create graphs. It loads ones that
-`build_octree_graph.py` has already written into `graphs/`.
+The application does not create graphs. It loads ones that `hts-build-graph`
+has already written into `graphs/`.
 
 ---
 
@@ -301,8 +329,8 @@ the control law in a comment block at the top.
 The same export is available from the command line:
 
 ```powershell
-python export_controller.py --graph graphs/CRYOSTAT_V2
-python export_controller.py --graph graphs/CRYOSTAT_V2 --list
+hts-export-controller --graph graphs/CRYOSTAT_V2
+hts-export-controller --graph graphs/CRYOSTAT_V2 --list
 ```
 
 > **Read the two warnings the export prints.**
@@ -351,7 +379,7 @@ checkpoints.
 The same thing from a shell:
 
 ```powershell
-python run_simulation.py --graph graphs/CRYOSTAT_V2 --setpoint 80 --duration 3600 --dt 1
+hts-run --graph graphs/CRYOSTAT_V2 --setpoint 80 --duration 3600 --dt 1
 ```
 
 ---
@@ -390,7 +418,7 @@ simulations/<graph>/<stamp>/   one run
 > **`nodes.csv` is written when the graph is built, not when you edit it.**
 > Changes made in the application — cryocooler assignments, materials, roles — go
 > into `graph.json`. If you edit a graph and then want headless runs to load it
-> the fast way, press **Update graph** (or run `refresh_fast_load.py`) to
+> the fast way, press **Update graph** (or run `hts-refresh-fast-load`) to
 > regenerate `nodes.csv`. The application checks for staleness and falls back to
 > the slow loader rather than silently simulating a model with no heaters in it.
 

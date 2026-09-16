@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes the previous run on the same ref; a full matrix on
+  # every intermediate commit is slow and tells you nothing extra.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Do not cancel Windows because Linux failed. Which platforms broke is
+      # usually the most informative thing about a failure here.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # PySide6 links these even when no window is ever created, and
+      # heat_transfer_simulation_tab imports QtGui at module scope, so an import
+      # of the package fails without them on a bare runner.
+      - name: Install Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libglib2.0-0 libxkbcommon-x11-0 \
+            libdbus-1-3 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0
+
+      # Installing the PROJECT, not requirements.txt: this exercises
+      # pyproject.toml on every run, so a broken package definition is caught
+      # here rather than by the first person who tries to install it.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Test
+        # No display anywhere in CI. The suite builds the real control panel
+        # against a Qt stub, so it needs no window, but anything that does reach
+        # Qt must not try to open one.
+        env:
+          QT_QPA_PLATFORM: offscreen
+          MPLBACKEND: Agg
+        run: python -m pytest -q
+
+  package:
+    name: wheel installs and runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist
+
+      # The point of this job. A wheel that is missing a data file or an entry
+      # point looks perfectly fine until someone installs it: the first build of
+      # this package silently shipped no materials.json, which does not raise --
+      # it makes the material library fall back to five built-in defaults and
+      # gives every cell in a freshly built graph generic properties.
+      - name: Check the wheel's contents
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          wheel = sorted(glob.glob("dist/*.whl"))[-1]
+          names = zipfile.ZipFile(wheel).namelist()
+          required = [
+              "graph_visualizer/data/materials.json",
+              "graph_visualizer/cli/run_simulation.py",
+              "graph_visualizer/cli/export_controller.py",
+              "graph_visualizer/cli/build_modal_controller.py",
+              "graph_visualizer/cli/build_g_matrix.py",
+              "graph_visualizer/cli/refresh_fast_load.py",
+          ]
+          missing = [name for name in required if name not in names]
+          if missing:
+              sys.exit(f"wheel is missing: {missing}")
+          entry_points = next(n for n in names if n.endswith("entry_points.txt"))
+          text = zipfile.ZipFile(wheel).read(entry_points).decode()
+          for command in ("heattransfersim", "hts-run", "hts-build-graph",
+                          "hts-export-controller"):
+              if f"{command} =" not in text:
+                  sys.exit(f"entry point missing: {command}")
+          print(f"{wheel}: contents and entry points OK")
+          PY
+
+      - name: Install Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libglib2.0-0 libxkbcommon-x11-0 libdbus-1-3
+
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --upgrade pip
+          /tmp/venv/bin/pip install dist/*.whl
+
+      # Run from a directory that is NOT the checkout. Everything this guards
+      # used to resolve paths as siblings of the package -- the five subprocess
+      # launchers and materials.json -- which works in a checkout and nowhere
+      # else, silently.
+      - name: Run the installed commands from outside the checkout
+        env:
+          QT_QPA_PLATFORM: offscreen
+          MPLBACKEND: Agg
+        run: |
+          mkdir -p /tmp/elsewhere
+          cd /tmp/elsewhere
+          for command in hts-run hts-export-controller hts-build-graph \
+                         hts-build-modal hts-refresh-fast-load hts-build-g; do
+            echo "--- $command --help"
+            /tmp/venv/bin/$command --help > /dev/null
+          done
+          /tmp/venv/bin/python - <<'PY'
+          import os
+          from graph_visualizer.resources import materials_file
+          from graph_visualizer.material_library import default_material_library
+          from octree_graph.materials import load_material_table
+
+          path = materials_file()
+          assert path.is_file(), f"materials.json not found at {path}"
+          assert "site-packages" in str(path), f"resolved outside the install: {path}"
+          library = default_material_library()
+          assert len(library) > 40, f"material library fell back to defaults: {len(library)}"
+          table, warnings = load_material_table()
+          assert len(table) > 40, f"builder table is short: {len(table)}"
+          print(f"materials OK: {len(library)} library, {len(table)} builder entries")
+
+          # The launcher must name the venv's interpreter, not whatever is on PATH.
+          from graph_visualizer.cli import RUN_SIMULATION, module_command
+          command = module_command(RUN_SIMULATION, "--graph", "x")
+          assert command[1] == "-m" and command[2] == RUN_SIMULATION, command
+          print("subprocess launch OK:", command[:3])
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl

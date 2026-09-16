@@ -20,6 +20,7 @@ from .matrix_builder import (
     refresh_geometry_edges,
 )
 from .models import EdgeMode, GraphMetadata, HeaterProperties, NodeProperties, ThermalGraphModel
+from .resources import materials_file
 from .simulation_model import PreparedSimulation, SimulationState, prepare_simulation
 from .simulation_parameters import SimulationParameters
 
@@ -326,7 +327,7 @@ class ThermalValidationExperiment:
             "--mesh-dir",
             str(assets_dir / "mesh"),
             "--materials",
-            str(Path(__file__).resolve().parents[1] / "materials.json"),
+            str(materials_file()),
             "--graph-name",
             graph_name,
             "--output-root",

@@ -2099,7 +2099,9 @@ class SimulationRunner:
                     "regenerate_plots(sys.argv[1])",
                     str(self.out_dir),
                 ],
-                cwd=str(Path(__file__).resolve().parent.parent),
+                # The user's working directory, NOT the package's parent: installed,
+                # that is site-packages, and a run would write its output there.
+                cwd=str(Path.cwd()),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

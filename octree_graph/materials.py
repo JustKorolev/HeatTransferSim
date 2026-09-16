@@ -53,12 +53,28 @@ UNASSIGNED_MATERIAL_NAMES = {
     "unknown material",
     "unassigned",
 }
-PROJECT_MATERIALS_FILE = Path(__file__).resolve().parents[1] / "materials.json"
+def _default_materials_file() -> Path:
+    """The material table, resolved the same way the application resolves it.
+
+    Imported lazily so octree_graph keeps working without graph_visualizer
+    importable (the builder is usable on its own), falling back to the packaged
+    path by construction if it is not.
+    """
+    try:
+        from graph_visualizer.resources import materials_file
+
+        return materials_file()
+    except Exception:  # noqa: BLE001 - builder must not need the GUI package
+        return Path(__file__).resolve().parents[1] / "graph_visualizer" / "data" / "materials.json"
+
+
+#: Evaluated per call rather than at import, so the working directory is honoured.
+PROJECT_MATERIALS_FILE = _default_materials_file()
 
 
 def load_material_table(path: str | Path | None = None) -> tuple[dict[str, Material], list[str]]:
     warnings: list[str] = []
-    table_path = Path(path) if path is not None else PROJECT_MATERIALS_FILE
+    table_path = Path(path) if path is not None else _default_materials_file()
     with table_path.open("r", encoding="utf-8") as handle:
         raw = json.load(handle)
     if isinstance(raw, dict):

@@ -154,7 +154,7 @@ Use the project-level wrapper to convert a SolidWorks-exported embedded GLB by
 pointing at the one directory containing the `.glb` file:
 
 ```powershell
-python build_octree_graph.py `
+hts-build-graph `
   --mesh-dir meshes\assembly_export `
   --graph-name hispec_test_octree `
   --output-root graphs
@@ -164,7 +164,8 @@ The converter preserves millimeter coordinates for visualization, computes
 thermal quantities in SI units, generates `C`, `G`, `L`, and `A`, and writes a
 validation report with unknown materials, non-watertight mesh warnings, matrix
 checks, and tolerance-accepted boundary cells. Material properties are read from
-the project-level `materials.json` by default. The mesh directory must contain
+the material table shipped with the package by default (override it with a
+`materials.json` in the working directory, or `$HEATTRANSFERSIM_MATERIALS`). The mesh directory must contain
 exactly one embedded `.glb` scene file. External-buffer `.gltf`/`.bin` exports
 are rejected for octree conversion.
 If `materials.xlsx` exists in the mesh directory, it is used as a two-column

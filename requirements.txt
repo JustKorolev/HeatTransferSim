@@ -1,10 +1,40 @@
-numpy
-scipy
-matplotlib
-pyvista
-pyvistaqt
-PySide6
-qtpy
-networkx
-trimesh
-openpyxl
+# Exact versions this project is known to work with, for reproducing a run.
+#
+# This file is NOT how you install the application -- use `pip install .`, which
+# reads the lower bounds in pyproject.toml and lets pip resolve against whatever
+# else is in your environment. Use this file when you need the same numbers
+# someone else got: CI pins to it, and a run worth reproducing should too.
+#
+#     pip install -r requirements.txt
+#
+# Regenerate after a deliberate upgrade:
+#     pip freeze --exclude-editable > requirements.txt   (then prune to these)
+
+numpy==2.4.6
+scipy==1.16.0
+matplotlib==3.10.3
+networkx==3.5
+trimesh==4.12.2
+openpyxl==3.1.5
+
+# GUI + 3D. Needed to run the application; a headless run only needs them
+# importable, not a display.
+pyvista==0.48.4
+pyvistaqt==0.11.4
+PySide6==6.11.1
+QtPy==2.4.3
+
+# Embree bindings for the ray tests that decide which cells a CAD solid fills.
+# This was MISSING from this file entirely, so a fresh clone could not build a
+# graph: the builder refuses to start without it rather than appearing to hang,
+# because the pure-Python fallback is roughly sixty times slower.
+embreex==4.4.0
+
+# Tests.
+pytest==8.3.5
+
+# NOT INSTALLABLE HERE: the STEP / B-rep pipeline needs pythonocc-core
+# (OpenCASCADE), which has no pip wheel on any platform. If you need STEP input,
+# use conda instead:
+#     conda env create -f environment.yml
+# GLB input needs nothing beyond the above.

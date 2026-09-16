@@ -1,0 +1,100 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "heattransfersim"
+version = "0.1.0"
+description = "Control-oriented thermal simulation for cryogenic instrument assemblies: CAD to a lumped thermal graph, simulated closed-loop, exported as controller constants."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Andrei Korolev" }]
+keywords = ["thermal", "simulation", "cryogenic", "control", "octree", "finite-volume"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+
+# Lower bounds, not pins. A library that pins its dependencies cannot be
+# installed beside anything else, and this has to coexist with whatever else is
+# in a research environment. requirements.txt carries the exact versions this is
+# known to work with, for reproducing a run.
+#
+# The GUI stack (PySide6, pyvista, pyvistaqt, qtpy) is a HARD dependency rather
+# than an extra: `heattransfersim` launches a window, and an install that cannot
+# do that is not an install of this application. Headless runs still work without
+# a display -- they just need the packages importable.
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "matplotlib>=3.7",
+    "networkx>=3.0",
+    "trimesh>=4.0",
+    "openpyxl>=3.1",
+    "pyvista>=0.43",
+    "pyvistaqt>=0.11",
+    "PySide6>=6.6",
+    "qtpy>=2.4",
+    # Embree bindings for the ray tests that decide which cells a CAD solid
+    # fills. The builder refuses to run without it rather than appearing to hang:
+    # the pure-Python fallback is roughly sixty times slower. It was missing from
+    # requirements.txt entirely, so a fresh clone could not build a graph.
+    "embreex>=2.17",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+# The STEP / B-rep pipeline needs OpenCASCADE (pythonocc-core), which has no pip
+# wheel at all. It cannot be declared here; use environment.yml with conda if you
+# need STEP input. GLB input needs nothing extra.
+
+[project.urls]
+Homepage = "https://github.com/JustKorolev/HeatTransferSim"
+Repository = "https://github.com/JustKorolev/HeatTransferSim"
+
+[project.scripts]
+# The application itself.
+heattransfersim = "graph_visualizer.main:main"
+# The same pipeline from a shell, for scripting and overnight work. These are the
+# modules the app launches as subprocesses, so a command and the app's own
+# background job run exactly the same code.
+hts-build-graph = "octree_graph.cli:main"
+hts-run = "graph_visualizer.cli.run_simulation:main"
+hts-export-controller = "graph_visualizer.cli.export_controller:main"
+hts-build-g = "graph_visualizer.cli.build_g_matrix:main"
+hts-build-modal = "graph_visualizer.cli.build_modal_controller:main"
+hts-refresh-fast-load = "graph_visualizer.cli.refresh_fast_load:main"
+
+[tool.setuptools]
+# Listed explicitly. Auto-discovery would sweep in tests/, tools/ and docs/, and
+# on this layout it fails outright with a multiple-top-level-packages error.
+packages = [
+    "graph_visualizer",
+    "graph_visualizer.cli",
+    "octree_graph",
+]
+
+[tool.setuptools.package-data]
+# data/materials.json is NOT optional. Without it the material library silently
+# falls back to five built-in defaults and every cell in a freshly built graph
+# gets generic properties, with nothing anywhere reporting it. A wheel built
+# without this line looked completely fine and was wrong.
+graph_visualizer = ["README.md", "data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# tests/ is not a package, and several modules import their neighbours by bare
+# name (the Qt stub in test_simulation_controls_panel is shared). rootdir import
+# mode puts the test directory on sys.path, which is what makes that work.
+addopts = "-q"
+filterwarnings = [
+    "ignore::UserWarning:cupy._environment",
+]

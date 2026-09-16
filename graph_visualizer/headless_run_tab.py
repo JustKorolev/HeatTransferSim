@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .diagnostics import log_event
+from .cli import EXPORT_CONTROLLER, RUN_SIMULATION, module_command
 from .graph_roles import load_role_manifest
 from .modal_reduction import list_modal_artifacts
 from .simulation_controls_panel import MODE_HEADLESS, PID_QP_LABEL, SimulationControlsPanel
@@ -821,14 +822,9 @@ class HeadlessRunTab:
             )
             return
         target = folder / "controller_export"
-        command = [
-            sys.executable,
-            str(Path(__file__).resolve().parent.parent / "export_controller.py"),
-            "--graph",
-            str(folder),
-            "-o",
-            str(target),
-        ]
+        command = module_command(
+            EXPORT_CONTROLLER, "--graph", folder, "-o", target
+        )
         log_path = folder / "controller_export.log"
         try:
             handle = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 - held for the process
@@ -1794,17 +1790,16 @@ class HeadlessRunTab:
         except Exception as exc:  # noqa: BLE001
             self._status(f"Could not write the parameter file: {exc}", True)
             return
-        command = [
-            sys.executable,
-            str(Path(__file__).resolve().parent.parent / "run_simulation.py"),
-            "--graph", str(folder),
-            "--run-dir", str(run_dir),
-            "--sim-params", str(params_path),
+        command = module_command(
+            RUN_SIMULATION,
+            "--graph", folder,
+            "--run-dir", run_dir,
+            "--sim-params", params_path,
             "--dt", f"{float(params.dt_s):g}",
             "--duration", f"{float(params.t_final_s):g}",
             "--snapshot-interval-s", f"{self.snapshot_spin.value():g}",
             "--checkpoint-interval-s", f"{self.checkpoint_spin.value():g}",
-        ]
+        )
         if open_loop:
             command.append("--allow-no-controller")
         else:
@@ -1880,7 +1875,9 @@ class HeadlessRunTab:
                 )
             self.process = subprocess.Popen(  # noqa: S603
                 command,
-                cwd=str(Path(__file__).resolve().parent.parent),
+                # The user's working directory, NOT the package's parent: installed,
+                # that is site-packages, and a run would write its output there.
+                cwd=str(Path.cwd()),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,

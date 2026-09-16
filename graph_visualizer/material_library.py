@@ -101,14 +101,28 @@ DEFAULT_MATERIAL_LIBRARY: dict[str, dict[str, float]] = {
     },
 }
 
-PROJECT_MATERIALS_FILE = Path(__file__).resolve().parents[1] / "materials.json"
+def _project_materials_file() -> Path:
+    """Back-compat alias; prefer resources.materials_file()."""
+    from .resources import materials_file
+
+    return materials_file()
 
 
 def default_material_library() -> dict[str, dict[str, float]]:
-    """Return the project material library, falling back to built-in defaults."""
-    if PROJECT_MATERIALS_FILE.exists():
+    """Return the project material library, falling back to built-in defaults.
+
+    The table is resolved by :func:`~.resources.materials_file`, which prefers a
+    materials.json in the working directory and otherwise uses the copy shipped
+    with the package. It used to be looked up as a sibling of the package, which
+    exists only in a checkout -- installed, every graph silently got the five
+    built-in defaults below.
+    """
+    from .resources import materials_file
+
+    path = materials_file()
+    if path.is_file():
         try:
-            with PROJECT_MATERIALS_FILE.open("r", encoding="utf-8") as handle:
+            with path.open("r", encoding="utf-8") as handle:
                 return normalize_material_library(json.load(handle))
         except (OSError, json.JSONDecodeError):
             pass

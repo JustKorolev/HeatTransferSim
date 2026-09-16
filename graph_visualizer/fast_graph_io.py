@@ -248,17 +248,17 @@ def launch_gain_build_subprocess(
     """
     import subprocess
 
+    from .cli import BUILD_G_MATRIX, module_command
+
     folder = Path(folder)
-    script = Path(__file__).resolve().parent.parent / "build_g_matrix.py"
     log_path = folder / GAIN_BUILD_LOG_FILENAME
     log_handle = log_path.open("w", encoding="utf-8")
-    command = [sys.executable, str(script), str(folder), "--t-op", f"{float(t_op_K):g}"]
+    command = module_command(BUILD_G_MATRIX, folder, "--t-op", f"{float(t_op_K):g}")
     if name:
         command += ["--name", str(name)]
     try:
         proc = subprocess.Popen(  # noqa: S603
             command,
-            cwd=str(script.parent),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -289,24 +289,23 @@ def launch_modal_build_subprocess(
     import subprocess
 
     folder = Path(folder)
-    script = Path(__file__).resolve().parent.parent / "build_modal_controller.py"
+    from .cli import BUILD_MODAL_CONTROLLER, module_command
+
     log_path = folder / MODAL_BUILD_LOG_FILENAME
     log_handle = log_path.open("w", encoding="utf-8")
-    command = [
-        sys.executable,
-        str(script),
-        str(folder),
+    command = module_command(
+        BUILD_MODAL_CONTROLLER,
+        folder,
         "--t-op", f"{float(t_op_K):g}",
         "--modes", str(int(n_modes)),
         "--order", str(int(order)),
         "--effort", f"{float(effort):g}",
         "--integral", f"{float(integral_gain):g}",
         "--dt", f"{float(design_dt_s):g}",
-    ]
+    )
     try:
         proc = subprocess.Popen(  # noqa: S603
             command,
-            cwd=str(script.parent),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -332,17 +331,17 @@ def launch_refresh_subprocess(
     """
     import subprocess
 
+    from .cli import REFRESH_FAST_LOAD, module_command
+
     folder = Path(folder)
-    script = Path(__file__).resolve().parent.parent / "refresh_fast_load.py"
     log_path = folder / REFRESH_LOG_FILENAME
     log_handle = log_path.open("w", encoding="utf-8")
-    command = [sys.executable, str(script), str(folder)]
+    command = module_command(REFRESH_FAST_LOAD, folder)
     if edges_only:
         command.append("--edges-only")
     try:
         proc = subprocess.Popen(  # noqa: S603
             command,
-            cwd=str(script.parent),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

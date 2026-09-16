@@ -24,7 +24,11 @@ import pytest
 for _name in ("PySide6", "PySide6.QtCore", "PySide6.QtWidgets", "PySide6.QtGui"):
     sys.modules.setdefault(_name, types.ModuleType(_name))
 
-SCRIPT = Path(__file__).resolve().parent.parent / "build_modal_controller.py"
+# Invoked the way the application invokes it. Running the module BY PATH would
+# put graph_visualizer/cli/ on sys.path instead of the repo root, so its own
+# "from graph_visualizer... import" lines would not resolve.
+MODULE = "graph_visualizer.cli.build_modal_controller"
+LAUNCH = [sys.executable, "-m", MODULE]
 
 
 def test_refuses_the_45gb_loader_unless_explicitly_allowed(tmp_path) -> None:
@@ -33,7 +37,7 @@ def test_refuses_the_45gb_loader_unless_explicitly_allowed(tmp_path) -> None:
     graph = tmp_path / "g"
     graph.mkdir()
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), str(graph), "--modes", "4", "--order", "2"],
+        [*LAUNCH, str(graph), "--modes", "4", "--order", "2"],
         capture_output=True, text=True,
     )
     assert result.returncode != 0
@@ -44,7 +48,7 @@ def test_refuses_the_45gb_loader_unless_explicitly_allowed(tmp_path) -> None:
 
 def test_missing_graph_folder_is_reported(tmp_path) -> None:
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), str(tmp_path / "nope")],
+        [*LAUNCH, str(tmp_path / "nope")],
         capture_output=True, text=True,
     )
     assert result.returncode != 0
@@ -63,7 +67,7 @@ def test_existing_artifact_is_backed_up_not_silently_overwritten(tmp_path) -> No
     existing.write_bytes(b"previous artifact")
     # Fails later (no artifacts to load), but the backup must already have happened.
     subprocess.run(
-        [sys.executable, str(SCRIPT), str(graph), "--t-op", "50", "--modes", "140", "--order", "50"],
+        [*LAUNCH, str(graph), "--t-op", "50", "--modes", "140", "--order", "50"],
         capture_output=True, text=True,
     )
     backups = list(graph.glob("*.bak.npz"))
@@ -78,7 +82,7 @@ def test_no_backup_flag_is_honoured(tmp_path) -> None:
     graph.mkdir()
     (graph / modal_artifact_filename(50, 140, 50.0)).write_bytes(b"previous")
     subprocess.run(
-        [sys.executable, str(SCRIPT), str(graph), "--no-backup"],
+        [*LAUNCH, str(graph), "--no-backup"],
         capture_output=True, text=True,
     )
     assert list(graph.glob("*.bak.npz")) == []
@@ -102,7 +106,11 @@ def test_launcher_passes_the_design_descriptors(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     fio.launch_modal_build_subprocess(tmp_path, t_op_K=42.5, n_modes=99, order=7)
     command = captured["command"]
-    assert str(SCRIPT) in command[1]
+    # Launched as `python -m graph_visualizer.cli.build_modal_controller`, not as a
+    # path to a script beside the package: that path exists only in a checkout, so
+    # an installed app could never start this build.
+    assert command[1] == "-m"
+    assert command[2] == "graph_visualizer.cli.build_modal_controller"
     assert "--t-op" in command and "42.5" in command
     assert "--modes" in command and "99" in command
     assert "--order" in command and "7" in command

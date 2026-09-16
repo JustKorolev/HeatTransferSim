@@ -21,7 +21,7 @@ def test_a_native_crash_writes_a_traceback(tmp_path) -> None:
     script = tmp_path / "boom.py"
     script.write_text(
         f"import sys; sys.path.insert(0, r'{REPO}')\n"
-        f"from run_simulation import _enable_crash_traceback\n"
+        f"from graph_visualizer.cli.run_simulation import _enable_crash_traceback\n"
         f"_enable_crash_traceback(r'{tmp_path}')\n"
         "import ctypes; ctypes.string_at(0)\n",
         encoding="utf-8",
@@ -36,7 +36,7 @@ def test_a_native_crash_writes_a_traceback(tmp_path) -> None:
 def test_it_appends_so_a_resume_keeps_the_earlier_crash(tmp_path) -> None:
     """A resumed run writes into the same directory; overwriting would destroy the
     record of the crash that made the resume necessary."""
-    from run_simulation import _enable_crash_traceback
+    from graph_visualizer.cli.run_simulation import _enable_crash_traceback
 
     _enable_crash_traceback(str(tmp_path))
     _enable_crash_traceback(str(tmp_path))
@@ -44,14 +44,14 @@ def test_it_appends_so_a_resume_keeps_the_earlier_crash(tmp_path) -> None:
 
 
 def test_no_run_dir_is_a_no_op() -> None:
-    from run_simulation import _enable_crash_traceback
+    from graph_visualizer.cli.run_simulation import _enable_crash_traceback
 
     _enable_crash_traceback(None)      # must not raise
 
 
 def test_an_unwritable_target_does_not_stop_the_run(tmp_path) -> None:
     """Diagnostics must never be the reason a run fails to start."""
-    from run_simulation import _enable_crash_traceback
+    from graph_visualizer.cli.run_simulation import _enable_crash_traceback
 
     blocker = tmp_path / "not_a_dir"
     blocker.write_text("x", encoding="utf-8")

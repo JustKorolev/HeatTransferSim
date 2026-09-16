@@ -13,27 +13,45 @@ Three subsystems, in the order a graph moves through them:
 2. `graph_visualizer/` -- the application: inspect and edit the graph in 3D,
    run it live or headless, validate it against analytical solutions, and
    design and export the controller.
-3. `export_controller.py` -- the controller as a C header plus a JSON twin.
+3. `hts-export-controller` -- the controller as a C header plus a JSON twin.
 
 ## Install
 
+Needs Python 3.11 or newer. Install straight from GitHub:
+
 ```powershell
-python -m pip install -r requirements.txt
+python -m pip install git+https://github.com/JustKorolev/HeatTransferSim
 ```
 
-The STEP/B-rep pipeline needs OpenCASCADE, which has no pip wheel. For that,
-use the conda environment instead:
+Or from a clone, which is what you want if you intend to change anything:
+
+```powershell
+git clone https://github.com/JustKorolev/HeatTransferSim
+cd HeatTransferSim
+python -m pip install -e ".[dev]"
+```
+
+`requirements.txt` is not how you install this. It pins exact versions for
+reproducing a particular run; the install above resolves against whatever else
+is already in your environment.
+
+The STEP/B-rep pipeline additionally needs OpenCASCADE, which has no pip wheel
+on any platform. If you need STEP input (GLB input does not), use conda:
 
 ```powershell
 conda env create -f environment.yml
 conda activate heatsim
+python -m pip install -e .
 ```
 
 ## Launch the application
 
 ```powershell
-python -m graph_visualizer.main
+heattransfersim
 ```
+
+From a clone without installing, the equivalent is
+`python -m graph_visualizer.main`.
 
 Five tabs: `3D Octree Graph Editor`, `2D Network Graph`,
 `Heat Transfer Simulation`, `Thermal Validation`, and `Headless Run`.
@@ -47,7 +65,7 @@ materials and notes. Autosave writes changes back to `graph.json` and
 ## Run a simulation without the UI
 
 ```powershell
-python run_simulation.py --graph graphs/CRYOSTAT_V2 --setpoint 80 --duration 3600 --dt 1
+hts-run --graph graphs/CRYOSTAT_V2 --setpoint 80 --duration 3600 --dt 1
 ```
 
 Each run writes a timestamped folder under `simulations/<graph>/` holding the
@@ -57,7 +75,7 @@ not tracked in git.
 ## Export the controller
 
 ```powershell
-python export_controller.py --graph graphs/CRYOSTAT_V2
+hts-export-controller --graph graphs/CRYOSTAT_V2
 ```
 
 Writes `controller_constants.h` and `controller_constants.json`: the DC gain
@@ -72,7 +90,7 @@ Ki alone do not define this controller.
 ## Build an octree graph from SolidWorks GLB exports
 
 ```powershell
-python build_octree_graph.py `
+hts-build-graph `
   --mesh-dir meshes\assembly_export `
   --graph-name hispec_test_octree `
   --output-root graphs `
@@ -91,7 +109,9 @@ python build_octree_graph.py `
 
 The converter assumes glTF/GLB coordinates are millimeters, finds the single
 embedded `.glb` file in `--mesh-dir`, uses glTF material names from that scene,
-and reads material properties from the project-level `materials.json` file by
+and reads material properties from the material table shipped with the package
+(`graph_visualizer/data/materials.json`), or a `materials.json` in the working
+directory if there is one, by
 default. The mesh directory must contain exactly one `.glb` scene file.
 External-buffer `.gltf`/`.bin` exports are rejected because missing or mismatched
 buffers can collapse CAD geometry during loading.
@@ -173,7 +193,7 @@ folder as the exported `.glb` mesh:
 Use the generated workbook during graph construction:
 
 ```powershell
-python build_octree_graph.py `
+hts-build-graph `
   --mesh-dir meshes\assembly_export `
   --graph-name hispec_test_octree `
   --output-root graphs

@@ -517,7 +517,7 @@ def write_controller_header(
         " * MIMO PI thermal controller constants -- GENERATED, do not edit by hand.",
         " *",
         " * Regenerate with:",
-        " *     python export_controller.py --graph graphs/<name>",
+        " *     hts-export-controller --graph graphs/<name>",
         " * or with the Heat Transfer Simulation tab's \"Export Controller\" button.",
         " *",
         f" * exported at   : {p.get('exported_at', '')}",
