@@ -253,3 +253,23 @@ def test_enclosing_scroll_area_returns_none_rather_than_looping(center) -> None:
             return self
 
     assert _enclosing_scroll_area(Cycle(), stub._QtWidgets) is None
+
+
+def test_results_do_not_repeat_the_same_control_once_per_tab(center) -> None:
+    """The two simulation tabs share one panel, so nearly every control exists
+    twice. Uncollapsed, 'heater power' returned twelve matches of which six were
+    the same four controls listed again under the other tab."""
+    results = center.find("heater power")
+    seen = [(r.target.section, r.target.label) for r in results]
+    assert len(seen) == len(set(seen)), f"duplicate rows: {seen}"
+    # The surviving copy is the live tab's, which is first in build order.
+    top = results[0].target
+    assert top.label == "max heater power W (all heaters)"
+    assert top.tab == "Heat Transfer Simulation"
+
+
+def test_a_control_only_one_tab_has_is_still_offered(center) -> None:
+    """Collapsing must not drop a control that genuinely exists on one tab only."""
+    results = center.find("checkpoint")
+    assert results
+    assert results[0].target.tab == "Headless Run"

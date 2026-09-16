@@ -146,13 +146,26 @@ def search(query: str, targets: list[HelpTarget], limit: int = 12) -> list[Score
     Ties break on the target's own order, which is build order, which is the order
     the controls appear on screen -- so equally good answers are offered
     top-to-bottom as the user would find them.
+
+    Results are collapsed on (section, label). The two simulation tabs SHARE one
+    control panel by design, so almost every control exists twice, and an
+    uncollapsed list showed each answer once for "Heat Transfer Simulation" and
+    again for "Headless Run" -- twelve matches for "heater power", six of them
+    duplicates. The copy that survives is the earliest in build order, which is
+    the live tab's, and a control that only one tab has is unaffected.
     """
     scored: list[ScoredTarget] = []
+    seen: set[tuple[str, str]] = set()
     for index, target in enumerate(targets):
         value, matched = score_target(query, target)
-        if value > 0.0:
-            # index * 1e-6 keeps the sort stable without perturbing real scores.
-            scored.append(ScoredTarget(target, value - index * 1.0e-6, matched))
+        if value <= 0.0:
+            continue
+        identity = (target.section.lower(), target.label.lower())
+        if identity in seen:
+            continue
+        seen.add(identity)
+        # index * 1e-6 keeps the sort stable without perturbing real scores.
+        scored.append(ScoredTarget(target, value - index * 1.0e-6, matched))
     scored.sort(key=lambda item: item.score, reverse=True)
     return scored[: max(0, int(limit))]
 
