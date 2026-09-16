@@ -2749,9 +2749,78 @@ class GraphVisualizerApp:
         node = self.model.nodes.get(node_id)
         return format_node_tooltip(node_id, node) if node is not None else ""
 
+    # -- Ctrl+C in the launching terminal ------------------------------------ #
+    #: How often the interpreter is given a slice while Qt owns the loop. Python
+    #: runs a signal handler only between bytecodes, and ``QApplication.exec`` is
+    #: C++ that does not return -- so without a timer pulling control back, Ctrl+C
+    #: is recorded by the OS and then does nothing at all until the next Python
+    #: callback happens to fire (a mouse move, a redraw), or never.
+    INTERRUPT_POLL_MS = 100
+
+    def _install_interrupt_handler(self) -> None:
+        """Make Ctrl+C in the launching terminal close the window promptly."""
+        import signal
+
+        self._interrupt_requested = False
+        for name in ("SIGINT", "SIGBREAK"):  # SIGBREAK is Ctrl+Break, Windows only
+            number = getattr(signal, name, None)
+            if number is None:
+                continue
+            try:
+                signal.signal(number, self._handle_interrupt)
+            except (ValueError, OSError):
+                # Not the main thread, or no console. Not worth failing a launch.
+                continue
+
+        self._interrupt_timer = self.QtCore.QTimer(self.window)
+        # A deliberately empty slot: the point is only that Python gets to run.
+        self._interrupt_timer.timeout.connect(lambda: None)
+        self._interrupt_timer.start(self.INTERRUPT_POLL_MS)
+
+    def _handle_interrupt(self, signum: Any = None, frame: Any = None) -> None:
+        """First Ctrl+C closes cleanly; a second one gives up and exits.
+
+        The clean path runs the window's closeEvent, which stops the timers, shuts
+        the simulation and validation tabs down and closes the VTK viewer. That is
+        worth one attempt -- but it can also block, because shutting a tab down
+        waits on a worker that may be mid-step, and a Ctrl+C that hangs is worse
+        than one that is abrupt. So the second press is a hard exit.
+
+        Detached headless runs are NOT touched by either path: they are launched
+        into their own process group precisely so that closing the app, or losing
+        the terminal, does not take a multi-hour run down with it.
+        """
+        import os
+        import sys
+
+        if getattr(self, "_interrupt_requested", False):
+            print("\nInterrupted again -- exiting immediately.", file=sys.stderr, flush=True)
+            # os._exit, not sys.exit: this runs inside a signal handler, and a
+            # SystemExit raised here would surface at whatever bytecode happened to
+            # be executing rather than unwinding the Qt loop.
+            os._exit(130)
+
+        self._interrupt_requested = True
+        print("\nInterrupted -- closing. Press Ctrl+C again to force.", file=sys.stderr, flush=True)
+        try:
+            log_event("interrupt received", signal=int(signum) if signum else 0)
+        except Exception:  # noqa: BLE001 - logging must not delay the exit
+            pass
+        try:
+            self.window.close()
+        except Exception:  # noqa: BLE001 - fall through to quit regardless
+            pass
+        try:
+            self.app.quit()
+        except Exception:  # noqa: BLE001
+            os._exit(130)
+
     def show(self) -> None:
         self.window.show()
         self._refresh_all(reset_camera=True)
+        # Installed here rather than in __init__: before exec() there is no Qt
+        # loop to block, so plain Python already raises KeyboardInterrupt.
+        self._install_interrupt_handler()
         self.app.exec()
 
     def _group_box(self, title: str) -> Any:

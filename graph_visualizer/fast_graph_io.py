@@ -237,6 +237,20 @@ MODAL_BUILD_LOG_FILENAME = "build_modal_controller.log"
 GAIN_BUILD_LOG_FILENAME = "build_g_matrix.log"
 
 
+def _detached_creation_flags() -> int:
+    """Windows flags that put a child in its own process group.
+
+    Without this, a Ctrl+C in the launching terminal is delivered to every process
+    attached to that console, so closing the app would also kill a G-matrix or
+    modal-controller build that had been running for hours. These builds are
+    documented as surviving a lost session, and that is only true if the console's
+    interrupt cannot reach them. No effect on POSIX, where the flags do not exist.
+    """
+    import subprocess
+
+    return getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+
 def launch_gain_build_subprocess(
     folder: str | Path, *, t_op_K: float = 50.0, name: str | None = None
 ) -> "subprocess.Popen":
@@ -262,6 +276,7 @@ def launch_gain_build_subprocess(
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
+            creationflags=_detached_creation_flags(),
         )
     finally:
         log_handle.close()
@@ -309,6 +324,7 @@ def launch_modal_build_subprocess(
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
+            creationflags=_detached_creation_flags(),
         )
     finally:
         log_handle.close()
@@ -345,6 +361,7 @@ def launch_refresh_subprocess(
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
+            creationflags=_detached_creation_flags(),
         )
     finally:
         # The child inherited its own descriptor; the parent's copy can close.

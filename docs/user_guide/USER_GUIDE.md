@@ -90,6 +90,10 @@ Installing also puts the pipeline on your PATH as commands:
 These are the same modules the application launches as background jobs, so a
 command and the app's own subprocess run identical code.
 
+`Ctrl+C` in the terminal you launched from closes the window; a second `Ctrl+C`
+exits at once without waiting for anything to shut down. Neither touches a
+detached headless run.
+
 If you need the STEP/B-rep build pipeline, it depends on OpenCASCADE, which has
 no pip wheel on any platform. GLB input needs nothing extra; for STEP, use conda:
 

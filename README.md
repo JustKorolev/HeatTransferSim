@@ -53,6 +53,11 @@ heattransfersim
 From a clone without installing, the equivalent is
 `python -m graph_visualizer.main`.
 
+`Ctrl+C` in the launching terminal closes the window. A second `Ctrl+C` exits
+immediately without waiting for anything to shut down. Detached headless runs are
+not affected either way -- they are launched into their own process group so that
+closing the app, or losing the terminal, does not take a multi-hour run with it.
+
 Five tabs: `3D Octree Graph Editor`, `2D Network Graph`,
 `Heat Transfer Simulation`, `Thermal Validation`, and `Headless Run`.
 
