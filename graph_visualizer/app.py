@@ -16,13 +16,6 @@ from .connectivity import (
     connectivity_component_color,
     connectivity_component_for_node,
 )
-from .draw_tools import (
-    clone_node_for_extrusion,
-    compute_face_normal,
-    extrusion_count_from_projected_pixel_drag,
-    next_node_id,
-    preview_coords,
-)
 from .diagnostics import install_crash_diagnostics, log_event, log_exception
 from .graph_io import (
     load_conductance_matrix_from_folder,
@@ -114,17 +107,6 @@ class GraphVisualizerApp:
         self._syncing_metadata_ui = False
         self._applying_node_form = False
         self.dirty = False
-        self.draw_mode_enabled = False
-        self.draw_active = False
-        self.draw_start_node_id: int | None = None
-        self.draw_start_coord: tuple[int, int, int] | None = None
-        self.draw_start_pixel: tuple[int, int] | None = None
-        self.draw_normal_grid: tuple[int, int, int] | None = None
-        self.draw_screen_direction: tuple[float, float] | None = None
-        self.draw_pixels_per_cell: float | None = None
-        self.draw_preview_coords: list[tuple[int, int, int]] = []
-        self._last_shown_preview_coords: list[tuple[int, int, int]] = []
-        self._suppress_next_draw_pick = False
         self.dark_mode = False
 
         self.app = self.QtWidgets.QApplication.instance() or self.QtWidgets.QApplication([])
@@ -689,13 +671,6 @@ class GraphVisualizerApp:
         layout.addWidget(self.details_label)
         self.left_layout.addWidget(box)
 
-    def _build_draw_controls(self, layout: Any) -> None:
-        self.draw_mode_button = self.QtWidgets.QPushButton("Draw Mode")
-        self.draw_mode_button.setCheckable(True)
-        self.draw_mode_button.setToolTip("Extrude cells by clicking a cube face and dragging outward.")
-        self.draw_mode_button.toggled.connect(self.enable_draw_mode)
-        layout.addWidget(self.draw_mode_button)
-
     def prepare_new_node(self) -> None:
         next_id = 0
         while next_id in self.model.nodes:
@@ -1196,7 +1171,6 @@ class GraphVisualizerApp:
         self.selected_node_ids = set()
         self._hidden_components.clear()
         self.dirty = False
-        self.cancel_draw_preview()
         self._sync_metadata_widgets()
         self.prepare_new_node()
         self._refresh_all(reset_camera=True)
@@ -1222,7 +1196,6 @@ class GraphVisualizerApp:
             self.selected_node_ids = set()
             self._hidden_components.clear()
             self.dirty = False
-            self.cancel_draw_preview()
             self._sync_metadata_widgets()
             self._sync_pair_distance_from_model()
             self.prepare_new_node()
@@ -1272,120 +1245,6 @@ class GraphVisualizerApp:
             self._refresh_details()
         except Exception as exc:
             self._set_status(str(exc), error=True)
-
-    def enable_draw_mode(self, enabled: bool) -> None:
-        self.draw_mode_enabled = bool(enabled)
-        self.viewer.set_draw_mode(self.draw_mode_enabled)
-        if not self.draw_mode_enabled:
-            self.cancel_draw_preview()
-            self._set_status("Draw Mode disabled.")
-        else:
-            self._set_status("Draw Mode enabled. Click a cube face and drag to extrude cells.")
-
-    def start_draw_from_face(
-        self,
-        node_id: int,
-        picked_point: tuple[float, float, float] | None,
-        mouse_position: tuple[int, int] | None,
-    ) -> None:
-        if node_id not in self.model.nodes:
-            self._set_status("Draw start missed a valid cell.", error=True)
-            return
-        node = self.model.nodes[node_id]
-        side_length = float(node.side_length_m)
-        if side_length <= 0.0:
-            self._set_status("Cannot draw from a cell with invalid side_length_m.", error=True)
-            return
-        point = picked_point or node.center
-        self.draw_active = True
-        self.draw_start_node_id = node_id
-        self.draw_start_coord = node.coord
-        self.draw_start_pixel = mouse_position
-        self.draw_normal_grid = compute_face_normal(node.center, point)
-        self.draw_screen_direction, self.draw_pixels_per_cell = (
-            self.viewer.screen_step_for_grid_normal(node.center, self.draw_normal_grid)
-        )
-        self.draw_preview_coords = []
-        self._last_shown_preview_coords = []
-        self.viewer.clear_preview()
-        self._set_status(
-            f"Drawing from node {node_id}, normal {self.draw_normal_grid}. Drag to preview cells."
-        )
-
-    def update_draw_preview(self, mouse_position: tuple[int, int] | None) -> None:
-        if not self.draw_mode_enabled or not self.draw_active:
-            return
-        if (
-            self.draw_start_node_id is None
-            or self.draw_start_node_id not in self.model.nodes
-            or self.draw_start_coord is None
-            or self.draw_normal_grid is None
-        ):
-            self.cancel_draw_preview()
-            self._set_status("Draw preview cancelled because the start cell is no longer valid.", error=True)
-            return
-        count = extrusion_count_from_projected_pixel_drag(
-            self.draw_start_pixel,
-            mouse_position,
-            self.draw_screen_direction,
-            pixels_per_cell=max(12.0, float(self.draw_pixels_per_cell or 80.0)),
-        )
-        occupied = set(self.model.coord_index())
-        self.draw_preview_coords = preview_coords(
-            self.draw_start_coord, self.draw_normal_grid, count, occupied
-        )
-        if self.draw_preview_coords == self._last_shown_preview_coords:
-            return
-        self._last_shown_preview_coords = list(self.draw_preview_coords)
-        source_node = self.model.nodes[self.draw_start_node_id]
-        self.viewer.show_preview(self.draw_preview_coords, source_node.side_length_m)
-        if count > 0 and not self.draw_preview_coords:
-            self._set_status("Adjacent coordinate is occupied; extrusion would create zero cells.", error=True)
-
-    def commit_draw_preview_if_active(self) -> None:
-        if self.draw_mode_enabled and self.draw_active:
-            self._suppress_next_draw_pick = True
-            self.commit_draw_preview()
-
-    def commit_draw_preview(self) -> None:
-        if not self.draw_active:
-            return
-        coords = list(self.draw_preview_coords)
-        start_node_id = self.draw_start_node_id
-        self.clear_draw_preview()
-        if not coords:
-            self._set_status("Draw finished with no new cells.")
-            return
-        if start_node_id is None or start_node_id not in self.model.nodes:
-            self._set_status("Draw commit cancelled because the start cell was deleted.", error=True)
-            return
-        self.viewer.clear_preview(render=False)
-        source = self.model.nodes[start_node_id]
-        node_id = next_node_id(self.model.nodes)
-        for coord in coords:
-            self.model.add_node(clone_node_for_extrusion(source, node_id, coord))
-            node_id += 1
-        invalidated_loaded_g = self._handle_topology_changed()
-        self.selected_node_id = node_id - 1
-        self.selected_node_ids = {self.selected_node_id}
-        self._refresh_all(reset_camera=False)
-        if not invalidated_loaded_g:
-            self._set_status(f"Created {len(coords)} extruded cell(s).")
-
-    def cancel_draw_preview(self) -> None:
-        self.clear_draw_preview()
-        self.viewer.clear_preview()
-
-    def clear_draw_preview(self) -> None:
-        self.draw_active = False
-        self.draw_start_node_id = None
-        self.draw_start_coord = None
-        self.draw_start_pixel = None
-        self.draw_normal_grid = None
-        self.draw_screen_direction = None
-        self.draw_pixels_per_cell = None
-        self.draw_preview_coords = []
-        self._last_shown_preview_coords = []
 
     def _handle_topology_changed(self) -> bool:
         """Refresh topology-dependent matrices and invalidate loaded G when needed."""
@@ -1777,7 +1636,6 @@ class GraphVisualizerApp:
             self.show_sensors.isChecked(),
             self.show_coolers.isChecked(),
         )
-        self.viewer.set_draw_mode(self.draw_mode_enabled)
         self._sync_view_controls_to_viewer()
         self.viewer.selected_node_id = self.selected_node_id
         self.viewer.selected_node_ids = set(self.selected_node_ids)

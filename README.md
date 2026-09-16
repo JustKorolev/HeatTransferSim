@@ -1,7 +1,19 @@
 # HeatTransferSim
 
-Simple control-oriented thermal RC model for two solid cubes exchanging heat
-through one thermal contact resistance.
+A control-oriented thermal simulator for cryogenic instrument assemblies. It
+turns a CAD assembly into a lumped thermal graph, simulates it closed-loop
+against a MIMO controller, and exports that controller as constants you can
+flash.
+
+Three subsystems, in the order a graph moves through them:
+
+1. `octree_graph/` -- CAD (GLB or STEP) to an octree to a lumped RC graph.
+   Writes `graphs/<name>/` with `graph.json` plus the `C`, `L` and `G_rad`
+   matrices.
+2. `graph_visualizer/` -- the application: inspect and edit the graph in 3D,
+   run it live or headless, validate it against analytical solutions, and
+   design and export the controller.
+3. `export_controller.py` -- the controller as a C header plus a JSON twin.
 
 ## Install
 
@@ -9,79 +21,53 @@ through one thermal contact resistance.
 python -m pip install -r requirements.txt
 ```
 
-## Run the example
+The STEP/B-rep pipeline needs OpenCASCADE, which has no pip wheel. For that,
+use the conda environment instead:
 
 ```powershell
-python main.py
+conda env create -f environment.yml
+conda activate heatsim
 ```
 
-Run without opening plots:
-
-```powershell
-python main.py --no-plot
-```
-
-## Launch the interactive UI
-
-```powershell
-python main.py --ui
-```
-
-The UI uses PyVista/Qt for CAD-like orbit, pan, and zoom around two stationary
-cubes. The control panel edits cube, contact, heater, and simulation parameters.
-Set `contact area override, 0 = auto [m^2]` to zero to compute contact area from
-the overlap of touching cube faces.
-Cube position fields are minimum-corner coordinates in meters. For example, a
-`0.1 m` cube with `min corner x = -0.1` spans `x = -0.1` to `x = 0.0`.
-
-UI parameters are persisted in `simulation_parameters.json` at the project root.
-Changing a parameter in the UI updates that file, and the next launch restores
-the saved values.
-
-Live mode has separate display and solver timing controls:
-
-- `simulated seconds per display update [s]`: how far the simulation advances
-  each time the 3D view refreshes.
-- `display update interval [ms]`: real wall-clock time between screen updates.
-- `max solver internal step [s]`: maximum adaptive ODE step used inside each
-  display update for accuracy.
-
-## Model
-
-```text
-C1 dT1/dt = -(T1 - T2) / R12 + P1(t)
-C2 dT2/dt =  (T1 - T2) / R12 + P2(t)
-R12 = (s1 / 2) / (k1 A) + R_interface + (s2 / 2) / (k2 A)
-C_i = m_i cp_i
-```
-
-Positive heat flow `Qdot_1_to_2 = (T1 - T2) / R12` means heat leaves cube 1 and
-enters cube 2.
-
-`extra interface resistance` is `R_interface`, an optional resistance for
-imperfect face-to-face contact. Set it to `0` for ideal contact where the only
-resistance is conduction from each cube center to its contacting face.
-
-## Launch the sparse graph visualizer
-
-The lumped thermal graph inspector/editor is separate from the original two-cube UI:
+## Launch the application
 
 ```powershell
 python -m graph_visualizer.main
 ```
 
-The existing two-cube UI is also available through the clearer compatibility
-name:
+Five tabs: `3D Octree Graph Editor`, `2D Network Graph`,
+`Heat Transfer Simulation`, `Thermal Validation`, and `Headless Run`.
+
+The visualizer loads octree `graph.json` folders and legacy `graph3d.json`
+folders. In octree mode, geometry and topology are read-only: select cells in
+the 3D cuboid view or the 2D network view, then edit heater/sensor tags,
+materials and notes. Autosave writes changes back to `graph.json` and
+`ui_state.json`.
+
+## Run a simulation without the UI
 
 ```powershell
-python -m heat_transfer_visualizer.main
+python run_simulation.py --graph graphs/CRYOSTAT_V2 --setpoint 80 --duration 3600 --dt 1
 ```
 
-The visualizer can load legacy `graph3d.json` folders and new octree
-`graph.json` folders. In octree mode, geometry/topology are read-only:
-select cells in the 3D cuboid view or 2D network view, then edit heater/sensor
-tags and notes. Autosave writes tag changes back to `graph.json` and
-`ui_state.json`.
+Each run writes a timestamped folder under `simulations/<graph>/` holding the
+series, plots, `status.json`, `events.log` and periodic checkpoints. Runs are
+not tracked in git.
+
+## Export the controller
+
+```powershell
+python export_controller.py --graph graphs/CRYOSTAT_V2
+```
+
+Writes `controller_constants.h` and `controller_constants.json`: the DC gain
+`G`, its regularized inverse, per-sensor Kp/Ki and setpoints, per-heater power
+and slew limits, and every loop-shaping constant, with provenance naming the
+gain matrix they came from. `--list` shows the available gain matrices.
+
+The same export is on the `Export Controller Constants` button in both
+simulation tabs. It needs a gain matrix: the decoupling lives in `G`, so Kp and
+Ki alone do not define this controller.
 
 ## Build an octree graph from SolidWorks GLB exports
 

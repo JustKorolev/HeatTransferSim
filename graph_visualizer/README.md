@@ -1,25 +1,28 @@
 # graph_visualizer
 
-Run the sparse 3D lumped thermal graph editor with:
+Run the thermal graph editor and simulator with:
 
 ```powershell
 python -m graph_visualizer.main
 ```
 
-The original two-cube heat-transfer UI remains available as:
+## Tabs
 
-```powershell
-python -m heat_transfer_visualizer.main
-```
+- `3D Octree Graph Editor`: the PyVista octree scene with cuboid cell rendering,
+  selection, labels, edges, heater/sensor/cryocooler markers, a movable
+  cross-section, and the per-node property editor.
+- `2D Network Graph`: a read-only flattened adjacency graph for inspecting nodes
+  and conductive links. It does not edit graph topology or node/edge properties.
+- `Heat Transfer Simulation`: live playback with the controller in the loop, sys
+  ID, controller design and controller export.
+- `Thermal Validation`: drives the real solver against analytical and published
+  reference cases and reports the error.
+- `Headless Run`: launches a run as a detached process and monitors it, without
+  ever loading the graph into the GUI. Use this for anything large or overnight.
 
-## Visualization Tabs
-
-The main viewer has two tabs:
-
-- `3D View`: the PyVista octree/cell scene with cuboid cell rendering,
-  selection, labels, edges, heater markers, and sensor markers.
-- `2D View`: a read-only flattened adjacency graph for inspecting nodes and
-  conductive links. It does not edit graph topology or node/edge properties.
+The last two simulation tabs share ONE control panel implementation
+(`simulation_controls_panel.py`), so their rows cannot drift apart. Mode
+differences are expressed by hiding rows, never by building a different layout.
 
 The 2D view uses a spring layout by default. The layout dropdown can also show
 coordinate projections: `XY`, `XZ`, and `YZ`, where coordinates come from each

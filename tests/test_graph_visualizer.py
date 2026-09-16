@@ -21,13 +21,6 @@ from graph_visualizer.connectivity import (
     connectivity_component_for_node,
 )
 from graph_visualizer.cryocooler import PT60LiftCurve
-from graph_visualizer.draw_tools import (
-    clone_node_for_extrusion,
-    compute_face_normal,
-    extrusion_count_from_projected_pixel_drag,
-    next_node_id,
-    preview_coords,
-)
 from graph_visualizer.graph_io import (
     _atomic_write_json,
     load_conductance_matrix_from_folder,
@@ -4965,55 +4958,6 @@ class GraphVisualizerModelTests(unittest.TestCase):
         self.assertEqual(model.metadata.edge_mode, EdgeMode.LOADED_G.value)
         self.assertEqual(model.edges[(2, 7)].Gij_W_K, 1.5)
         self.assertEqual(model.edges[(7, 10)].Gij_W_K, 2.5)
-
-    def test_draw_face_normal_uses_largest_offset_axis(self) -> None:
-        self.assertEqual(compute_face_normal((0, 0, 0), (0.51, 0.1, -0.05)), (1, 0, 0))
-        self.assertEqual(compute_face_normal((0, 0, 0), (-0.52, 0.05, 0.02)), (-1, 0, 0))
-        self.assertEqual(compute_face_normal((0, 0, 0), (0.01, 0.49, 0.08)), (0, 1, 0))
-        self.assertEqual(compute_face_normal((0, 0, 0), (0.02, 0.05, -0.50)), (0, 0, -1))
-
-    def test_draw_preview_stops_at_collision(self) -> None:
-        coords = preview_coords((0, 0, 0), (1, 0, 0), 5, {(3, 0, 0)})
-        self.assertEqual(coords, [(1, 0, 0), (2, 0, 0)])
-        self.assertEqual(preview_coords((0, 0, 0), (1, 0, 0), 5, {(1, 0, 0)}), [])
-
-    def test_draw_count_uses_projected_drag_not_raw_distance(self) -> None:
-        self.assertEqual(
-            extrusion_count_from_projected_pixel_drag((0, 0), (0, 500), (1.0, 0.0)),
-            0,
-        )
-        self.assertEqual(
-            extrusion_count_from_projected_pixel_drag((0, 0), (170, 500), (1.0, 0.0)),
-            2,
-        )
-        self.assertEqual(
-            extrusion_count_from_projected_pixel_drag((100, 0), (0, 0), (1.0, 0.0)),
-            0,
-        )
-
-    def test_extruded_node_copies_thermal_mass_but_resets_io_metadata(self) -> None:
-        source = NodeProperties.with_material(10, (0, 0, 0), material="copper")
-        source.is_heater = True
-        source.heater.heater_id = 99
-        source.is_sensor = True
-        source.sensor.sensor_id = 42
-        source.has_cryocooler = True
-        source.Grad_W_K = 3.0
-        cloned = clone_node_for_extrusion(source, 11, (1, 0, 0))
-        self.assertEqual(cloned.node_id, 11)
-        self.assertEqual(cloned.coord, (1, 0, 0))
-        self.assertEqual(cloned.material, source.material)
-        self.assertEqual(cloned.side_length_m, source.side_length_m)
-        self.assertEqual(cloned.Grad_W_K, 0.0)
-        self.assertFalse(cloned.is_heater)
-        self.assertEqual(cloned.heater.heater_id, 11)
-        self.assertFalse(cloned.is_sensor)
-        self.assertEqual(cloned.sensor.sensor_id, 11)
-        self.assertFalse(cloned.has_cryocooler)
-
-    def test_draw_node_ids_start_after_max_existing_id(self) -> None:
-        self.assertEqual(next_node_id([0, 1, 2, 10]), 11)
-        self.assertEqual(next_node_id([]), 0)
 
     def test_tooltip_formatters_include_core_node_and_edge_fields(self) -> None:
         node = NodeProperties.with_material(7, (2, 0, 1), material="copper")

@@ -52,18 +52,14 @@ class GraphPyVistaWidget:
             [int, tuple[float, float, float] | None, tuple[int, int] | None], None
         ]
         | None = None,
-        on_drag_update: Callable[[tuple[int, int] | None], None] | None = None,
         on_left_click: Callable[[], None] | None = None,
-        on_drag_release: Callable[[], None] | None = None,
         on_escape: Callable[[], None] | None = None,
         tooltip_for_node: Callable[[int], str] | None = None,
     ) -> None:
         self._load_dependencies()
         self.parent = parent
         self.on_pick_node = on_pick_node
-        self.on_drag_update = on_drag_update
         self.on_left_click = on_left_click
-        self.on_drag_release = on_drag_release
         self.on_escape = on_escape
         self.tooltip_for_node = tooltip_for_node
         self.plotter = self.QtInteractor(parent)
@@ -71,7 +67,6 @@ class GraphPyVistaWidget:
         self.dark_mode = False
         self.selected_node_id: int | None = None
         self.selected_node_ids: set[int] = set()
-        self.draw_mode_enabled = False
         self.show_labels = True
         self.show_edges = True
         self.show_heaters = True
@@ -96,7 +91,6 @@ class GraphPyVistaWidget:
         self._marker_actors_by_kind: dict[str, list[Any]] = {"heater": [], "sensor": [], "cooler": []}
         self._edge_actors: list[Any] = []
         self._role_overlay_actors: list[Any] = []
-        self._preview_actors: list[Any] = []
         self._batched_actor: Any | None = None
         self._batched_mesh: Any | None = None
         # Drawn batched-cell geometry, kept as parallel arrays indexed by row and
@@ -105,8 +99,6 @@ class GraphPyVistaWidget:
         self._batched_centers: np.ndarray | None = None
         self._batched_lengths: np.ndarray | None = None
         self._batched_selected_actor: Any | None = None
-        self._last_preview_coords: list[tuple[int, int, int]] = []
-        self._last_preview_side = 1.0
         self._picking_enabled = False
         self._observers_enabled = False
         self._ignore_next_mesh_pick = False
@@ -300,8 +292,6 @@ class GraphPyVistaWidget:
             reset_camera=reset_camera,
         )
         camera_position = self.plotter.camera_position if not reset_camera else None
-        preview_coords = list(getattr(self, "_last_preview_coords", []))
-        preview_side = float(getattr(self, "_last_preview_side", 1.0))
         committed_bounds = self._committed_model_bounds(model)
         self._last_model_nodes = dict(model.nodes)
         self._last_node_colors = dict(node_colors or {})
@@ -423,8 +413,6 @@ class GraphPyVistaWidget:
         self._draw_role_interface_overlays(model, visible)
         self._finish_scene(committed_bounds, camera_position, reset_camera)
         log_event("pyvista draw complete")
-        if preview_coords:
-            self.show_preview(preview_coords, preview_side)
 
     def select_node(self, node_id: int | None, model: ThermalGraphModel | None = None) -> None:
         self.select_nodes(set() if node_id is None else {int(node_id)}, active_node_id=node_id)
@@ -516,51 +504,12 @@ class GraphPyVistaWidget:
             return self._update_actor_direct_colors(node_scalar_values, scalar_clim)
         return True
 
-    def set_draw_mode(self, enabled: bool) -> None:
-        self.draw_mode_enabled = bool(enabled)
-
     def set_hover_tooltips_enabled(self, enabled: bool) -> None:
         self._hover_tooltips_enabled = bool(enabled)
         if not self._hover_tooltips_enabled and self._hover_node_id is not None:
             self._hover_node_id = None
             try:
                 self.QtWidgets.QToolTip.hideText()
-            except Exception:
-                pass
-
-    def show_preview(self, coords: list[tuple[int, int, int]], side_length_m: float) -> None:
-        normalized_coords = list(coords)
-        normalized_side = float(side_length_m) if side_length_m > 0.0 else 1.0
-        if (
-            normalized_coords == self._last_preview_coords
-            and abs(normalized_side - self._last_preview_side) <= 1.0e-12
-        ):
-            return
-        self.clear_preview(render=False)
-        self._last_preview_coords = normalized_coords
-        self._last_preview_side = normalized_side
-        side = max(1.0e-6, self._last_preview_side)
-        for coord in normalized_coords:
-            center = np.array(coord, dtype=float)
-            mesh = self.pv.Cube(center=center, x_length=side, y_length=side, z_length=side)
-            actor = self._add_preview_mesh(mesh)
-            self._exclude_actor_from_bounds(actor)
-            self._preview_actors.append(actor)
-            self._apply_cross_section_to_actor(actor)
-        self.safe_render()
-
-    def clear_preview(self, render: bool = True) -> None:
-        self._last_preview_coords = []
-        self._last_preview_side = 1.0
-        for actor in self._preview_actors:
-            try:
-                self.plotter.remove_actor(actor)
-            except Exception:
-                pass
-        self._preview_actors = []
-        if render:
-            try:
-                self.safe_render()
             except Exception:
                 pass
 
@@ -574,64 +523,6 @@ class GraphPyVistaWidget:
                 return
             except Exception:
                 pass
-
-    def screen_direction_for_grid_normal(
-        self, normal: tuple[int, int, int]
-    ) -> tuple[float, float] | None:
-        """Return the clicked face normal projected into screen x/y movement."""
-        try:
-            camera_position = self.plotter.camera_position
-            camera_location = np.asarray(camera_position[0], dtype=float)
-            focal_point = np.asarray(camera_position[1], dtype=float)
-            view_up = np.asarray(camera_position[2], dtype=float)
-        except Exception:
-            return None
-
-        view_direction = focal_point - camera_location
-        view_norm = float(np.linalg.norm(view_direction))
-        up_norm = float(np.linalg.norm(view_up))
-        if view_norm <= 1.0e-9 or up_norm <= 1.0e-9:
-            return None
-        view_direction = view_direction / view_norm
-        view_up = view_up / up_norm
-        right = np.cross(view_direction, view_up)
-        right_norm = float(np.linalg.norm(right))
-        if right_norm <= 1.0e-9:
-            return None
-        right = right / right_norm
-        up = np.cross(right, view_direction)
-        up_norm = float(np.linalg.norm(up))
-        if up_norm <= 1.0e-9:
-            return None
-        up = up / up_norm
-
-        normal_world = np.asarray(normal, dtype=float)
-        screen_direction = np.array(
-            [float(np.dot(normal_world, right)), float(np.dot(normal_world, up))]
-        )
-        if float(np.linalg.norm(screen_direction)) <= 1.0e-9:
-            return None
-        return (float(screen_direction[0]), float(screen_direction[1]))
-
-    def screen_step_for_grid_normal(
-        self,
-        center: tuple[float, float, float],
-        normal: tuple[int, int, int],
-        grid_spacing: float = 1.0,
-    ) -> tuple[tuple[float, float] | None, float | None]:
-        """Return screen direction and pixels for one grid step along a normal."""
-        center_array = np.asarray(center, dtype=float)
-        normal_array = np.asarray(normal, dtype=float)
-        start = self._world_to_display(center_array)
-        end = self._world_to_display(center_array + normal_array * float(grid_spacing))
-        if start is None or end is None:
-            return self.screen_direction_for_grid_normal(normal), None
-        vector = np.asarray(end, dtype=float) - np.asarray(start, dtype=float)
-        length = float(np.linalg.norm(vector))
-        if length <= 1.0e-9 or not np.isfinite(length):
-            return self.screen_direction_for_grid_normal(normal), None
-        direction = vector / length
-        return (float(direction[0]), float(direction[1])), length
 
     def _add_marker(
         self,
@@ -1011,7 +902,6 @@ class GraphPyVistaWidget:
         try:
             interactor.AddObserver("LeftButtonPressEvent", self._handle_left_press)
             interactor.AddObserver("MouseMoveEvent", self._handle_mouse_move)
-            interactor.AddObserver("LeftButtonReleaseEvent", self._handle_left_release)
             interactor.AddObserver("KeyPressEvent", self._handle_key_press)
             self._observers_enabled = True
         except Exception:
@@ -1051,16 +941,9 @@ class GraphPyVistaWidget:
     def _handle_mouse_move(self, *_: Any) -> None:
         if self._closed:
             return
-        if self.draw_mode_enabled and self.on_drag_update is not None:
-            self.on_drag_update(self._mouse_position())
-            return
         if not self._hover_tooltips_enabled:
             return
         self._update_hover_tooltip()
-
-    def _handle_left_release(self, *_: Any) -> None:
-        if self.draw_mode_enabled and self.on_drag_release is not None:
-            self.on_drag_release()
 
     def _handle_key_press(self, *_: Any) -> None:
         key = ""
@@ -1222,23 +1105,11 @@ class GraphPyVistaWidget:
             return True
         return self._actor_key(actor) == self._actor_key(self._batched_actor)
 
-    def _world_to_display(self, point: np.ndarray) -> tuple[float, float] | None:
-        renderer = self._renderer()
-        if renderer is None:
-            return None
-        try:
-            renderer.SetWorldPoint(float(point[0]), float(point[1]), float(point[2]), 1.0)
-            renderer.WorldToDisplay()
-            display = renderer.GetDisplayPoint()
-            return (float(display[0]), float(display[1]))
-        except Exception:
-            return None
-
     @staticmethod
     def _committed_model_bounds(
         model: ThermalGraphModel,
     ) -> tuple[float, float, float, float, float, float] | None:
-        """Bounds for real cells only; draw-mode preview cells must not affect the grid."""
+        """Bounds for cells that carry real geometry."""
         geometry_bounds = GraphPyVistaWidget._model_geometry_bounds(model)
         if geometry_bounds is None:
             return None
@@ -1283,39 +1154,6 @@ class GraphPyVistaWidget:
             float(mins[2]),
             float(maxs[2]),
         )
-
-    @staticmethod
-    def _exclude_actor_from_bounds(actor: Any) -> None:
-        """Keep ghost previews from expanding bounds/grid/camera extents."""
-        for method_name in ("SetUseBounds", "UseBoundsOff"):
-            method = getattr(actor, method_name, None)
-            if method is None:
-                continue
-            try:
-                if method_name == "SetUseBounds":
-                    method(False)
-                else:
-                    method()
-                return
-            except Exception:
-                pass
-
-    def _add_preview_mesh(self, mesh: Any) -> Any:
-        kwargs = {
-            "color": "#9b5de5",
-            "opacity": 0.22,
-            "show_edges": True,
-            "edge_color": "#5a189a",
-            "line_width": 2,
-            "pickable": False,
-            "reset_camera": False,
-        }
-        try:
-            return self.plotter.add_mesh(mesh, use_bounds=False, **kwargs)
-        except TypeError:
-            actor = self.plotter.add_mesh(mesh, **kwargs)
-            self._exclude_actor_from_bounds(actor)
-            return actor
 
     def _finish_scene(
         self,
@@ -1837,7 +1675,6 @@ class GraphPyVistaWidget:
             *self._edge_actors,
             *self._role_overlay_actors,
             *self._marker_actors,
-            *self._preview_actors,
             self._batched_actor,
             self._batched_selected_actor,
         ]
