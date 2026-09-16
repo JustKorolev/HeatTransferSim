@@ -26,3 +26,6 @@ simulations/
 *crash*.log
 events.log
 conversion.log
+
+# npm scratch for the SURF report build scripts (docs/surf_report/*.js).
+node_modules/
