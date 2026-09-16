@@ -10,5 +10,19 @@ build/
 dist/
 *.egg-info/
 *.npy
+
+# Built graph folders: regenerate with build_octree_graph.py.
 graphs/
+
+# CAD exports (.glb / .step / materials.xlsx) live outside version control.
 meshes/
+
+# Run outputs. Every headless/live run writes a timestamped folder here with
+# series CSVs, plots and multi-MB .npz checkpoints. They are reproducible from
+# the graph plus simulation_parameters.json, so they are not tracked.
+simulations/
+
+# Crash dumps and per-run logs written by faulthandler and the octree worker.
+*crash*.log
+events.log
+conversion.log
