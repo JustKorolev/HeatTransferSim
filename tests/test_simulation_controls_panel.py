@@ -61,8 +61,26 @@ class _Widget:
     def blockSignals(self, value) -> None:
         self._signals_blocked = bool(value)
 
-    def setStyleSheet(self, _text) -> None:
-        pass
+    # Stored and readable, as Qt does: the help centre's highlight saves the old
+    # stylesheet, sets its own, and must put the original back. A no-op setter
+    # with no getter would make that round-trip untestable.
+    def setStyleSheet(self, text) -> None:
+        self.stylesheet = text
+
+    def styleSheet(self) -> str:
+        return getattr(self, "stylesheet", "")
+
+    def toolTip(self) -> str:
+        return self.tooltip
+
+    def isVisible(self) -> bool:
+        return self.visible
+
+    def parentWidget(self):
+        return None
+
+    def height(self) -> int:
+        return 24
 
     def setMinimumWidth(self, _value) -> None:
         pass

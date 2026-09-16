@@ -186,6 +186,17 @@ class SimulationControlsPanel:
         self._rows: dict[str, tuple[Any, Any]] = {}
         self._sections: dict[str, Any] = {}
         self._section_forms: dict[str, Any] = {}
+        # id(form) -> section key, so a row can name the section it landed in. Keyed
+        # on identity because a QFormLayout is not hashable across bindings, and the
+        # help search needs "which section is this control in?" answered for every
+        # row without a second, hand-maintained list that would go stale.
+        self._section_key_by_form_id: dict[int, str] = {}
+        # row key -> section key, filled as rows are added.
+        self._row_sections: dict[str, str] = {}
+        # Display text, kept beside the widgets so the help index does not have to
+        # reach back into the layout to recover a label.
+        self._row_labels: dict[str, str] = {}
+        self._section_titles: dict[str, str] = {}
 
     # -- public widget helpers (the tabs reuse these outside the panel) ------- #
     def double_spin(self, minimum: float, maximum: float, value: float, step: float) -> Any:
@@ -310,6 +321,10 @@ class SimulationControlsPanel:
         else:
             form.addRow(label, widget)
         self._rows[key] = (form, widget)
+        self._row_labels[key] = label or ""
+        section = self._section_key_by_form_id.get(id(form))
+        if section is not None:
+            self._row_sections[key] = section
         return widget
 
     def _hrow(self, *widgets: Any) -> Any:
@@ -348,6 +363,8 @@ class SimulationControlsPanel:
         box, section_form = self.section(title)
         self._sections[key] = box
         self._section_forms[key] = section_form
+        self._section_key_by_form_id[id(section_form)] = key
+        self._section_titles[key] = title
         form.addRow(box)
         return box, section_form
 
@@ -1032,7 +1049,14 @@ class SimulationControlsPanel:
         self.run_sys_id_button = self._button("Run G_ctrl Sys ID", "run_sys_id")
         self.cancel_sys_id_button = self._button("Cancel Sys ID", "cancel_sys_id")
         self.cancel_sys_id_button.setEnabled(False)
-        sysid_form.addRow(self._hrow(self.run_sys_id_button, self.cancel_sys_id_button))
+        # Through _row rather than addRow, so the sys ID has a key the help search
+        # can find it by. It is the first thing a MIMO PI setup needs and was
+        # unreachable from search while this row was anonymous.
+        self._row(
+            sysid_form,
+            "run_sys_id",
+            self._hrow(self.run_sys_id_button, self.cancel_sys_id_button),
+        )
         self.sys_id_progress_label = self.QtWidgets.QLabel("Idle.")
         self.sys_id_progress_label.setWordWrap(True)
         self.sys_id_status_label = self.QtWidgets.QLabel("")

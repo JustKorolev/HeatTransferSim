@@ -319,6 +319,65 @@ class GraphVisualizerApp:
         layout.addWidget(self.main_splitter, 1)
         self.window.setCentralWidget(central)
         self.window.resize(1380, 820)
+        self._build_menu_bar()
+
+    def _build_menu_bar(self) -> None:
+        """The window's only menu: Help.
+
+        There was no menu bar at all, and the app has roughly two hundred controls
+        named for the control theory behind them rather than for what someone is
+        trying to do. "Where do I cap heater power?" cannot be answered by reading
+        labels. Ctrl+F is bound to the search because that is the key people
+        already press when they cannot find something.
+        """
+        from .help_center import HelpCenter
+        from .help_search import TUTORIALS
+
+        self.help_center = HelpCenter(self)
+        menu_bar = self.window.menuBar()
+        help_menu = menu_bar.addMenu("&Help")
+
+        search_action = help_menu.addAction("Search controls...")
+        search_action.setShortcut("Ctrl+F")
+        search_action.setStatusTip("Find any control by name and jump straight to it.")
+        search_action.triggered.connect(lambda: self.open_help(focus_search=True))
+
+        help_action = help_menu.addAction("Help and tutorials")
+        help_action.setShortcut("F1")
+        help_action.triggered.connect(lambda: self.open_help())
+
+        help_menu.addSeparator()
+        tutorials_menu = help_menu.addMenu("Tutorials")
+        for tutorial in TUTORIALS:
+            action = tutorials_menu.addAction(tutorial.title)
+            action.setStatusTip(tutorial.summary)
+            # Bind the key per iteration; a bare closure would capture the loop
+            # variable and every entry would open the last tutorial.
+            action.triggered.connect(
+                lambda _checked=False, key=tutorial.key: self.open_help(tutorial_key=key)
+            )
+
+        help_menu.addSeparator()
+        about_action = help_menu.addAction("About HeatTransferSim")
+        about_action.triggered.connect(self.show_about)
+
+    def open_help(self, tutorial_key: str = "", focus_search: bool = False) -> None:
+        center = getattr(self, "help_center", None)
+        if center is None:
+            return
+        center.show_dialog(tutorial_key=tutorial_key, focus_search=focus_search)
+
+    def show_about(self) -> None:
+        self.QtWidgets.QMessageBox.about(
+            self.window,
+            "About HeatTransferSim",
+            "<h3>HeatTransferSim</h3>"
+            "<p>A control-oriented thermal simulator for cryogenic instrument "
+            "assemblies: CAD to a lumped thermal graph, simulated closed-loop "
+            "against a MIMO controller, and exported as constants you can flash.</p>"
+            "<p>Press <b>Ctrl+F</b> to search every control by name, or <b>F1</b> "
+            "for the tutorials.</p>",
+        )
 
     def _build_file_controls(self) -> None:
         row = self.QtWidgets.QHBoxLayout()
