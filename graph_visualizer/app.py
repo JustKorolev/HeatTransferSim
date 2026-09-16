@@ -17,6 +17,7 @@ from .connectivity import (
     connectivity_component_for_node,
 )
 from .diagnostics import install_crash_diagnostics, log_event, log_exception
+from .ui_theme import configure_double_spin, widen_decimals_for
 from .graph_io import (
     load_conductance_matrix_from_folder,
     load_graph_folder,
@@ -109,7 +110,11 @@ class GraphVisualizerApp:
         self.dirty = False
         self.dark_mode = False
 
+        # Must precede the QApplication: the rounding policy cannot be changed
+        # once one exists.
+        self._enable_fractional_dpi_scaling()
         self.app = self.QtWidgets.QApplication.instance() or self.QtWidgets.QApplication([])
+        self._apply_ui_font(self._load_ui_scale())
         self._install_no_wheel_scroll_filter()
         self.window = self.QtWidgets.QMainWindow()
         self.window.setWindowTitle("Graph Visualizer - Sparse Thermal Lump Network")
@@ -178,7 +183,7 @@ class GraphVisualizerApp:
 
         self.left_scroll = self.QtWidgets.QScrollArea()
         self.left_scroll.setWidgetResizable(True)
-        self.left_scroll.setMinimumWidth(320)
+        self.left_scroll.setMinimumWidth(400)
         left_content = self.QtWidgets.QWidget()
         self.left_scroll.setWidget(left_content)
         self.left_layout = self.QtWidgets.QVBoxLayout(left_content)
@@ -315,28 +320,199 @@ class GraphVisualizerApp:
         self.main_splitter.addWidget(right_panel)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([430, 950])
+        # The side panel holds every parameter; starving it is what made rows
+        # clip. The viewer still gets the majority and the splitter is draggable.
+        self.main_splitter.setSizes([520, 860])
         layout.addWidget(self.main_splitter, 1)
         self.window.setCentralWidget(central)
         self.window.resize(1380, 820)
         self._build_menu_bar()
 
+    # -- menu bar ------------------------------------------------------------ #
+    SETTINGS_ORG = "HeatTransferSim"
+    SETTINGS_APP = "HeatTransferSim"
+
+    def _enable_fractional_dpi_scaling(self) -> None:
+        """Lay out at the display's real scale factor rather than a rounded one.
+
+        Windows reports fractional DPI (125%, 150%). Qt's default policy rounds
+        that to an integer factor, so a 150% display is laid out at 100% and every
+        panel ends up a third narrower than the text inside it needs -- which is
+        exactly how a sidebar comes to clip its own controls.
+        """
+        try:
+            policy = self.QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+            self.QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(policy)
+        except Exception:  # noqa: BLE001 - older bindings, or an app already made
+            pass
+
+    def _settings(self) -> Any:
+        return self.QtCore.QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+
+    def _load_ui_scale(self) -> int:
+        from .ui_theme import DEFAULT_UI_SCALE, clamp_scale
+
+        try:
+            stored = self._settings().value("ui/scale", DEFAULT_UI_SCALE)
+        except Exception:  # noqa: BLE001 - a missing or unreadable settings store
+            return DEFAULT_UI_SCALE
+        return clamp_scale(stored)
+
+    def _apply_ui_font(self, scale_percent: int) -> None:
+        """Set the application font family and size for ``scale_percent``.
+
+        Scaling by FONT SIZE rather than by a stylesheet zoom: Qt lays every widget
+        out from font metrics, so panels, rows and buttons all grow with the text
+        instead of the text overflowing boxes that stayed the same size.
+        """
+        from .ui_theme import PREFERRED_FONTS, choose_font_family, point_size_for
+
+        self.ui_scale = int(scale_percent)
+        try:
+            from PySide6 import QtGui
+        except ImportError:  # pragma: no cover - other bindings
+            from qtpy import QtGui
+
+        families = QtGui.QFontDatabase.families()
+        family = choose_font_family(families, PREFERRED_FONTS)
+        font = QtGui.QFont(family) if family else QtGui.QFont()
+        font.setPointSizeF(point_size_for(self.ui_scale))
+        self.QtWidgets.QApplication.setFont(font)
+        self.ui_font_family = family or font.family()
+
+    def set_ui_scale(self, scale_percent: int, announce: bool = True) -> None:
+        """Change the UI scale, apply it to every live widget, and remember it."""
+        from .ui_theme import clamp_scale
+
+        scale = clamp_scale(scale_percent)
+        self._apply_ui_font(scale)
+        # QApplication.setFont only reaches widgets that were never given a font of
+        # their own, and it does not re-run layouts that have already happened.
+        # Pushing it explicitly makes an open window resize now rather than at the
+        # next restart.
+        font = self.QtWidgets.QApplication.font()
+        for widget in self.QtWidgets.QApplication.allWidgets():
+            try:
+                widget.setFont(font)
+                widget.updateGeometry()
+            except Exception:  # noqa: BLE001 - one bad widget must not stop the rest
+                continue
+        try:
+            self._settings().setValue("ui/scale", int(scale))
+        except Exception:  # noqa: BLE001 - an unwritable settings store is not fatal
+            pass
+        # Status labels are pinned to a PIXEL height measured from the old font;
+        # re-measure them or larger text is clipped by the smaller font's box.
+        for attribute in ("simulation_tab", "headless_run_tab"):
+            panel = getattr(getattr(self, attribute, None), "panel", None)
+            if panel is not None and hasattr(panel, "repin_two_line_labels"):
+                panel.repin_two_line_labels()
+        for percent, action in getattr(self, "_ui_scale_actions", {}).items():
+            action.setChecked(percent == scale)
+        if announce:
+            self._set_status(f"UI scale {scale}% ({self.ui_font_family}).")
+
+    def step_ui_scale(self, direction: int) -> None:
+        """Move one step up or down the offered scales."""
+        from .ui_theme import UI_SCALES, clamp_scale
+
+        current = clamp_scale(getattr(self, "ui_scale", 100))
+        index = UI_SCALES.index(current)
+        self.set_ui_scale(UI_SCALES[max(0, min(len(UI_SCALES) - 1, index + direction))])
+
     def _build_menu_bar(self) -> None:
-        """The window's only menu: Help.
+        """File, View and Help.
 
         There was no menu bar at all, and the app has roughly two hundred controls
         named for the control theory behind them rather than for what someone is
         trying to do. "Where do I cap heater power?" cannot be answered by reading
-        labels. Ctrl+F is bound to the search because that is the key people
-        already press when they cannot find something.
+        labels, so Ctrl+F searches all of them -- that is the key people already
+        press when they cannot find something.
         """
         from .help_center import HelpCenter
         from .help_search import TUTORIALS
+        from .ui_theme import UI_SCALES
 
         self.help_center = HelpCenter(self)
         menu_bar = self.window.menuBar()
-        help_menu = menu_bar.addMenu("&Help")
 
+        # --- File ---
+        file_menu = menu_bar.addMenu("&File")
+        for text, shortcut, slot, tip in (
+            ("&New Graph", "Ctrl+N", self.new_graph, "Start an empty graph."),
+            ("&Open Graph...", "Ctrl+O", self.load_graph, "Load a graph folder."),
+            ("&Save", "Ctrl+S", self.save_graph, "Save to the current graph folder."),
+            ("Save &As...", "Ctrl+Shift+S", self.save_graph_as, "Save to a new folder."),
+        ):
+            action = file_menu.addAction(text)
+            action.setShortcut(shortcut)
+            action.setStatusTip(tip)
+            action.triggered.connect(slot)
+
+        file_menu.addSeparator()
+        export_action = file_menu.addAction("&Export Controller Constants...")
+        export_action.setShortcut("Ctrl+E")
+        export_action.setStatusTip(
+            "Write the selected controller as a C header plus a JSON twin."
+        )
+        export_action.triggered.connect(self.export_controller_from_menu)
+
+        update_action = file_menu.addAction("&Update Graph (rebuild fast-load)")
+        update_action.setStatusTip(
+            "Rebuild nodes.csv from graph.json so headless runs load the lean way."
+        )
+        update_action.triggered.connect(self.update_graph_from_menu)
+
+        file_menu.addSeparator()
+        quit_action = file_menu.addAction("E&xit")
+        quit_action.setShortcut("Ctrl+Q")
+        quit_action.triggered.connect(self.window.close)
+
+        # --- View ---
+        view_menu = menu_bar.addMenu("&View")
+        scale_menu = view_menu.addMenu("UI &scale")
+        # QActionGroup lives in QtGui in Qt 6, not QtWidgets as it did in Qt 5.
+        try:
+            from PySide6 import QtGui
+        except ImportError:  # pragma: no cover - other bindings
+            from qtpy import QtGui
+        scale_group = QtGui.QActionGroup(self.window)
+        scale_group.setExclusive(True)
+        self._ui_scale_actions = {}
+        current_scale = getattr(self, "ui_scale", 100)
+        for percent in UI_SCALES:
+            action = scale_menu.addAction(f"{percent}%")
+            action.setCheckable(True)
+            action.setChecked(percent == current_scale)
+            scale_group.addAction(action)
+            # Bound per iteration: a bare closure captures the loop variable, and
+            # every entry would then apply the last scale.
+            action.triggered.connect(
+                lambda _checked=False, value=percent: self.set_ui_scale(value)
+            )
+            self._ui_scale_actions[percent] = action
+
+        view_menu.addSeparator()
+        bigger = view_menu.addAction("Larger text")
+        bigger.setShortcuts(["Ctrl++", "Ctrl+="])
+        bigger.triggered.connect(lambda: self.step_ui_scale(+1))
+        smaller = view_menu.addAction("Smaller text")
+        smaller.setShortcut("Ctrl+-")
+        smaller.triggered.connect(lambda: self.step_ui_scale(-1))
+        reset = view_menu.addAction("Reset text size")
+        reset.setShortcut("Ctrl+0")
+        reset.triggered.connect(lambda: self.set_ui_scale(100))
+
+        view_menu.addSeparator()
+        self.dark_mode_action = view_menu.addAction("&Dark mode")
+        self.dark_mode_action.setCheckable(True)
+        self.dark_mode_action.setChecked(bool(self.dark_mode))
+        self.dark_mode_action.setShortcut("Ctrl+D")
+        # Driven through the existing checkbox, so the two cannot disagree.
+        self.dark_mode_action.toggled.connect(self._set_dark_mode_from_menu)
+
+        # --- Help ---
+        help_menu = menu_bar.addMenu("&Help")
         search_action = help_menu.addAction("Search controls...")
         search_action.setShortcut("Ctrl+F")
         search_action.setStatusTip("Find any control by name and jump straight to it.")
@@ -351,8 +527,6 @@ class GraphVisualizerApp:
         for tutorial in TUTORIALS:
             action = tutorials_menu.addAction(tutorial.title)
             action.setStatusTip(tutorial.summary)
-            # Bind the key per iteration; a bare closure would capture the loop
-            # variable and every entry would open the last tutorial.
             action.triggered.connect(
                 lambda _checked=False, key=tutorial.key: self.open_help(tutorial_key=key)
             )
@@ -360,6 +534,32 @@ class GraphVisualizerApp:
         help_menu.addSeparator()
         about_action = help_menu.addAction("About HeatTransferSim")
         about_action.triggered.connect(self.show_about)
+
+    def _set_dark_mode_from_menu(self, enabled: bool) -> None:
+        toggle = getattr(self, "theme_toggle", None)
+        if toggle is None:
+            return
+        if bool(toggle.isChecked()) != bool(enabled):
+            toggle.setChecked(bool(enabled))
+
+    def export_controller_from_menu(self) -> None:
+        """File > Export Controller Constants, delegated to the simulation tab.
+
+        The tab owns the model and the run parameters, so the menu switches to it
+        and calls it rather than duplicating the resolution rules.
+        """
+        tab = getattr(self, "simulation_tab", None)
+        if tab is None:
+            return
+        self.view_tabs.setCurrentWidget(tab.widget)
+        tab.export_controller_constants()
+
+    def update_graph_from_menu(self) -> None:
+        tab = getattr(self, "simulation_tab", None)
+        if tab is None or not hasattr(tab, "update_graph"):
+            self._set_status("Load a graph before updating its fast-load artifacts.", error=True)
+            return
+        tab.update_graph()
 
     def open_help(self, tutorial_key: str = "", focus_search: bool = False) -> None:
         center = getattr(self, "help_center", None)
@@ -376,7 +576,8 @@ class GraphVisualizerApp:
             "assemblies: CAD to a lumped thermal graph, simulated closed-loop "
             "against a MIMO controller, and exported as constants you can flash.</p>"
             "<p>Press <b>Ctrl+F</b> to search every control by name, or <b>F1</b> "
-            "for the tutorials.</p>",
+            "for the tutorials. <b>View &gt; UI scale</b> resizes the whole "
+            "interface.</p>",
         )
 
     def _build_file_controls(self) -> None:
@@ -2602,11 +2803,19 @@ class GraphVisualizerApp:
             def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802 - Qt override name.
                 event.ignore()
 
+            def setValue(inner_self, number: Any) -> None:  # noqa: N802 - Qt override name.
+                # A spin box ROUNDS to its own decimals, and this application reads
+                # its parameters straight back out of the widgets and autosaves
+                # them. Loading a saved 1e-6 into a 3-decimal box would write 0.0
+                # back over it. Widen first, always.
+                widen_decimals_for(inner_self, number)
+                super().setValue(number)
+
         widget = NoWheelDoubleSpinBox()
-        widget.setDecimals(8)
         widget.setRange(minimum, maximum)
         widget.setSingleStep(step)
-        widget.setValue(value)
+        configure_double_spin(widget, step, value)
+        widget.setValue(float(value))
         return widget
 
     @staticmethod

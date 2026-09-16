@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover
 
 from .material_library import default_material_library
 from .pyvista_widget import GraphPyVistaWidget
+from .ui_theme import configure_double_spin, widen_decimals_for
 from .thermal_validation import (
     DISTRIBUTED_ROD,
     GEOMETRY_CONTACT_PAIR,
@@ -453,10 +454,14 @@ class ThermalValidationTab:
             def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802
                 event.ignore()
 
+            def setValue(inner_self, number: Any) -> None:  # noqa: N802
+                widen_decimals_for(inner_self, number)
+                super().setValue(number)
+
         widget = NoWheelDoubleSpinBox()
-        widget.setDecimals(8)
         widget.setRange(float(minimum), float(maximum))
         widget.setSingleStep(float(step))
+        configure_double_spin(widget, step, value)
         widget.setValue(float(value))
         return widget
 

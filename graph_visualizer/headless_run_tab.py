@@ -36,6 +36,7 @@ from typing import Any, Callable
 
 from .diagnostics import log_event
 from .cli import EXPORT_CONTROLLER, RUN_SIMULATION, module_command
+from .ui_theme import wrapping_label
 from .graph_roles import load_role_manifest
 from .modal_reduction import list_modal_artifacts
 from .simulation_controls_panel import MODE_HEADLESS, PID_QP_LABEL, SimulationControlsPanel
@@ -92,17 +93,18 @@ class HeadlessRunTab:
         # the same size and their rows line up when the tabs are compared.
         self.controls_scroll = self.QtWidgets.QScrollArea()
         self.controls_scroll.setWidgetResizable(True)
-        self.controls_scroll.setMinimumWidth(320)
+        self.controls_scroll.setMinimumWidth(400)
         controls = self.QtWidgets.QWidget()
         self.controls_scroll.setWidget(controls)
         form = self.QtWidgets.QFormLayout(controls)
 
-        intro = self.QtWidgets.QLabel(
+        intro = wrapping_label(
+            self.QtCore, self.QtWidgets, 
             "Runs a simulation in a separate process. The graph is never loaded into "
             "this window, so a multi-million-cell run uses only the run's own memory "
             "and the GUI stays responsive. The run keeps going if you close the app."
         )
-        intro.setWordWrap(True)
+        intro.setWordWrap(True)  # noqa: retained; factory also sets it
         form.addRow(intro)
 
         # The graph row is this tab's own: it picks a folder rather than loading it.
@@ -114,8 +116,9 @@ class HeadlessRunTab:
         graph_row.addWidget(self.graph_combo, 1)
         graph_row.addWidget(refresh)
         form.addRow("graph", graph_row)
-        self.graph_info = self.QtWidgets.QLabel("")
-        self.graph_info.setWordWrap(True)
+        self.graph_info = wrapping_label(
+            self.QtCore, self.QtWidgets, "")
+        self.graph_info.setWordWrap(True)  # noqa: retained; factory also sets it
         form.addRow(self.graph_info)
         self.update_graph_button = self.QtWidgets.QPushButton("Update graph (rebuild nodes.csv + edges.npz)")
         self.update_graph_button.setToolTip(
@@ -263,12 +266,13 @@ class HeadlessRunTab:
         # row's value is the whole answer for that sensor.
         setpoint_box = self.QtWidgets.QGroupBox("Per-sensor setpoints")
         setpoint_layout = self.QtWidgets.QVBoxLayout(setpoint_box)
-        setpoint_help = self.QtWidgets.QLabel(
+        setpoint_help = wrapping_label(
+            self.QtCore, self.QtWidgets, 
             f"Every sensor the graph declares, prefilled at {DEFAULT_SETPOINT_K:g} K. Edit a "
             "row to give that sensor its own target, or use Randomize / Set all. A row left "
             "blank keeps whatever setpoint the graph itself holds."
         )
-        setpoint_help.setWordWrap(True)
+        setpoint_help.setWordWrap(True)  # noqa: retained; factory also sets it
         setpoint_layout.addWidget(setpoint_help)
         self.setpoint_table = self.QtWidgets.QTableWidget(0, 3)
         self.setpoint_table.setHorizontalHeaderLabels(["sensor", "setpoint K", "controlled"])
@@ -295,12 +299,13 @@ class HeadlessRunTab:
         # and G's sensor_ids are exactly those channels. Blank = use the global.
         gain_box = self.QtWidgets.QGroupBox("Per-sensor PI gains (MIMO PI)")
         gain_layout = self.QtWidgets.QVBoxLayout(gain_box)
-        gain_help = self.QtWidgets.QLabel(
+        gain_help = wrapping_label(
+            self.QtCore, self.QtWidgets, 
             "Blank uses the global Kp/Ki. A row needs BOTH values to count as an "
             "override. Channels come from the selected G matrix; 'Save preset' stores "
             "the tuning beside that matrix, since gains do not transfer to a different G."
         )
-        gain_help.setWordWrap(True)
+        gain_help.setWordWrap(True)  # noqa: retained; factory also sets it
         gain_layout.addWidget(gain_help)
         self.gain_table = self.QtWidgets.QTableWidget(0, 3)
         self.gain_table.setHorizontalHeaderLabels(["sensor", "Kp", "Ki"])
@@ -326,14 +331,15 @@ class HeadlessRunTab:
         # the left. Blank = use the default; only filled cells are sent.
         heater_box = self.QtWidgets.QGroupBox("Per-heater overrides")
         heater_layout = self.QtWidgets.QVBoxLayout(heater_box)
-        heater_help = self.QtWidgets.QLabel(
+        heater_help = wrapping_label(
+            self.QtCore, self.QtWidgets, 
             "Every heater uses the Controller defaults on the left. Fill a cell to "
             "override that heater's own limit; blank leaves it on the default. "
             "Filling 'manual W' instead drives that heater OPEN-LOOP at a fixed "
             "wattage -- it stops taking controller commands, which is what an "
             "open-loop step test against a column of the gain matrix needs."
         )
-        heater_help.setWordWrap(True)
+        heater_help.setWordWrap(True)  # noqa: retained; factory also sets it
         heater_layout.addWidget(heater_help)
         self.heater_table = self.QtWidgets.QTableWidget(0, 5)
         self.heater_table.setHorizontalHeaderLabels(
@@ -366,8 +372,9 @@ class HeadlessRunTab:
         self.progress = self.QtWidgets.QProgressBar()
         self.progress.setRange(0, 1000)
         right_layout.addWidget(self.progress)
-        self.summary_label = self.QtWidgets.QLabel("No run started.")
-        self.summary_label.setWordWrap(True)
+        self.summary_label = wrapping_label(
+            self.QtCore, self.QtWidgets, "No run started.")
+        self.summary_label.setWordWrap(True)  # noqa: retained; factory also sets it
         right_layout.addWidget(self.summary_label)
         right_layout.addWidget(self.QtWidgets.QLabel("Run log"))
         self.log_view = self.QtWidgets.QPlainTextEdit()

@@ -207,7 +207,7 @@ class HeatTransferSimulationTab:
         layout = self.QtWidgets.QHBoxLayout(self.widget)
         self.controls_scroll = self.QtWidgets.QScrollArea()
         self.controls_scroll.setWidgetResizable(True)
-        self.controls_scroll.setMinimumWidth(320)
+        self.controls_scroll.setMinimumWidth(400)
         controls = self.QtWidgets.QWidget()
         self.controls_scroll.setWidget(controls)
         form = self.QtWidgets.QFormLayout(controls)

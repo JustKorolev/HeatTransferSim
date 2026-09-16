@@ -35,6 +35,7 @@ from dataclasses import replace
 from typing import Any, Callable
 
 from .simulation_parameters import SimulationParameters
+from .ui_theme import configure_double_spin, widen_decimals_for
 
 MODE_LIVE = "live"
 MODE_HEADLESS = "headless"
@@ -197,6 +198,9 @@ class SimulationControlsPanel:
         # reach back into the layout to recover a label.
         self._row_labels: dict[str, str] = {}
         self._section_titles: dict[str, str] = {}
+        # Status labels pinned to a two-line pixel height, so a UI scale change
+        # can re-measure them instead of clipping their text.
+        self._pinned_labels: list[Any] = []
 
     # -- public widget helpers (the tabs reuse these outside the panel) ------- #
     def double_spin(self, minimum: float, maximum: float, value: float, step: float) -> Any:
@@ -204,10 +208,18 @@ class SimulationControlsPanel:
             def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802 - Qt override name.
                 event.ignore()
 
+            def setValue(inner_self, number: Any) -> None:  # noqa: N802 - Qt override name.
+                # A spin box ROUNDS to its own decimals, and this application reads
+                # its parameters straight back out of the widgets and autosaves
+                # them. Loading a saved 1e-6 into a 3-decimal box would write 0.0
+                # back over it. Widen first, always.
+                widen_decimals_for(inner_self, number)
+                super().setValue(number)
+
         widget = NoWheelDoubleSpinBox()
-        widget.setDecimals(8)
         widget.setRange(minimum, maximum)
         widget.setSingleStep(step)
+        configure_double_spin(widget, step, value)
         widget.setValue(float(value))
         return widget
 
@@ -288,12 +300,31 @@ class SimulationControlsPanel:
     def pin_two_line_label(self, label: Any) -> None:
         """Lock a status label to a fixed two-line height so runtime messages of
         varying length can't change its size and shove the rest of the panel around.
-        Text longer than two lines wraps then clips (is cut off), not expands."""
+        Text longer than two lines wraps then clips (is cut off), not expands.
+
+        The height is in PIXELS, measured from the font in use when the panel was
+        built, so View > UI scale would otherwise leave these labels at the old
+        size and clip their text at any scale above 100%. Every pinned label is
+        remembered so :meth:`repin_two_line_labels` can re-measure them.
+        """
         label.setWordWrap(True)
         label.setAlignment(self.QtCore.Qt.AlignTop | self.QtCore.Qt.AlignLeft)
         two_lines = label.fontMetrics().lineSpacing() * 2 + 6
         label.setFixedHeight(int(two_lines))
         label.setSizePolicy(self.QtWidgets.QSizePolicy.Preferred, self.QtWidgets.QSizePolicy.Fixed)
+        self._pinned_labels.append(label)
+
+    def repin_two_line_labels(self) -> None:
+        """Re-measure every pinned label against the current font.
+
+        Called after a UI scale change; without it, larger text is clipped by a
+        height that was measured for the smaller font.
+        """
+        for label in list(self._pinned_labels):
+            try:
+                label.setFixedHeight(int(label.fontMetrics().lineSpacing() * 2 + 6))
+            except Exception:  # noqa: BLE001 - a deleted or stubbed label
+                continue
 
     # -- internal building blocks ------------------------------------------- #
     def _act(self, name: str) -> Callable[..., Any] | None:
@@ -1205,7 +1236,8 @@ class SimulationControlsPanel:
         node_defaults, heater_defaults = self._readout_field_defaults()
         box = self.QtWidgets.QGroupBox("Parameters")
         box.setMinimumWidth(260)
-        box.setMaximumWidth(340)
+        # No maximum: a hard 340 cap made this box narrower than the panel
+        # around it, so its own rows clipped while space sat unused beside them.
         box.setSizePolicy(self.QtWidgets.QSizePolicy.Fixed, self.QtWidgets.QSizePolicy.Preferred)
         layout = self.QtWidgets.QVBoxLayout(box)
         self.readout_editor_box = box
