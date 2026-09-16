@@ -33,16 +33,19 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # PySide6 links these even when no window is ever created, and
-      # heat_transfer_simulation_tab imports QtGui at module scope, so an import
-      # of the package fails without them on a bare runner.
+      # PySide6 links these even when no window is ever created. Importing
+      # graph_visualizer.app pulls in PySide6 at module scope (QtGui, from
+      # heat_transfer_simulation_tab), and tests/test_graph_visualizer.py imports
+      # it for real rather than stubbing, so the package will not import without
+      # them on a bare runner.
       - name: Install Qt runtime libraries (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libegl1 libgl1 libglib2.0-0 libxkbcommon-x11-0 \
-            libdbus-1-3 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libdbus-1-3 libfontconfig1 libxrender1 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
             libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0
 
