@@ -118,7 +118,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libegl1 libgl1 libglib2.0-0 libxkbcommon-x11-0 libdbus-1-3
+            libegl1 libgl1 libglib2.0-0 libxkbcommon-x11-0 libdbus-1-3 \
+            libfontconfig1 libxrender1
 
       - name: Install the wheel into a clean environment
         run: |
