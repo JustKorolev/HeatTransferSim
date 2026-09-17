@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from octree_graph.load_gltf import (
     _PLACEHOLDER_IMAGE_URI,
     _prepare_gltf_for_load,
     _raw_gltf_mesh_node_paths,
+    _resource_uri_for_temp_gltf,
     load_gltf_scene,
 )
 
@@ -283,3 +285,89 @@ class GltfResourceResolutionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TempGltfResourceUriTests(unittest.TestCase):
+    """The buffer URI must not depend on how the temp directory is SPELLED.
+
+    The resource path is resolved before it gets here; the temp directory is not.
+    On Windows those are routinely two spellings of one directory, because TEMP is
+    reported with an 8.3 short name -- GitHub's runners have runneradmin as
+    RUNNER~1, and any account over eight characters or containing a space is the
+    same. os.path.relpath compares textually, so it used to emit a six-level ../
+    chain out of one spelling and back into the other, leaving the rewritten glTF
+    pointing at a path that does not exist.
+    """
+
+    def test_a_resource_beside_the_temp_gltf_is_just_its_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            resource = root / "Assembly.bin"
+            resource.write_bytes(b"abc")
+            self.assertEqual(
+                _resource_uri_for_temp_gltf(resource.resolve(), root), "Assembly.bin"
+            )
+
+    @staticmethod
+    def _second_spelling_of(directory: Path):
+        """Another spelling of the same real directory, or None if unavailable.
+
+        On Windows: the 8.3 short name, which is what GitHub's runners report for
+        TEMP (runneradmin -> RUNNER~1). This is the exact CI condition. Note that
+        merely upper-casing would NOT reproduce it -- ntpath.relpath normalises
+        case, so the bug would hide.
+
+        On POSIX: a symlink, which relpath likewise will not see through.
+        """
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            get_short = ctypes.windll.kernel32.GetShortPathNameW
+            get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+            get_short.restype = wintypes.DWORD
+            buffer = ctypes.create_unicode_buffer(1024)
+            if not get_short(str(directory), buffer, 1024):
+                return None
+            short = Path(buffer.value)
+            return short if str(short) != str(directory) else None
+
+        link = directory.parent / f"{directory.name}-link"
+        try:
+            link.symlink_to(directory, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            return None
+        return link
+
+    def test_a_differently_spelled_temp_dir_still_gives_the_filename(self) -> None:
+        """The regression. Both spellings name one directory, so the answer is the
+        bare filename either way -- and relpath cannot see that on its own."""
+        with tempfile.TemporaryDirectory(prefix="averylongdirectoryname_") as tmp:
+            root = Path(tmp)
+            resource = root / "Assembly.bin"
+            resource.write_bytes(b"abc")
+
+            other = self._second_spelling_of(root)
+            if other is None:
+                self.skipTest("no second spelling of the temp directory available")
+            self.assertEqual(
+                Path(other).resolve(), root.resolve(), "not the same directory"
+            )
+
+            uri = _resource_uri_for_temp_gltf(resource.resolve(), other)
+            self.assertEqual(uri, "Assembly.bin")
+            self.assertNotIn("..", uri)
+
+    def test_a_resource_genuinely_elsewhere_still_gets_a_relative_path(self) -> None:
+        """Only the same-directory case shortcuts; a real subdirectory still
+        resolves relative, so this does not paper over actual layouts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "resources"
+            nested.mkdir()
+            resource = nested / "Assembly.bin"
+            resource.write_bytes(b"abc")
+            self.assertEqual(
+                _resource_uri_for_temp_gltf(resource.resolve(), root),
+                "resources/Assembly.bin",
+            )

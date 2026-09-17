@@ -475,10 +475,35 @@ def _open_temporary_gltf(file_path: Path) -> tuple[Any, Path]:
 
 
 def _resource_uri_for_temp_gltf(resource_path: Path, temp_dir: Path) -> str:
+    """URI for a buffer/image, relative to the temporary glTF that references it.
+
+    BOTH sides are resolved first, and that is the whole point. The resource
+    arrives already resolved (``_candidate_resource_paths`` resolves every
+    candidate) while ``temp_dir`` comes straight from ``tempfile`` -- and on
+    Windows those are routinely two spellings of the same directory, because TEMP
+    is reported using the 8.3 short name. ``os.path.relpath`` compares TEXTUALLY,
+    so the two spellings look like unrelated trees and it emits a chain climbing
+    out of one and back into the other:
+
+        ../../../../../../runneradmin/AppData/Local/Temp/tmpX/Assembly/Assembly.bin
+
+    instead of ``Assembly.bin``. The rewritten glTF then points at a path that does
+    not exist and the load fails. Any account whose name is over eight characters
+    or contains a space gets a short name (``runneradmin`` -> ``RUNNER~1``), so
+    this is a real Windows bug, not a CI artifact -- CI is just where it surfaced.
+    """
+    resource = Path(resource_path).resolve()
+    directory = Path(temp_dir).resolve()
+    if resource.parent == directory:
+        # The normal case: the temp glTF is written beside the original, so the
+        # bare filename is correct and immune to any remaining spelling
+        # difference between the two paths.
+        return resource.name
     try:
-        return os.path.relpath(resource_path, temp_dir).replace(os.sep, "/")
+        return os.path.relpath(resource, directory).replace(os.sep, "/")
     except ValueError:
-        return resource_path.as_uri()
+        # Different drives -- no relative path exists between them.
+        return resource.as_uri()
 
 
 def _raise_for_missing_external_resources(missing: list[Path]) -> None:
