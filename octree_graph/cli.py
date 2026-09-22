@@ -36,6 +36,26 @@ from .octree import OctreeCell, OctreeDiagnostics, OctreeParams, build_octree
 from .validation import format_validation_report, validate_graph
 
 
+def _materials_path(args: Any) -> Path:
+    """The material table this run should use.
+
+    ``--materials`` defaults to None so the shared resolver decides: an explicit
+    flag wins, then $HEATTRANSFERSIM_MATERIALS, then a materials.json in the
+    working directory, then the copy shipped inside the package.
+
+    It used to default to the literal string "materials.json", which is
+    cwd-relative. That resolved only when the builder was run from a checkout's
+    root, where the file happened to sit -- so once it moved into the package for
+    distribution, every installed user got FileNotFoundError on the first build.
+    """
+    explicit = getattr(args, "materials", None)
+    if explicit:
+        return Path(explicit)
+    from .materials import _default_materials_file
+
+    return _default_materials_file()
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     output = Path(args.output_root) / args.graph_name
@@ -180,7 +200,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
                 "engineering materials such as Invar or fiberglass -- those components will default to "
                 f"{DEFAULT_ASSIGNED_MATERIAL_NAME}."
             )
-        materials, material_warnings = load_material_table(args.materials)
+        materials, material_warnings = load_material_table(_materials_path(args))
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     warnings.extend(scene.warnings)
@@ -269,7 +289,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
     )
     input_files = {
         "gltf": str(gltf_path),
-        "materials": str(Path(args.materials)),
+        "materials": str(_materials_path(args)),
     }
     if material_lookup_path:
         input_files["material_lookup"] = str(Path(material_lookup_path))
@@ -364,7 +384,7 @@ def _run_step_conversion(
                 "No part->material lookup found (pass --material-lookup or place materials.xlsx in the mesh "
                 f"directory). Unresolved parts default to {DEFAULT_ASSIGNED_MATERIAL_NAME}."
             )
-        materials, material_warnings = load_material_table(args.materials)
+        materials, material_warnings = load_material_table(_materials_path(args))
         warnings.extend(contact_report.warnings)
         warnings.extend(material_warnings)
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
@@ -445,7 +465,7 @@ def _run_step_conversion(
     matrices = build_matrices(
         graph_result.nodes, graph_result.edges, dense_node_limit=args.dense_matrix_node_limit
     )
-    input_files = {"step": str(step_path), "materials": str(Path(args.materials))}
+    input_files = {"step": str(step_path), "materials": str(_materials_path(args))}
     if material_lookup_path:
         input_files["material_lookup"] = str(Path(material_lookup_path))
     component_names = {str(node.get("component_name", "")) for node in graph_result.nodes}
@@ -526,7 +546,14 @@ def build_parser() -> argparse.ArgumentParser:
         "before multiprocessing is disabled (falls back to 1 worker). Raise toward 0.9 to use more RAM; "
         "lower it if the machine thrashes. Default 0.7.",
     )
-    parser.add_argument("--materials", default="materials.json")
+    parser.add_argument(
+        "--materials",
+        default=None,
+        help="Material property table (JSON). Default: a materials.json in the "
+             "working directory if there is one, else the copy shipped with the "
+             "package. The old default was the literal 'materials.json', which "
+             "only resolved when run from a checkout's root.",
+    )
     parser.add_argument(
         "--material-lookup",
         default=None,

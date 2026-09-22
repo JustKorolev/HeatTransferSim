@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def _enable_crash_traceback(run_dir: str | None) -> None:
         print(f"Could not enable crash tracebacks: {exc}")
 
 
-def main() -> None:
+def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--graph", required=True, help="path to graphs/<name> folder")
     p.add_argument("--output-root", default="simulations")
@@ -75,6 +76,7 @@ def main() -> None:
                         "controller gains). Defaults to the graph's own saved file if present, "
                         "so a headless run matches what the GUI is configured to do.")
     args = p.parse_args()
+
     _enable_crash_traceback(args.run_dir)
 
     sim_params = None
@@ -125,6 +127,24 @@ def main() -> None:
                 raise SystemExit(f"--heater-overrides-json has a bad entry: {node_id!r}: {fields!r}")
         print(f"Per-heater overrides: {len(heater_overrides)} heater(s) from {overrides_path}")
 
+    # Checked here, AFTER the --setpoints-json / --heater-overrides-json files
+    # have been parsed and reported: a malformed argument is the user's mistake to
+    # hear about first, whatever graph they aimed at. But still BEFORE
+    # run_simulation, because that creates simulations/<name>/<timestamp>/ before
+    # it discovers the graph is missing -- so a typo used to leave a litter
+    # directory holding a status.json that recorded the failure, and then exit 0.
+    graph_folder = Path(args.graph)
+    if not graph_folder.is_dir():
+        print(f"error: no such graph folder: {graph_folder}", file=sys.stderr)
+        return 2
+    if not any((graph_folder / name).is_file() for name in ("graph.json", "graph3d.json")):
+        print(
+            f"error: {graph_folder} is not a graph folder (no graph.json or "
+            "graph3d.json). Build one with hts-build-graph.",
+            file=sys.stderr,
+        )
+        return 2
+
     cfg = RunConfig(
         graph_folder=str(Path(args.graph)),
         output_root=args.output_root,
@@ -146,10 +166,26 @@ def main() -> None:
     )
     out_dir = run_simulation(cfg)
     print(f"\nOutput: {out_dir}")
-    status = (out_dir / "status.json")
-    if status.exists():
-        print(status.read_text(encoding="utf-8"))
+    status_path = out_dir / "status.json"
+    if not status_path.exists():
+        print("error: the run wrote no status.json", file=sys.stderr)
+        return 1
+    text = status_path.read_text(encoding="utf-8")
+    print(text)
+    # The runner reports failure INSIDE the status file rather than by raising,
+    # so the exit code has to be derived from it. Without this, every run exited
+    # 0 -- a crashed overnight job was indistinguishable from a completed one,
+    # and a batch script would carry on to the next stage regardless.
+    try:
+        verdict = str(json.loads(text).get("status", ""))
+    except ValueError:
+        print("error: status.json is not valid JSON", file=sys.stderr)
+        return 1
+    if verdict != "completed":
+        print(f"error: run did not complete ({verdict})", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
