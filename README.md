@@ -64,8 +64,11 @@ immediately without waiting for anything to shut down. Detached headless runs ar
 not affected either way -- they are launched into their own process group so that
 closing the app, or losing the terminal, does not take a multi-hour run with it.
 
-Five tabs: `3D Octree Graph Editor`, `2D Network Graph`,
+Six tabs: `Build Graph`, `3D Octree Graph Editor`, `2D Network Graph`,
 `Heat Transfer Simulation`, `Thermal Validation`, and `Headless Run`.
+
+`Ctrl+F` searches every control in the window by name and goes to it; `F1`
+opens the tutorials, which start with building a graph.
 
 The visualizer loads octree `graph.json` folders and legacy `graph3d.json`
 folders. In octree mode, geometry and topology are read-only: select cells in

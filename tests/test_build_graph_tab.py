@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 import textwrap
 
 import pytest
@@ -59,6 +60,11 @@ def _run(body: str) -> str:
 
 def _skip(output: str) -> bool:
     return output.startswith("SKIP")
+
+
+def tmp_dir() -> str:
+    """A scratch directory for a body that runs in a subprocess."""
+    return tempfile.mkdtemp(prefix="hts-build-tab-")
 
 
 # --------------------------------------------------------------------------- #
@@ -473,3 +479,94 @@ def test_the_mouse_wheel_does_not_retune_the_build() -> None:
     if _skip(output):
         pytest.skip(output)
     assert output == "max_depth=unchanged min_cell_size_mm=unchanged", output
+
+
+# --------------------------------------------------------------------------- #
+# Failing usefully
+# --------------------------------------------------------------------------- #
+def test_a_failed_build_shows_what_the_builder_said() -> None:
+    """The builder's output used to go to DEVNULL, and a failure before it opened
+    its own conversion.log -- a missing dependency, a rejected flag -- was
+    reported as a bare exit code beside an empty panel."""
+    output = _run(
+        """
+        from graph_visualizer.build_graph_tab import BUILD_OUTPUT_LOG
+        tab = make()
+        folder = Path("%s")
+        tab._output_folder = folder
+        tab._stderr_path = folder / BUILD_OUTPUT_LOG
+        tab._stderr_path.write_text(
+            "SystemExit: needs pythonocc-core (OpenCASCADE)", encoding="utf-8"
+        )
+
+        class Done:
+            returncode = 1
+            def poll(self): return 1
+
+        tab.process = Done()
+        tab._poll()
+        print("PANEL", "pythonocc-core" in tab.log_view.toPlainText())
+        print("STATUS", tab.status_label.text())
+        print("MESSAGE", MESSAGES[-1][0])
+        """
+        % str(tmp_dir()).replace("\\", "\\\\")
+    )
+    if _skip(output):
+        pytest.skip(output)
+    assert "PANEL True" in output, output
+    assert "Build failed (exit 1)" in output
+    assert "shown on the right" in output, "the message still points at an empty file"
+
+
+def test_a_failure_with_no_output_at_all_still_says_where_to_look() -> None:
+    output = _run(
+        """
+        tab = make()
+        tab._output_folder = Path("graphs/never")
+        tab._stderr_path = None
+
+        class Done:
+            returncode = 3
+            def poll(self): return 3
+
+        tab.process = Done()
+        tab._poll()
+        print("MESSAGE", MESSAGES[-1][0])
+        """
+    )
+    if _skip(output):
+        pytest.skip(output)
+    assert "conversion.log" in output, output
+
+
+def test_the_tab_says_up_front_when_it_cannot_build_at_all() -> None:
+    """A pip-only install is the documented lighter install and cannot read STEP.
+    Finding that out from a click that fails in a second reads as a broken app."""
+    import importlib.util
+
+    from graph_visualizer.build_graph_tab import opencascade_missing
+
+    expected = importlib.util.find_spec("OCC") is None
+    assert opencascade_missing() is expected
+
+    output = _run(
+        """
+        from graph_visualizer.build_graph_tab import opencascade_missing
+        tab = make()
+        shown = tab.occ_warning is not None and bool(tab.occ_warning.text())
+        print("MISSING", opencascade_missing(), "WARNED", shown)
+        """
+    )
+    if _skip(output):
+        pytest.skip(output)
+    missing, warned = output.split()[1], output.split()[3]
+    assert missing == warned, (
+        f"the warning and the actual availability disagree: {output}"
+    )
+    if missing == "True":
+        assert "conda" in _run(
+            """
+            tab = make()
+            print(tab.occ_warning.text())
+            """
+        ), "the warning does not say how to fix it"

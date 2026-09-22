@@ -17,6 +17,7 @@ no geometry itself and only tails the log the builder writes.
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
 import subprocess
 import sys
 from typing import Any
@@ -45,6 +46,25 @@ from .ui_theme import (
 BUILDER_MODULE = "octree_graph.cli"
 #: The builder writes this into the output folder; it is the whole progress story.
 CONVERSION_LOG = "conversion.log"
+#: Whatever the builder wrote to stdout/stderr. The builder's own conversion.log
+#: only exists once it gets that far, so a failure BEFORE then -- a missing
+#: dependency, a bad flag, an unreadable STEP -- would otherwise be discarded
+#: and reported as a bare exit code with an empty panel.
+BUILD_OUTPUT_LOG = "build_output.log"
+
+
+def opencascade_missing() -> bool:
+    """Is the STEP reader unavailable in this environment?
+
+    find_spec rather than an import: importing OCC costs about a second and
+    loads a large native library, and this runs while the window is being built.
+    """
+    try:
+        return importlib.util.find_spec("OCC") is None
+    except (ImportError, ValueError):
+        # A broken or partially removed install: treat as missing, which is the
+        # answer that produces the useful message.
+        return True
 
 
 class BuildGraphTab:
@@ -71,6 +91,7 @@ class BuildGraphTab:
         self._auto_graph_name = ""
         self._log_size = 0
         self._output_folder: Path | None = None
+        self._stderr_path: Path | None = None
 
         self.widget = self.QtWidgets.QWidget(parent)
         self._build_layout()
@@ -101,6 +122,25 @@ class BuildGraphTab:
             "appears below.",
         )
         form.addRow(intro)
+
+        # Said once, up front. Without OpenCASCADE the builder refuses in about a
+        # second, and the click that finds this out looks like the app is broken
+        # rather than like the environment is missing a dependency pip cannot
+        # supply. A pip-only install lands here, which is the documented install.
+        if opencascade_missing():
+            self.occ_warning = wrapping_label(
+                self.QtCore,
+                self.QtWidgets,
+                "Building needs OpenCASCADE (pythonocc-core), which is not "
+                "installed here. It has no pip wheel, so pip cannot provide it -- "
+                "create the conda environment from environment.yml to build "
+                "graphs. Everything else in the app (simulating existing graphs, "
+                "validation, controller export) works without it.",
+            )
+            self.occ_warning.setStyleSheet("color: #b00020; font-weight: 600;")
+            form.addRow(self.occ_warning)
+        else:
+            self.occ_warning = None
 
         source_box, source_form = self._section("Source")
         form.addRow(source_box)
@@ -353,6 +393,7 @@ class BuildGraphTab:
         output_root = Path(self.output_root_input.text().strip() or "graphs")
         self._output_folder = output_root / graph_name
         self._output_folder.mkdir(parents=True, exist_ok=True)
+        self._stderr_path = self._output_folder / BUILD_OUTPUT_LOG
         self._log_size = 0
         self.log_view.clear()
 
@@ -366,14 +407,20 @@ class BuildGraphTab:
                 creation = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
                     subprocess, "DETACHED_PROCESS", 0
                 )
-            self.process = subprocess.Popen(  # noqa: S603
-                command,
-                cwd=str(Path.cwd()),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                creationflags=creation,
-            )
+            # Closed again immediately: Popen gives the child its own duplicate
+            # of the handle, so the parent holding it open buys nothing.
+            capture = open(self._stderr_path, "wb")
+            try:
+                self.process = subprocess.Popen(  # noqa: S603
+                    command,
+                    cwd=str(Path.cwd()),
+                    stdout=capture,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    creationflags=creation,
+                )
+            finally:
+                capture.close()
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
             self._status(f"Could not start the build: {exc}", True)
             self.process = None
@@ -422,11 +469,32 @@ class BuildGraphTab:
                     pass
         else:
             self.status_label.setText(f"Build failed (exit {code}).")
+            said = self._captured_output()
+            if said:
+                self.log_view.appendPlainText(
+                    f"\n--- the builder exited {code} and said: ---\n{said}"
+                )
             self._status(
-                f"Build failed (exit {code}); the reason is at the end of "
-                f"{CONVERSION_LOG}, shown on the right.",
+                f"Build failed (exit {code}); what it said is shown on the right."
+                if said
+                else f"Build failed (exit {code}); see {CONVERSION_LOG} on the right.",
                 True,
             )
+
+    def _captured_output(self) -> str:
+        """The tail of what the builder printed, for a failure worth explaining.
+
+        Bounded, because a traceback is short but a runaway warning loop is not,
+        and this goes straight into a widget.
+        """
+        path = self._stderr_path
+        if path is None or not path.exists():
+            return ""
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+        return text[-4000:]
 
     def _tail_log(self) -> None:
         """Append whatever the builder has written since the last poll.

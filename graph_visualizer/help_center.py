@@ -14,6 +14,8 @@ month -- this repo's own module README claimed five tabs were two.
 
 from __future__ import annotations
 
+import re
+
 from typing import Any
 
 from .help_search import TUTORIALS, HelpTarget, Tutorial, search, tutorial_by_key
@@ -76,9 +78,28 @@ class HelpCenter:
                 targets.extend(self._targets_from_rows(describe(), title, tab_index))
                 continue
             panel = getattr(panel_owner, "panel", None)
-            if panel is None:
+            if panel is not None:
+                targets.extend(self._targets_from_panel(panel, title, tab_index))
                 continue
-            targets.extend(self._targets_from_panel(panel, title, tab_index))
+            # Neither shape: read the forms Qt actually built. The Thermal
+            # Validation tab is this case, and was a search dead end without it.
+            targets.extend(self._targets_from_forms(panel_owner, title, tab_index))
+
+        # The 3D editor and the 2D view share the WINDOW's left panel, which is
+        # not a tab attribute, so nothing above reaches it. It holds Load Graph,
+        # the filters and the node search -- the controls a first-time user is
+        # most likely to go hunting for. Attributed to the editor tab, which is
+        # where switching to it puts the panel on screen.
+        editor = getattr(self.app, "three_d_tab", None)
+        left = getattr(self.app, "left_scroll", None)
+        if editor is not None and left is not None:
+            editor_index = tabs.indexOf(editor)
+            if editor_index >= 0:
+                targets.extend(
+                    self._targets_from_forms(
+                        _SharedLeftPanel(left), tabs.tabText(editor_index), editor_index
+                    )
+                )
         return targets
 
     def _panel_owners(self) -> list[tuple[int, Any]]:
@@ -116,6 +137,72 @@ class HelpCenter:
             section = str(section_titles.get(row_sections.get(key, ""), ""))
             described.append((key, label, section, widget))
         return self._targets_from_rows(described, tab_title, tab_index)
+
+    def _targets_from_forms(self, owner: Any, tab_title: str, tab_index: int) -> list[HelpTarget]:
+        """Harvest a hand-built tab's controls out of its real Qt form layouts.
+
+        The Thermal Validation tab keeps its widgets in an ``inputs`` dict and
+        passes each label straight to addRow, so there is no table of labels to
+        walk. Qt kept them, though, and labelForField hands them back -- so the
+        tab needs no bookkeeping of its own to be searchable.
+
+        Keys come from ``inputs`` where a widget is in it, so a tutorial can name
+        a row; otherwise from the label, which is stable enough for search.
+        """
+        widgets = getattr(self.app, "QtWidgets", None)
+        scroll = getattr(owner, "controls_scroll", None)
+        if widgets is None or scroll is None:
+            return []
+        try:
+            root = scroll.widget()
+            forms = root.findChildren(widgets.QFormLayout)
+        except Exception:  # noqa: BLE001 - a stub, or a tab with no forms
+            return []
+        keyed = {id(widget): key for key, widget in (getattr(owner, "inputs", None) or {}).items()}
+        rows: list[tuple[str, str, str, Any]] = []
+        seen: set[int] = set()
+        for form in forms:
+            for row in range(form.rowCount()):
+                widget, label = _form_row(form, row, widgets)
+                if widget is None or id(widget) in seen:
+                    continue
+                label = label or _widget_text(widget)
+                if not label:
+                    continue
+                seen.add(id(widget))
+                rows.append(
+                    (
+                        keyed.get(id(widget)) or _slug(label),
+                        label,
+                        _enclosing_group_title(widget, widgets),
+                        widget,
+                    )
+                )
+
+        # Buttons and checkboxes put in plain box layouts are not form rows, so
+        # the walk above cannot see them -- and they are most of what a user
+        # hunts for by name ("Load Graph", "Reassign Materials"). They carry
+        # their own text, which is exactly the label to index them under.
+        try:
+            clickable = root.findChildren(widgets.QAbstractButton)
+        except Exception:  # noqa: BLE001
+            clickable = []
+        for widget in clickable:
+            if id(widget) in seen:
+                continue
+            label = _widget_text(widget)
+            if not label:
+                continue
+            seen.add(id(widget))
+            rows.append(
+                (
+                    keyed.get(id(widget)) or _slug(label),
+                    label,
+                    _enclosing_group_title(widget, widgets),
+                    widget,
+                )
+            )
+        return self._targets_from_rows(rows, tab_title, tab_index)
 
     def _targets_from_rows(
         self, rows: Any, tab_title: str, tab_index: int
@@ -337,6 +424,73 @@ def _is_readout(widget: Any) -> bool:
         if klass.__name__ in {"QLabel", "QProgressBar"}:
             return True
     return False
+
+
+class _SharedLeftPanel:
+    """The window's left panel, in the shape :meth:`_targets_from_forms` reads.
+
+    It has no ``inputs`` dict, so its rows are keyed by label -- fine for search,
+    and a tutorial that needs to name one of these can be given a real key then.
+    """
+
+    inputs: dict[str, Any] = {}
+
+    def __init__(self, scroll: Any) -> None:
+        self.controls_scroll = scroll
+
+
+def _form_row(form: Any, row: int, widgets: Any) -> tuple[Any, str]:
+    """The field widget and its label text for one QFormLayout row.
+
+    A row added as ``addRow(widget)`` spans both columns and has no label; its
+    own text (a checkbox's or a button's) stands in for one.
+    """
+    roles = getattr(widgets.QFormLayout, "ItemRole", widgets.QFormLayout)
+    widget = None
+    for role_name in ("FieldRole", "SpanningRole"):
+        role = getattr(roles, role_name, None)
+        if role is None:
+            continue
+        try:
+            item = form.itemAt(row, role)
+        except Exception:  # noqa: BLE001
+            continue
+        if item is not None and item.widget() is not None:
+            widget = item.widget()
+            break
+    if widget is None:
+        return None, ""
+    label = ""
+    try:
+        label_item = form.itemAt(row, getattr(roles, "LabelRole"))
+        if label_item is not None and label_item.widget() is not None:
+            label = _widget_text(label_item.widget())
+    except Exception:  # noqa: BLE001
+        pass
+    return widget, label
+
+
+def _enclosing_group_title(widget: Any, widgets: Any, limit: int = 8) -> str:
+    """The title of the group box a control sits in, for context in a result."""
+    node = widget
+    for _ in range(limit):
+        try:
+            node = node.parentWidget()
+        except Exception:  # noqa: BLE001
+            return ""
+        if node is None:
+            return ""
+        if isinstance(node, widgets.QGroupBox):
+            try:
+                return str(node.title())
+            except Exception:  # noqa: BLE001
+                return ""
+    return ""
+
+
+def _slug(label: str) -> str:
+    """A row key for a control that never had one."""
+    return re.sub(r"[^a-z0-9]+", "_", label.strip().lower()).strip("_") or "row"
 
 
 def _is_visible(widget: Any) -> bool:
