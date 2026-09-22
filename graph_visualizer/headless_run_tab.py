@@ -47,6 +47,24 @@ from .simulation_runner import STOP_REQUEST_FILENAME
 DEFAULT_SETPOINT_K = 293.15
 
 
+def _recorded_artifact_name(raw: Any) -> str:
+    r"""Trailing component of a recorded path, whatever separator produced it.
+
+    ``Path().name`` is separator-aware per PLATFORM, not per path. On POSIX a
+    backslash is an ordinary filename character, so a Windows-recorded
+    ``C:\Users\x\sys_id\G_exact_T50K`` comes back whole instead of as
+    ``G_exact_T50K`` -- and the name match this exists for cannot possibly
+    succeed. Matching across machines is the entire point of matching by name,
+    and Windows-to-Linux is the common direction, because the runs are produced
+    on Windows.
+
+    Handling both separators explicitly is correct in both directions: Windows
+    already accepts a forward slash, so only the POSIX side was ever broken.
+    """
+    text = str(raw or "").replace("\\", "/").rstrip("/")
+    return text.rsplit("/", 1)[-1] if text else ""
+
+
 class HeadlessRunTab:
     """Configure + launch + monitor a headless simulation (no graph in memory)."""
 
@@ -1581,14 +1599,14 @@ class HeadlessRunTab:
             config.get("controller_path") or "",
         ):
             if candidate:
-                wanted = Path(str(candidate)).name
+                wanted = _recorded_artifact_name(candidate)
                 break
         if not wanted:
             return False
         for index in range(combo.count()):
             data = combo.itemData(index)
             path = data[1] if isinstance(data, (tuple, list)) and len(data) > 1 else ""
-            if path and Path(str(path)).name == wanted:
+            if path and _recorded_artifact_name(path) == wanted:
                 combo.setCurrentIndex(index)
                 return True
         self._status(

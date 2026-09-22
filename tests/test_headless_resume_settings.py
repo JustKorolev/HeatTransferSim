@@ -13,6 +13,8 @@ The fixtures mirror a real run directory on this machine (simulation_parameters
 from __future__ import annotations
 
 import json
+
+import pytest
 from dataclasses import replace
 from pathlib import Path
 
@@ -162,10 +164,29 @@ def test_the_intervals_come_from_the_config(tmp_path) -> None:
     assert tab.checkpoint_spin.value() == 600.0
 
 
-def test_the_controller_is_matched_by_name_not_by_path(tmp_path) -> None:
+WINDOWS_RECORDED = (
+    "C:" + chr(92) + "Users" + chr(92) + "someone-else" + chr(92) + "graphs"
+    + chr(92) + "g" + chr(92) + "sys_id" + chr(92) + "G_exact_T50K"
+)
+POSIX_RECORDED = "/home/someone-else/graphs/g/sys_id/G_exact_T50K"
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [WINDOWS_RECORDED, POSIX_RECORDED],
+    ids=["recorded-on-windows", "recorded-on-posix"],
+)
+def test_the_controller_is_matched_by_name_not_by_path(tmp_path, recorded) -> None:
     """A run's recorded path is the path on the machine that produced it, so matching
-    literally fails for every run copied off that machine."""
-    tab, _ = _tab(tmp_path, controller=r"C:\\Users\\someone-else\\graphs\\g\\sys_id\\G_exact_T50K")
+    literally fails for every run copied off that machine.
+
+    Both separator styles are exercised because ``Path().name`` is separator-aware
+    per PLATFORM, not per path: a backslash is an ordinary filename character on
+    POSIX, so a Windows-recorded path came back whole and matched nothing. Testing
+    only the local style meant this passed on Windows and failed on Linux -- which
+    is exactly the cross-machine resume the feature exists for.
+    """
+    tab, _ = _tab(tmp_path, controller=recorded)
     local = tmp_path / "sys_id" / "G_exact_T50K"
     tab.controller_scheme_combo.addItem("(none)", ("none", ""))
     tab.controller_scheme_combo.addItem("MIMO PI - G_exact_T50K", ("mimo_pi", str(local)))
@@ -247,3 +268,26 @@ def test_switching_to_a_different_run_does_load(tmp_path) -> None:
     tab.resume_combo.setCurrentIndex(2)
     tab.load_resume_run_settings()
     assert tab.panel.mimo_pi_kp_spin.value() == 9.0
+
+
+def test_the_name_helper_is_separator_agnostic() -> None:
+    """Pins the contract directly, and documents the trap it avoids.
+
+    PurePosixPath gives POSIX semantics on EVERY platform, so the first assertion
+    shows what plain Path() does on Linux: a backslash is an ordinary filename
+    character, and the whole recorded path comes back as the "name".
+
+    Note that no test running on Windows can fail if this regresses -- Windows
+    Path() accepts both separators, so it papers over the bug. The Linux CI job is
+    the only thing that actually guards this, which is the argument for having it.
+    """
+    from pathlib import PurePosixPath
+
+    from graph_visualizer.headless_run_tab import _recorded_artifact_name
+
+    assert PurePosixPath(WINDOWS_RECORDED).name == WINDOWS_RECORDED, (
+        "premise changed: POSIX now splits on backslash"
+    )
+    assert _recorded_artifact_name(WINDOWS_RECORDED) == "G_exact_T50K"
+    assert _recorded_artifact_name(POSIX_RECORDED) == "G_exact_T50K"
+    assert _recorded_artifact_name(WINDOWS_RECORDED) == _recorded_artifact_name(POSIX_RECORDED)
