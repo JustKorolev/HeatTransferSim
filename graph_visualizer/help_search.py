@@ -196,6 +196,102 @@ class Tutorial:
 #: of describing where it is and hoping.
 TUTORIALS: tuple[Tutorial, ...] = (
     Tutorial(
+        key="build_graph",
+        title="Build a graph from CAD",
+        summary="Turn a STEP assembly into the thermal graph everything else runs on.",
+        steps=(
+            TutorialStep(
+                title="Put the assembly in meshes/",
+                body=(
+                    "Each assembly is its own folder under meshes/, holding one STEP "
+                    "file (.step or .stp) and a Materials.xlsx naming the material of "
+                    "every solid. STEP is the only input format: it carries solids, so "
+                    "the octree can fill them.\n\n"
+                    "meshes/step_test ships with the app, so there is something to "
+                    "build before you have exported anything. Rescan picks up a folder "
+                    "you added while the app was open."
+                ),
+                target_key="build_assembly_folder",
+            ),
+            TutorialStep(
+                title="Name the output",
+                body=(
+                    "The graph is written to <output root>/<graph name>/, and an "
+                    "existing graph of that name is OVERWRITTEN. Name variants -- "
+                    "coarse, medium, fine -- rather than rebuilding over a graph you "
+                    "have already run against."
+                ),
+                target_key="build_graph_name",
+            ),
+            TutorialStep(
+                title="Decide the resolution first",
+                body=(
+                    "Minimum cell size is the floor on spatial resolution and the "
+                    "dominant control on cost: halving it can multiply the cells by "
+                    "eight, and both build time and memory follow the cell count.\n\n"
+                    "Start coarse. A 20 mm floor on an unfamiliar assembly finishes in "
+                    "minutes and tells you whether the materials, contacts and roles "
+                    "came out right -- worth far more than a fine build of the wrong "
+                    "thing. Max leaf cells is the guard that aborts a runaway build "
+                    "instead of exhausting memory."
+                ),
+                target_key="min_cell_size_mm",
+            ),
+            TutorialStep(
+                title="Tessellation, and where the time goes",
+                body=(
+                    "Deflection is how far the triangles may deviate from the true "
+                    "B-rep surface. The whole build scales with triangle count, so this "
+                    "is the second knob to respect -- and the one most often set far "
+                    "finer than the cell size can make use of.\n\n"
+                    "Voxel workers classify cells in parallel. Each worker gets its own "
+                    "COPY of the triangle data, so more workers cost memory as well as "
+                    "cores; the memory fraction is what bounds how many actually start."
+                ),
+                target_key="step_deflection_mm",
+            ),
+            TutorialStep(
+                title="Contact detection is the thermal decision",
+                body=(
+                    "This one setting decides which conduction paths exist at all. Too "
+                    "small and nominally mating faces are left thermally disconnected; "
+                    "too large and parts across a deliberate air gap are welded "
+                    "together. Neither shows up as an error -- both show up as a plant "
+                    "that behaves nothing like the hardware.\n\n"
+                    "Check it against the assembly's real tolerances rather than "
+                    "accepting the default."
+                ),
+                target_key="contact_detection_distance_mm",
+            ),
+            TutorialStep(
+                title="Name the heaters and sensors",
+                body=(
+                    "Components become heaters and sensors by SUBSTRING match on their "
+                    "name in the CAD, not by pattern. Separate several with commas.\n\n"
+                    "Leave the heater field blank and the graph has no heaters, so there "
+                    "is nothing for a controller to drive; leave the sensor field blank "
+                    "and there is nothing to regulate. If a build produces a graph you "
+                    "cannot control, this is the first thing to check."
+                ),
+                target_key="heater_name_substring",
+            ),
+            TutorialStep(
+                title="Build, and watch the log",
+                body=(
+                    "The exact command is shown above the button -- this tab is a front "
+                    "end for build_octree_graph.py, so you can copy the command to a "
+                    "bigger machine or into a batch script.\n\n"
+                    "The builder runs as a separate, detached process: it survives "
+                    "closing the app, and a crash in it cannot take the app down. "
+                    "Progress is tailed from the build's own conversion.log. When it "
+                    "finishes, the graph appears in the dropdown on the Heat Transfer "
+                    "Simulation tab."
+                ),
+                target_key="build_start",
+            ),
+        ),
+    ),
+    Tutorial(
         key="first_run",
         title="Run your first simulation",
         summary="Load a graph, initialize it, and play it with the controller in the loop.",
@@ -204,8 +300,8 @@ TUTORIALS: tuple[Tutorial, ...] = (
                 title="Pick a graph",
                 body=(
                     "On the Heat Transfer Simulation tab, choose a folder from the graph "
-                    "dropdown. Graphs live in graphs/ and are built from CAD by "
-                    "build_octree_graph.py -- the app does not create them.\n\n"
+                    "dropdown. Graphs live in graphs/. If the dropdown is empty, build one "
+                    "first on the Build Graph tab -- see the 'Build a graph from CAD' tutorial.\n\n"
                     "Node count is shown as it loads. Anything above about 250,000 cells "
                     "will warn you before it tries to draw itself."
                 ),

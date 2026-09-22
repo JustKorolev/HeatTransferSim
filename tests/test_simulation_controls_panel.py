@@ -76,6 +76,12 @@ class _Widget:
     def isVisible(self) -> bool:
         return self.visible
 
+    def isHidden(self) -> bool:
+        """Qt's own distinction: hidden in its own right, vs. merely off screen
+        because an ancestor is (a background tab page, say). The help index asks
+        this one, so the stub has to answer it."""
+        return not self.visible
+
     def parentWidget(self):
         return None
 

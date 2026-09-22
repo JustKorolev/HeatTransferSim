@@ -24,11 +24,21 @@ from typing import Any
 from .build_graph_params import (
     BUILD_FIELDS,
     MESH_ROOT,
+    ROW_ASSEMBLY_FOLDER,
+    ROW_GRAPH_NAME,
+    ROW_OUTPUT_ROOT,
+    ROW_START,
+    ROW_STOP,
     build_argv,
     default_values,
     step_folders,
 )
-from .ui_theme import configure_double_spin, widen_decimals_for, wrapping_label
+from .ui_theme import (
+    SPIN_MAX_WIDTH,
+    configure_double_spin,
+    widen_decimals_for,
+    wrapping_label,
+)
 
 #: The builder, invoked as a module so it resolves from a wheel as well as a
 #: checkout (see graph_visualizer.cli for why a script path does not).
@@ -56,6 +66,9 @@ class BuildGraphTab:
         self._mesh_root = mesh_root or (lambda: Path.cwd() / MESH_ROOT)
         self.process: subprocess.Popen | None = None
         self.inputs: dict[str, Any] = {}
+        #: The graph name this tab filled in, so an edit by the user can be told
+        #: apart from a name still tracking the selected folder.
+        self._auto_graph_name = ""
         self._log_size = 0
         self._output_folder: Path | None = None
 
@@ -185,10 +198,17 @@ class BuildGraphTab:
             widget.textChanged.connect(self._refresh_command)
             return widget
         if field.kind == "int":
-            widget = self.QtWidgets.QSpinBox()
+            class _NoWheelSpinBox(self.QtWidgets.QSpinBox):
+                def wheelEvent(inner_self, event: Any) -> None:  # noqa: N802 - Qt name
+                    # Scrolling the sidebar must not silently retune the build.
+                    # The float boxes here, and every other panel, refuse this.
+                    event.ignore()
+
+            widget = _NoWheelSpinBox()
             widget.setRange(int(field.minimum), int(min(field.maximum, 2_147_483_647)))
             widget.setSingleStep(int(field.step) or 1)
             widget.setValue(int(field.default))
+            widget.setMaximumWidth(SPIN_MAX_WIDTH)  # as configure_double_spin does
             widget.valueChanged.connect(self._refresh_command)
             return widget
 
@@ -256,8 +276,14 @@ class BuildGraphTab:
                 "material, so the conductances will not describe your assembly"
             )
         self.source_info.setText(". ".join(parts) + ".")
-        if not self.graph_name_input.text().strip():
-            self.graph_name_input.setText(name.upper())
+        # Follow the folder while the name is still the one this tab filled in,
+        # and stop the moment the user types their own. Leaving the previous
+        # folder's name behind is quietly wrong: the build runs on the assembly
+        # shown here but lands in a graph named after the one before it.
+        current = self.graph_name_input.text().strip()
+        if not current or current == self._auto_graph_name:
+            self._auto_graph_name = name.upper()
+            self.graph_name_input.setText(self._auto_graph_name)
         self._refresh_command()
 
     # -- the command --------------------------------------------------------- #
@@ -276,6 +302,32 @@ class BuildGraphTab:
             self.output_root_input.text().strip() or "graphs",
             values,
         )
+
+    # -- help index --------------------------------------------------------- #
+    def help_targets(self) -> list[tuple[str, str, str, Any]]:
+        """``(row key, label, section, widget)`` for everything searchable here.
+
+        The help index walks ``panel._rows`` for the tabs built from a
+        SimulationControlsPanel; this tab builds its own form, so it answers for
+        itself. Without this, the only findable thing on the tab was the tab.
+
+        The three source rows are prefixed ``build_`` because a tutorial's "show
+        me" resolves a bare row key against the first tab offering it, and this
+        tab is first -- ``graph_name`` here must not shadow a simulation row.
+        """
+        rows: list[tuple[str, str, str, Any]] = [
+            (ROW_ASSEMBLY_FOLDER, "assembly folder", "Source", self.folder_combo),
+            (ROW_GRAPH_NAME, "graph name", "Source", self.graph_name_input),
+            (ROW_OUTPUT_ROOT, "output root", "Source", self.output_root_input),
+        ]
+        for title, fields in BUILD_FIELDS:
+            for field in fields:
+                widget = self.inputs.get(field.dest)
+                if widget is not None:
+                    rows.append((field.dest, field.label, title, widget))
+        rows.append((ROW_START, "Build Graph", "Build", self.build_button))
+        rows.append((ROW_STOP, "Stop", "Build", self.stop_button))
+        return rows
 
     def _refresh_command(self, *_: Any) -> None:
         if not hasattr(self, "command_view"):

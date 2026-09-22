@@ -159,9 +159,14 @@ def test_every_tutorial_step_that_points_at_a_control_points_at_a_real_one() -> 
     )
     import test_simulation_controls_panel as stub
 
+    from graph_visualizer.build_graph_params import help_row_keys
+
     panel = SimulationControlsPanel(stub._QtStub, mode=MODE_LIVE)
     panel.build(stub.QFormLayout())
-    known = set(panel._rows)
+    # Two kinds of tab contribute rows: the panel-backed ones, and the Build
+    # Graph tab, which answers for itself via help_targets(). Both are fair game
+    # for a tutorial step, so both have to be known here.
+    known = set(panel._rows) | help_row_keys()
 
     missing = [
         (t.key, step.target_key)

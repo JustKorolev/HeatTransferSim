@@ -69,6 +69,12 @@ class HelpCenter:
 
         for tab_index, panel_owner in self._panel_owners():
             title = tabs.tabText(tab_index) if tab_index < tabs.count() else ""
+            # A tab whose controls are not a SimulationControlsPanel describes
+            # itself. Without this the Build Graph tab contributed only the tab.
+            describe = getattr(panel_owner, "help_targets", None)
+            if callable(describe):
+                targets.extend(self._targets_from_rows(describe(), title, tab_index))
+                continue
             panel = getattr(panel_owner, "panel", None)
             if panel is None:
                 continue
@@ -100,24 +106,42 @@ class HelpCenter:
         row_labels = getattr(panel, "_row_labels", None) or {}
         row_sections = getattr(panel, "_row_sections", None) or {}
         section_titles = getattr(panel, "_section_titles", None) or {}
-        out: list[HelpTarget] = []
+        described: list[tuple[str, str, str, Any]] = []
         for key, entry in rows.items():
             try:
                 _form, widget = entry
+            except (TypeError, ValueError):
+                continue
+            label = str(row_labels.get(key) or "") or _widget_text(widget) or key.replace("_", " ")
+            section = str(section_titles.get(row_sections.get(key, ""), ""))
+            described.append((key, label, section, widget))
+        return self._targets_from_rows(described, tab_title, tab_index)
+
+    def _targets_from_rows(
+        self, rows: Any, tab_title: str, tab_index: int
+    ) -> list[HelpTarget]:
+        """Turn ``(row key, label, section, widget)`` tuples into targets.
+
+        This is the shape a tab returns from ``help_targets()``, and what the
+        panel walk above reduces to, so both kinds of tab are indexed by exactly
+        the same rules -- including the visibility check.
+        """
+        out: list[HelpTarget] = []
+        for row in rows or ():
+            try:
+                key, label, section, widget = row
             except (TypeError, ValueError):
                 continue
             # A hidden row belongs to the other tab's mode. Offering it would send
             # the user to a control that is not on screen, which reads as a bug.
             if not _is_visible(widget):
                 continue
-            label = str(row_labels.get(key) or "") or _widget_text(widget) or key.replace("_", " ")
-            section_key = row_sections.get(key, "")
             out.append(
                 HelpTarget(
                     key=f"{tab_index}:{key}",
-                    label=label,
+                    label=str(label) or str(key).replace("_", " "),
                     tab=tab_title,
-                    section=str(section_titles.get(section_key, "")),
+                    section=str(section),
                     tooltip=_widget_tooltip(widget),
                     keywords=_row_keywords(key),
                     tab_index=tab_index,
@@ -316,14 +340,21 @@ def _is_readout(widget: Any) -> bool:
 
 
 def _is_visible(widget: Any) -> bool:
-    for name in ("isVisible", "isVisibleTo"):
-        method = getattr(widget, name, None)
-        if method is None:
-            continue
+    """Would this row be on screen with its own tab open?
+
+    isHidden(), deliberately, and not isVisible(). Qt reports isVisible() False
+    for an ordinary control sitting on a tab the user is not currently looking
+    at, so asking that dropped every control outside the open tab from the
+    index -- which is exactly what someone searches for. isHidden() is true only
+    for a row hidden in its own right, which is what "the other mode owns this
+    one" means, so it is the question actually being asked here.
+    """
+    method = getattr(widget, "isHidden", None)
+    if callable(method):
         try:
-            return bool(method()) if name == "isVisible" else True
+            return not bool(method())
         except Exception:  # noqa: BLE001
-            continue
+            pass
     return bool(getattr(widget, "visible", True))
 
 

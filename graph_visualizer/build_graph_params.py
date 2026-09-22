@@ -222,6 +222,34 @@ BUILD_FIELDS: tuple[tuple[str, tuple[BuildField, ...]], ...] = (
 )
 
 
+#: Row keys for the tab's own controls -- the ones that are not BUILD_FIELDS.
+#: Prefixed ``build_``, because a tutorial's "Show me" resolves a bare row key
+#: against the first tab that offers it and this tab is first: an unprefixed
+#: ``graph_name`` here would shadow the simulation panel's row of that name.
+ROW_ASSEMBLY_FOLDER = "build_assembly_folder"
+ROW_GRAPH_NAME = "build_graph_name"
+ROW_OUTPUT_ROOT = "build_output_root"
+ROW_START = "build_start"
+ROW_STOP = "build_stop"
+
+EXTRA_HELP_ROWS: tuple[str, ...] = (
+    ROW_ASSEMBLY_FOLDER,
+    ROW_GRAPH_NAME,
+    ROW_OUTPUT_ROOT,
+    ROW_START,
+    ROW_STOP,
+)
+
+
+def help_row_keys() -> set[str]:
+    """Every row key the Build Graph tab offers to the help index.
+
+    One source of truth, so a tutorial step or a shadowing check cannot be
+    written against a key list that has drifted from the tab.
+    """
+    return {field.dest for field in all_fields()} | set(EXTRA_HELP_ROWS)
+
+
 def all_fields() -> tuple[BuildField, ...]:
     return tuple(field for _section, fields in BUILD_FIELDS for field in fields)
 
