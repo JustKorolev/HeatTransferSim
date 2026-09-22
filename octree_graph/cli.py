@@ -105,9 +105,21 @@ def _octree_cells_payload(leaves: list) -> list:
 
 
 def _resolve_step_path(args: argparse.Namespace) -> Path | None:
-    """Return the STEP file to build from, or None to use the GLB pipeline.
+    """The STEP file to build from.
 
-    Uses --step-file if given, else auto-detects a single .step/.stp in --mesh-dir.
+    Uses --step-file if given, else auto-detects a single .step/.stp in
+    --mesh-dir. STEP is the only input format this tool offers, so finding none
+    is an error rather than a fallback.
+
+    GLB used to be the alternative, and silently falling back to it is exactly
+    what made that a problem: a GLB export carries surfaces, not solids, so the
+    voxelizer SHELLS a part instead of filling it. CRYOSTAT_V2 was built that way
+    and its DC gain is a rank-1 ~1e9 K/W artifact of the shells -- a number that
+    looks like a plant model and is not one. Requiring STEP makes that failure
+    impossible to reach by accident.
+
+    Returns None only when GLB input was explicitly permitted (see
+    --allow-gltf-input), which is internal machinery, not a user-facing option.
     """
     explicit = getattr(args, "step_file", None)
     if explicit:
@@ -116,14 +128,27 @@ def _resolve_step_path(args: argparse.Namespace) -> Path | None:
             raise SystemExit(f"--step-file not found: {path}")
         return path
     mesh_dir = getattr(args, "mesh_dir", None)
-    if not mesh_dir:
+    candidates = (
+        [
+            candidate
+            for candidate in sorted(Path(mesh_dir).glob("*"))
+            if candidate.is_file() and candidate.suffix.lower() in (".step", ".stp")
+        ]
+        if mesh_dir
+        else []
+    )
+    if candidates:
+        return candidates[0]
+    if getattr(args, "allow_gltf_input", False):
         return None
-    candidates = [
-        candidate
-        for candidate in sorted(Path(mesh_dir).glob("*"))
-        if candidate.is_file() and candidate.suffix.lower() in (".step", ".stp")
-    ]
-    return candidates[0] if candidates else None
+    where = f" in {mesh_dir}" if mesh_dir else ""
+    raise SystemExit(
+        f"No STEP file found{where}. This builder takes STEP (.step/.stp) input: "
+        "point --mesh-dir at a folder holding one, or name it with --step-file.\n\n"
+        "STEP is required because a mesh export carries surfaces rather than "
+        "solids, so parts come out shelled instead of filled and the resulting "
+        "conductances do not describe the assembly."
+    )
 
 
 def _require_embree(args: argparse.Namespace, run_log: "RunLogger") -> None:
@@ -196,8 +221,8 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
         if not material_lookup_path:
             warnings.append(
                 "No part->material lookup found (pass --material-lookup or place materials.xlsx in the mesh "
-                "directory). Materials will be inferred from GLB appearance names only, which cannot identify "
-                "engineering materials such as Invar or fiberglass -- those components will default to "
+                "directory). Without it there is nothing to identify engineering materials such as Invar or "
+                "fiberglass by, so those components will default to "
                 f"{DEFAULT_ASSIGNED_MATERIAL_NAME}."
             )
         materials, material_warnings = load_material_table(_materials_path(args))
@@ -546,6 +571,11 @@ def build_parser() -> argparse.ArgumentParser:
         "before multiprocessing is disabled (falls back to 1 worker). Raise toward 0.9 to use more RAM; "
         "lower it if the machine thrashes. Default 0.7.",
     )
+    # Internal. The Thermal Validation tab generates its own geometry as a GLB and
+    # drives this CLI programmatically to build it, so the mesh path has to stay
+    # reachable -- but it is not an input format users are offered, for the
+    # shelling reason in _resolve_step_path. SUPPRESS keeps it out of --help.
+    parser.add_argument("--allow-gltf-input", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--materials",
         default=None,

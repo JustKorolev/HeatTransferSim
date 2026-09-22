@@ -14,8 +14,18 @@ dist/
 # Built graph folders: regenerate with build_octree_graph.py.
 graphs/
 
-# CAD exports (.glb / .step / materials.xlsx) live outside version control.
-meshes/
+# CAD assemblies live outside version control -- the real ones are hundreds of
+# megabytes, over GitHub's 100 MB per-file limit.
+#
+# EXCEPT the small sample, so a fresh clone has something to build from. Written
+# as "exclude the CONTENTS" rather than "exclude the directory": git cannot
+# re-include a path inside an excluded directory, so `meshes/` followed by a
+# negation would silently do nothing.
+meshes/*
+!meshes/step_test/
+meshes/step_test/*
+!meshes/step_test/HISPEC_FEA.STEP
+!meshes/step_test/Materials.xlsx
 
 # Run outputs. Every headless/live run writes a timestamped folder here with
 # series CSVs, plots and multi-MB .npz checkpoints. They are reproducible from

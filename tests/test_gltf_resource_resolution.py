@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from octree_graph.cli import build_parser, _resolve_gltf_path
+from octree_graph.cli import build_parser, _resolve_gltf_path, _resolve_step_path
 from octree_graph.load_gltf import (
     _PLACEHOLDER_IMAGE_URI,
     _prepare_gltf_for_load,
@@ -371,3 +371,64 @@ class TempGltfResourceUriTests(unittest.TestCase):
                 _resource_uri_for_temp_gltf(resource.resolve(), root),
                 "resources/Assembly.bin",
             )
+
+
+class StepOnlyInputTests(unittest.TestCase):
+    """STEP is the only input format offered, and the mesh path is internal.
+
+    A mesh export carries surfaces rather than solids, so the voxelizer shells a
+    part instead of filling it. CRYOSTAT_V2 was built that way and its DC gain is
+    a rank-1 ~1e9 K/W artifact of the shells -- a number that looks like a plant
+    model and is not one. Silently falling back to a mesh is what made that
+    reachable by accident, so finding no STEP is now an error.
+
+    The path itself has to stay, because the Thermal Validation tab generates its
+    own geometry as a GLB and drives this CLI to build it. That is machinery, not
+    a format choice, so it is gated behind a suppressed flag.
+    """
+
+    def test_no_step_file_is_an_error_not_a_mesh_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = build_parser().parse_args(
+                ["--mesh-dir", tmp, "--graph-name", "x"]
+            )
+            with self.assertRaises(SystemExit) as caught:
+                _resolve_step_path(args)
+            message = str(caught.exception)
+            self.assertIn("STEP", message)
+            self.assertIn("shelled", message, "the message should say WHY")
+
+    def test_a_step_file_is_found_by_extension(self) -> None:
+        for suffix in (".step", ".stp", ".STEP"):
+            with self.subTest(suffix=suffix):
+                with tempfile.TemporaryDirectory() as tmp:
+                    step = Path(tmp) / f"assembly{suffix}"
+                    step.write_text("ISO-10303-21;", encoding="utf-8")
+                    args = build_parser().parse_args(
+                        ["--mesh-dir", tmp, "--graph-name", "x"]
+                    )
+                    self.assertEqual(_resolve_step_path(args), step)
+
+    def test_the_mesh_path_stays_reachable_for_validation(self) -> None:
+        """Thermal Validation builds through the REAL octree importer; without this
+        it would fall back to its deterministic graph and stop validating the
+        production path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            args = build_parser().parse_args(
+                ["--mesh-dir", tmp, "--graph-name", "x", "--allow-gltf-input"]
+            )
+            self.assertIsNone(_resolve_step_path(args))
+
+    def test_the_mesh_escape_hatch_is_not_advertised(self) -> None:
+        """It is internal machinery, so it must not appear in --help."""
+        self.assertNotIn("allow-gltf-input", build_parser().format_help())
+
+    def test_validation_passes_the_flag(self) -> None:
+        """If this ever stops being passed, validation degrades silently to its
+        fallback graph -- a warning, not a failure, so nothing would notice."""
+        import inspect
+
+        from graph_visualizer.thermal_validation import ThermalValidationExperiment
+
+        source = inspect.getsource(ThermalValidationExperiment._build_octree_graph)
+        self.assertIn("--allow-gltf-input", source)

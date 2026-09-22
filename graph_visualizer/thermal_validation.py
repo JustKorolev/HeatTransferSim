@@ -324,6 +324,12 @@ class ThermalValidationExperiment:
         output_root = assets_dir / "graphs"
         graph_name = _safe_asset_name(self.name)
         argv = [
+            # This tab generates its own geometry as a GLB, so it needs the mesh
+            # input path the CLI no longer offers users. Building through the REAL
+            # octree importer is the point of use_octree_pipeline -- without this
+            # the tab would silently fall back to its deterministic graph and stop
+            # validating the production path at all.
+            "--allow-gltf-input",
             "--mesh-dir",
             str(assets_dir / "mesh"),
             "--materials",
