@@ -220,6 +220,40 @@ def shoot_section(
     return save(annotated, out)
 
 
+def shoot_build_graph_tab(out: Path, scale: int = 2) -> Path | None:
+    """The Build Graph tab's panel, with its source row called out.
+
+    Built from the real tab, so the parameter list and its defaults in the guide
+    are whatever the tab actually offers.
+    """
+    from graph_visualizer.build_graph_tab import BuildGraphTab
+
+    class _Qt2:
+        QtCore = QtCore
+        QtWidgets = QtWidgets
+
+    repo = Path(__file__).resolve().parent.parent
+    tab = BuildGraphTab(
+        _Qt2, None, on_status=lambda *a, **k: None, mesh_root=lambda: repo / "meshes"
+    )
+    scroll = tab.controls_scroll
+    scroll.resize(PANEL_WIDTH, 1600)
+    scroll.show()
+    QtWidgets.QApplication.processEvents()
+    inner = scroll.widget()
+    inner.setFixedWidth(PANEL_WIDTH)
+    inner.adjustSize()
+    QtWidgets.QApplication.processEvents()
+
+    pixmap = grab(inner, scale)
+    boxes = [
+        (rect_of(tab.folder_combo, inner), "assembly"),
+        (rect_of(tab.graph_name_input, inner), "name"),
+        (rect_of(tab.build_button, inner), "build"),
+    ]
+    return save(annotate(pixmap, boxes, scale), out)
+
+
 def shoot_help_dialog(out: Path, scale: int = 2) -> Path | None:
     """The help search, with a real query typed into it and real results."""
     from graph_visualizer.help_center import HelpCenter
@@ -371,6 +405,11 @@ def main() -> int:
         path = shoot_section(panel, host, section_key, rows, out_dir / filename, args.scale)
         if path is not None:
             written.append(path)
+
+    print("build_graph_tab.png")
+    path = shoot_build_graph_tab(out_dir / "build_graph_tab.png", args.scale)
+    if path is not None:
+        written.append(path)
 
     print("help_search.png")
     path = shoot_help_dialog(out_dir / "help_search.png", args.scale)

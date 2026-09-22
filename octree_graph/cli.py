@@ -151,6 +151,40 @@ def _resolve_step_path(args: argparse.Namespace) -> Path | None:
     )
 
 
+def _require_opencascade(step_path: Path) -> None:
+    """Fail with something actionable when pythonocc-core is missing.
+
+    STEP is the only input format, and reading it needs OpenCASCADE, which has no
+    pip wheel on any platform. So a pip install can simulate, validate and export
+    but cannot BUILD -- and without this check that shows up as a bare ImportError
+    from deep inside the tessellator, several seconds into a build, with the fix
+    (a different environment) nowhere in the message.
+
+    Checked before any loading, like the embreex guard above.
+    """
+    try:
+        import OCC.Core.STEPControl_Reader  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - any import failure means unusable
+        raise SystemExit(
+            "\n".join(
+                [
+                    f"Reading {step_path.name} needs pythonocc-core (OpenCASCADE), "
+                    f"which is not installed: {exc}",
+                    "",
+                    "It has no pip wheel, so pip cannot provide it. Use the conda",
+                    "environment:",
+                    "    conda env create -f environment.yml",
+                    "    conda activate heatsim",
+                    "    python -m pip install -e .",
+                    "",
+                    "A pip-only install can still simulate existing graphs, run the",
+                    "validation cases and export controllers -- it just cannot build",
+                    "a graph from CAD.",
+                ]
+            )
+        ) from exc
+
+
 def _require_embree(args: argparse.Namespace, run_log: "RunLogger") -> None:
     """Fail fast unless embreex-accelerated containment is available.
 
@@ -202,6 +236,7 @@ def _run_conversion(args: argparse.Namespace, progress: "ConsoleProgress", run_l
             # instead of shelling. Everything downstream -- ignore filters, role
             # detection, contact/radiation, multiprocessing -- runs unchanged.
             # step_scene keeps the B-rep solids for exact component-contact tests.
+            _require_opencascade(step_path)
             from .load_step import load_step_as_scene
 
             progress.phase("Loading STEP assembly (tessellating solids)")

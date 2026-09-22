@@ -7,7 +7,7 @@ flash.
 
 Three subsystems, in the order a graph moves through them:
 
-1. `octree_graph/` -- CAD (GLB or STEP) to an octree to a lumped RC graph.
+1. `octree_graph/` -- a STEP assembly to an octree to a lumped RC graph.
    Writes `graphs/<name>/` with `graph.json` plus the `C`, `L` and `G_rad`
    matrices.
 2. `graph_visualizer/` -- the application: inspect and edit the graph in 3D,
@@ -17,32 +17,38 @@ Three subsystems, in the order a graph moves through them:
 
 ## Install
 
-Needs Python 3.11 or newer. Install straight from GitHub:
+Input is **STEP** (`.step` / `.stp`), which needs OpenCASCADE. OpenCASCADE has no
+pip wheel on any platform, so conda is the install that gets you the whole
+pipeline:
+
+```powershell
+git clone https://github.com/JustKorolev/HeatTransferSim
+cd HeatTransferSim
+conda env create -f environment.yml
+conda activate heatsim
+python -m pip install -e .
+```
+
+There is a lighter pip install, which needs Python 3.11 or newer:
 
 ```powershell
 python -m pip install git+https://github.com/JustKorolev/HeatTransferSim
 ```
 
-Or from a clone, which is what you want if you intend to change anything:
+It can simulate existing graphs, run the validation cases and export
+controllers. It **cannot build a graph from CAD**, because that is the part that
+needs OpenCASCADE. The builder says so plainly rather than failing obscurely.
 
-```powershell
-git clone https://github.com/JustKorolev/HeatTransferSim
-cd HeatTransferSim
-python -m pip install -e ".[dev]"
-```
+`requirements.txt` is not how you install this either way. It pins exact versions
+for reproducing a particular run; the installs above resolve against whatever
+else is in your environment.
 
-`requirements.txt` is not how you install this. It pins exact versions for
-reproducing a particular run; the install above resolves against whatever else
-is already in your environment.
+### Why STEP only
 
-The STEP/B-rep pipeline additionally needs OpenCASCADE, which has no pip wheel
-on any platform. If you need STEP input (GLB input does not), use conda:
-
-```powershell
-conda env create -f environment.yml
-conda activate heatsim
-python -m pip install -e .
-```
+A mesh export (GLB/glTF) carries surfaces, not solids, so the voxelizer shells a
+part instead of filling it. `CRYOSTAT_V2` was built from a mesh, and its DC gain
+is a rank-1 ~1e9 K/W artifact of those shells -- a number that looks like a plant
+model and is not one. STEP carries the B-rep solids, which fill.
 
 ## Launch the application
 
@@ -92,67 +98,81 @@ The same export is on the `Export Controller Constants` button in both
 simulation tabs. It needs a gain matrix: the decoupling lives in `G`, so Kp and
 Ki alone do not define this controller.
 
-## Build an octree graph from SolidWorks GLB exports
+## Build a thermal graph from a STEP assembly
+
+The easiest way is the **Build Graph** tab, which is the first tab in the
+application: pick an assembly folder, adjust the parameters, press Build. It
+shows the exact command it will run and tails the builder's log.
+
+A sample assembly ships with the repository, so there is something to try
+immediately:
+
+```text
+meshes/step_test/HISPEC_FEA.STEP     30 named solids, 2.9 MB
+meshes/step_test/Materials.xlsx      part name -> material
+```
+
+From a shell, the same thing. These are the settings that produced the reference
+graph:
 
 ```powershell
 hts-build-graph `
-  --mesh-dir meshes\assembly_export `
-  --graph-name hispec_test_octree `
+  --mesh-dir meshes\step_test `
+  --graph-name STEP_SAMPLE `
   --output-root graphs `
-  --min-cell-size-mm 5 `
-  --max-cell-size-mm 50 `
-  --max-depth 8 `
-  --dominant-fraction-accept 0.95 `
-  --minority-fraction-ignore 0.02 `
-  --material-contrast-refine-threshold 5 `
-  --contact-refine-distance-mm 10 `
-  --crowded-component-refine-count 3 `
-  --crowded-component-refine-distance-mm 2 `
-  --samples-per-cell 9 `
-  --voxel-workers 0
+  --min-cell-size-mm 10 `
+  --max-cell-size-mm 20 `
+  --max-depth 10 `
+  --samples-per-cell 27 `
+  --step-deflection-mm 1.5 `
+  --voxel-workers 8 `
+  --voxel-worker-memory-fraction 0.8 `
+  --low-k-refine-threshold-w-mk 10 `
+  --no-boundary-refine `
+  --contact-detection-distance-mm 2 `
+  --contact-gap-tolerance-mm 0.2 `
+  --heater-name-substring SAFE-HEATER `
+  --sensor-name-substring COO-0001-P0003 `
+  --max-heater-sensor-pair-distance-mm 50 `
+  --max-heaters-per-sensor 2 `
+  --role-refine-distance-mm 20 `
+  --role-refine-max-depth 10 `
+  --max-leaf-cells 2000000
 ```
 
-The converter assumes glTF/GLB coordinates are millimeters, finds the single
-embedded `.glb` file in `--mesh-dir`, uses glTF material names from that scene,
-and reads material properties from the material table shipped with the package
-(`graph_visualizer/data/materials.json`), or a `materials.json` in the working
-directory if there is one, by
-default. The mesh directory must contain exactly one `.glb` scene file.
-External-buffer `.gltf`/`.bin` exports are rejected because missing or mismatched
-buffers can collapse CAD geometry during loading.
-CAD components are recognized as heater/sensor geometry only when you provide
-matching names with `--heater-name-substring` or `--sensor-name-substring`;
-repeat a flag to add multiple matches. (The `--heater-name-pattern` and
-`--sensor-name-pattern` regex flags are accepted for backward compatibility but
-currently ignored — role detection uses substring matching only.) Matched components remain in voxelization so their occupied
-octree cells first receive normal graph connections, then cells from the same
-detected heater/sensor part are consolidated into one role node with the union
-of those external connections. If no heater or sensor match is configured, no
-cells are assigned those roles.
-If `materials.xlsx` exists in `--mesh-dir`, it maps SolidWorks part instance
-names to material names. Contact checking is handled separately in Python by
-exact shared voxel faces plus a voxel-surface contact-distance pass.
-`--voxel-workers` enables multiprocessing for octree cell classification:
-`1` is sequential, `0` uses conservative auto-selection capped at 2 worker
-processes, and an explicit integer uses that many workers. Large CAD assemblies
-copy triangle data into each worker process, so increase this gradually if
-memory pressure is high. `--voxel-batch-size` controls how many queued octree
-cells are classified per worker batch.
-Each run writes `conversion.log` in the graph output folder with phase changes,
-periodic voxelization progress, memory estimates, and Python tracebacks. If a
-run exits without a terminal error, inspect that log first.
-The `Voxelizing octree` phase depends on the mesh geometry, any configured
-heater/sensor component exclusions, material lookup used for material-contrast
-refinement, and octree/refinement parameters such as cell sizes, depth,
-sampling, and boundary/contact refinement distance. It does not depend on
-graph-only settings such as `--contact-detection-distance-mm` or radiation
-reference temperature.
-For dense regions with many small nearby parts, use
-`--crowded-component-refine-count N` with
-`--crowded-component-refine-distance-mm D` to force additional local refinement
-where a cell's padded bounds overlap at least `N` CAD components. This helps
-preserve small air gaps between nearby parts; keep `--max-leaf-cells` high
-enough for the extra local cells.
+`--mesh-dir` must contain exactly one `.step`/`.stp` file. Coordinates are
+assumed to be millimetres. Material properties come from the table shipped with
+the package (`graph_visualizer/data/materials.json`), or from a `materials.json`
+in the working directory if there is one.
+
+**A build is memory-hungry.** The voxelizer copies triangle data into every
+worker process, so `--voxel-workers` and `--max-leaf-cells` are the two settings
+that decide whether the machine survives a full assembly. Start conservative.
+
+### Heaters and sensors
+
+Components become heaters or sensors only when you name them with
+`--heater-name-substring` or `--sensor-name-substring`; repeat either flag for
+several matches. Matching is by **substring**, not pattern. Without them the
+graph has no heaters and no sensors, so there is nothing to control.
+
+Matched components stay in voxelization, so their occupied cells first get normal
+graph connections; cells belonging to one detected part are then consolidated
+into a single role node carrying the union of those connections.
+
+### The part -> material lookup
+
+Run `tools/ExportAssemblyMaterialsToExcel.bas` from SolidWorks with the assembly
+open to produce a two-column workbook, and save it as `Materials.xlsx` beside the
+STEP file:
+
+- `Part Name`: the component instance name.
+- `Material Name`: the material assigned to that part.
+
+Without it there is nothing to identify engineering materials by, and every part
+falls back to the unassigned default -- the conductances will not describe your
+assembly. `meshes/step_test/Materials.xlsx` is a worked example.
+
 The builder writes:
 
 ```text
@@ -186,20 +206,3 @@ conductances in W/K with zeros for non-edges; larger graphs write only the
 sparse Laplacian. No `A = -C^{-1}L` dynamics matrix is written — the simulator
 forms that operator internally from `C` and `L` at run time.
 
-### Export SolidWorks materials for octree lookup
-
-Run `tools/ExportAssemblyMaterialsToExcel.bas` from SolidWorks with the assembly
-open to create a two-column workbook. Save it as `materials.xlsx` in the same
-folder as the exported `.glb` mesh:
-
-- `Part Name`: SolidWorks component instance name.
-- `Material Name`: SolidWorks material assigned to that part/configuration.
-
-Use the generated workbook during graph construction:
-
-```powershell
-hts-build-graph `
-  --mesh-dir meshes\assembly_export `
-  --graph-name hispec_test_octree `
-  --output-root graphs
-```

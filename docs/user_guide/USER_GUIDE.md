@@ -15,15 +15,16 @@ away from the software the way hand-cropped ones do.
 
 1. [What the application is for](#1-what-the-application-is-for)
 2. [Installing and launching](#2-installing-and-launching)
-3. [The five tabs](#3-the-five-tabs)
+3. [The six tabs](#3-the-six-tabs)
 4. [Finding anything: the help search](#4-finding-anything-the-help-search)
-5. [Your first simulation](#5-your-first-simulation)
-6. [The controller](#6-the-controller)
-7. [Exporting the controller](#7-exporting-the-controller)
-8. [Long runs](#8-long-runs)
-9. [Checking the solver](#9-checking-the-solver)
-10. [Where files live](#10-where-files-live)
-11. [When something goes wrong](#11-when-something-goes-wrong)
+5. [Building a graph from CAD](#5-building-a-graph-from-cad)
+6. [Your first simulation](#6-your-first-simulation)
+7. [The controller](#7-the-controller)
+8. [Exporting the controller](#8-exporting-the-controller)
+9. [Long runs](#9-long-runs)
+10. [Checking the solver](#10-checking-the-solver)
+11. [Where files live](#11-where-files-live)
+12. [When something goes wrong](#12-when-something-goes-wrong)
 
 ---
 
@@ -38,7 +39,7 @@ It answers that in three stages.
 
 | Stage | What it does | Where it lives |
 |---|---|---|
-| **Build** | CAD (GLB or STEP) → octree → a lumped RC thermal graph | `octree_graph/`, run via `hts-build-graph` |
+| **Build** | A STEP assembly → octree → a lumped RC thermal graph | The **Build Graph** tab, or `hts-build-graph` |
 | **Simulate** | Solve that graph forward in time with a controller in the loop | The application, `graph_visualizer/` |
 | **Deploy** | Write the controller out as constants | `hts-export-controller`, or a button in the app |
 
@@ -58,22 +59,29 @@ A short piece of vocabulary used throughout:
 
 ## 2. Installing and launching
 
-Needs Python 3.11 or newer.
+Input is **STEP** (`.step` / `.stp`), which needs OpenCASCADE, and OpenCASCADE
+has no pip wheel on any platform. So conda is the install that gets you the whole
+pipeline:
+
+```powershell
+git clone https://github.com/JustKorolev/HeatTransferSim
+cd HeatTransferSim
+conda env create -f environment.yml
+conda activate heatsim
+python -m pip install -e .
+heattransfersim
+```
+
+There is a lighter pip install (Python 3.11+):
 
 ```powershell
 python -m pip install git+https://github.com/JustKorolev/HeatTransferSim
 heattransfersim
 ```
 
-That is the whole install: `heattransfersim` launches the application from any
-directory. If you intend to change the code, clone it and install in place
-instead:
-
-```powershell
-git clone https://github.com/JustKorolev/HeatTransferSim
-cd HeatTransferSim
-python -m pip install -e ".[dev]"
-```
+It simulates existing graphs, runs the validation cases and exports controllers.
+It **cannot build a graph from CAD** — that is the part needing OpenCASCADE. The
+builder says so, with the conda commands, rather than failing obscurely.
 
 Installing also puts the pipeline on your PATH as commands:
 
@@ -94,29 +102,21 @@ command and the app's own subprocess run identical code.
 exits at once without waiting for anything to shut down. Neither touches a
 detached headless run.
 
-If you need the STEP/B-rep build pipeline, it depends on OpenCASCADE, which has
-no pip wheel on any platform. GLB input needs nothing extra; for STEP, use conda:
-
-```powershell
-conda env create -f environment.yml
-conda activate heatsim
-python -m pip install -e .
-```
-
 > **Note.** The graph builder also needs `embreex` for fast ray tests. Without
 > it the build is roughly sixty times slower, so it fails fast rather than
 > appearing to hang. Pass `--allow-slow-contains` if you really want the slow
 > path.
 
-The application does not create graphs. It loads ones that `hts-build-graph`
-has already written into `graphs/`.
+A sample assembly ships with the repository — `meshes/step_test/` — so the
+Build Graph tab has something in its dropdown on a fresh clone.
 
 ---
 
-## 3. The five tabs
+## 3. The six tabs
 
 | Tab | Use it to |
 |---|---|
+| **Build Graph** | Turn a STEP assembly into a thermal graph. Pick a folder under `meshes/`, adjust the build parameters, press Build. |
 | **3D Octree Graph Editor** | Look at the cells in 3D. Select them, tag heaters and sensors, assign materials, cut a cross-section through the assembly. |
 | **2D Network Graph** | See the same graph as a flat network of conductive links. Read-only. |
 | **Heat Transfer Simulation** | Run the model live with the controller in the loop, identify the plant, design and export the controller. |
@@ -181,7 +181,59 @@ application gets a say, and the only useful correction is downward.
 
 ---
 
-## 5. Your first simulation
+## 5. Building a graph from CAD
+
+Everything else needs a graph, and the **Build Graph** tab is the first tab for
+that reason. A sample assembly ships with the repository, so the dropdown is not
+empty on a fresh clone.
+
+![The Build Graph tab](images/build_graph_tab.png)
+
+1. **assembly folder** — subfolders of `meshes/` that hold a `.step`/`.stp` file.
+   Only those appear: a folder with nothing to build is not offered. **Rescan**
+   picks up one you have just added. The line beneath names the STEP file, its
+   size, and whether a `Materials.xlsx` was found.
+2. **graph name** — the folder created under the output root. Prefilled from the
+   assembly name. A graph of the same name is *overwritten*, so name variants
+   rather than building over one that works.
+3. **Build Graph** — runs the builder as a separate, detached process. It
+   survives closing the window, and a crash in it cannot take the application
+   down. Progress appears on the right, tailed from the build's own
+   `conversion.log`.
+
+The panel on the right also shows **the exact command** the tab will run, so a
+long build can be checked before it starts, or copied into a terminal.
+
+### The settings that matter most
+
+The defaults are the ones that produced the reference graph, so the useful
+question is which to change and why.
+
+| Setting | Why it matters |
+|---|---|
+| **min cell size mm** | The floor on resolution, and the dominant control on cell count — halving it can multiply cells by eight. |
+| **max leaf cells** | Aborts a build that would not fit in memory. Raise it deliberately, never by reflex. |
+| **voxel workers** | Each worker gets its own *copy* of the triangle data. This is the setting that decides whether a full assembly survives. |
+| **deflection mm** | How closely the tessellation follows the true surface. Smaller is truer and vastly more triangles; the whole build scales with triangle count. |
+| **detection distance mm** | How far apart two parts may be and still count as touching. The most consequential thermal setting here — it decides which conduction paths exist at all. |
+| **heater / sensor substring** | Components whose name contains these become heaters and sensors. Leave them blank and the graph has nothing to control. |
+
+> **A build is memory-hungry.** The voxelizer is the heaviest thing in this
+> project, and a full assembly at depth 10 can exhaust a workstation. Start with
+> fewer workers and a lower `max leaf cells` than you think you need.
+
+### If it fails
+
+The reason is at the end of `conversion.log`, shown in the tab. Two common ones:
+
+- **"No STEP file found"** — the folder has no `.step`/`.stp`. STEP is the only
+  input format; see section 2 for why.
+- **"needs pythonocc-core"** — you are on the pip install, which cannot build.
+  Use the conda environment.
+
+---
+
+## 6. Your first simulation
 
 Open the **Heat Transfer Simulation** tab and choose a graph from the dropdown at
 the top. Then work down the **Run** section.
@@ -237,7 +289,7 @@ is.
 
 ---
 
-## 6. The controller
+## 7. The controller
 
 ### Why it is not one PID per heater
 
@@ -324,7 +376,7 @@ onto the unsaturated heaters instead of truncating each channel independently.
 
 ---
 
-## 7. Exporting the controller
+## 8. Exporting the controller
 
 ![The Controller Design section](images/controller_design.png)
 
@@ -369,7 +421,7 @@ hts-export-controller --graph graphs/CRYOSTAT_V2 --list
 
 ---
 
-## 8. Long runs
+## 9. Long runs
 
 The **Headless Run** tab never loads a graph into the application window. That is
 the entire point of it: a multi-million-cell model will not fit beside the 3D
@@ -406,7 +458,7 @@ hts-run --graph graphs/CRYOSTAT_V2 --setpoint 80 --duration 3600 --dt 1
 
 ---
 
-## 9. Checking the solver
+## 10. Checking the solver
 
 The **Thermal Validation** tab drives the *real* solver — the same code path a
 production run uses — against cases whose answer is known independently:
@@ -420,7 +472,7 @@ want when a change moves a number and you need to say by how much.
 
 ---
 
-## 10. Where files live
+## 11. Where files live
 
 ```text
 graphs/<name>/                 a built graph
@@ -450,7 +502,7 @@ parameters.
 
 ---
 
-## 11. When something goes wrong
+## 12. When something goes wrong
 
 **The controller is not doing anything.**
 Check `input mode` is `heater_inputs` — in `zero` mode nothing drives the
