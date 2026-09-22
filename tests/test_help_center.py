@@ -31,23 +31,40 @@ import test_simulation_controls_panel as stub
 
 
 class _Tabs:
-    def __init__(self, titles: list[str]) -> None:
-        self.titles = titles
+    """A tab bar that can be asked WHERE a widget is.
+
+    indexOf matters: the help index used to carry hardcoded tab numbers, and
+    adding the Build Graph tab in front of them silently pointed every search
+    result one tab to the left. It looks the index up now, so this stub has to be
+    able to answer -- which also makes it a fairer model of QTabWidget.
+    """
+
+    def __init__(self, entries: list[tuple[str, object]]) -> None:
+        self.entries = entries
         self.current = 0
 
     def count(self) -> int:
-        return len(self.titles)
+        return len(self.entries)
 
     def tabText(self, index: int) -> str:  # noqa: N802 - Qt name
-        return self.titles[index]
+        return self.entries[index][0]
+
+    def indexOf(self, widget: object) -> int:  # noqa: N802 - Qt name
+        for index, (_title, candidate) in enumerate(self.entries):
+            if candidate is not None and candidate is widget:
+                return index
+        return -1
 
     def setCurrentIndex(self, index: int) -> None:  # noqa: N802 - Qt name
         self.current = index
 
 
 class _TabOwner:
+    """A tab: its panel, and the widget the tab bar holds for it."""
+
     def __init__(self, panel) -> None:
         self.panel = panel
+        self.widget = object()
 
 
 class _App:
@@ -58,15 +75,6 @@ class _App:
     window = None
 
     def __init__(self) -> None:
-        self.view_tabs = _Tabs(
-            [
-                "3D Octree Graph Editor",
-                "2D Network Graph",
-                "Heat Transfer Simulation",
-                "Thermal Validation",
-                "Headless Run",
-            ]
-        )
         live = SimulationControlsPanel(stub._QtStub, mode=MODE_LIVE)
         live.build(stub.QFormLayout())
         live._apply_mode()
@@ -75,6 +83,17 @@ class _App:
         headless._apply_mode()
         self.simulation_tab = _TabOwner(live)
         self.headless_run_tab = _TabOwner(headless)
+        # Deliberately WITHOUT the Build Graph tab, so the live/headless indices
+        # stay 2 and 4 and these tests keep testing what they are about.
+        self.view_tabs = _Tabs(
+            [
+                ("3D Octree Graph Editor", None),
+                ("2D Network Graph", None),
+                ("Heat Transfer Simulation", self.simulation_tab.widget),
+                ("Thermal Validation", None),
+                ("Headless Run", self.headless_run_tab.widget),
+            ]
+        )
 
 
 @pytest.fixture
@@ -98,7 +117,7 @@ def test_the_index_is_built_from_the_live_panel_not_a_hand_written_list(center) 
 def test_every_tab_is_itself_a_destination(center) -> None:
     """'Where is validation?' is answered by a tab, not a control."""
     tabs = [t for t in center.build_index() if t.kind == "tab"]
-    assert [t.label for t in tabs] == center.app.view_tabs.titles
+    assert [t.label for t in tabs] == [title for title, _w in center.app.view_tabs.entries]
     assert all(t.tab_index is not None for t in tabs)
 
 

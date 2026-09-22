@@ -58,6 +58,7 @@ from .role_pairing import (
 )
 from .role_warnings import role_warning_reasons
 from .thermal_validation_tab import ThermalValidationTab
+from .build_graph_tab import BuildGraphTab
 from .headless_run_tab import HeadlessRunTab
 from .tooltip_formatters import format_node_tooltip
 from .two_d_graph_widget import TwoDGraphWidget
@@ -290,17 +291,29 @@ class GraphVisualizerApp:
         # Deliberately given no access to self.model: this tab launches runs as a
         # separate process so a multi-million-cell simulation never loads a graph
         # into the GUI.
+        self.build_graph_tab = BuildGraphTab(
+            self,
+            right_panel,
+            on_status=self._set_status,
+            mesh_root=lambda: Path.cwd() / "meshes",
+        )
         self.headless_run_tab = HeadlessRunTab(
             self,
             right_panel,
             on_status=self._set_status,
             graphs_root=lambda: Path.cwd() / "graphs",
         )
+        self.view_tabs.addTab(self.build_graph_tab.widget, "Build Graph")
         self.view_tabs.addTab(self.three_d_tab, "3D Octree Graph Editor")
         self.view_tabs.addTab(self.two_d_view.widget, "2D Network Graph")
         self.view_tabs.addTab(self.simulation_tab.widget, "Heat Transfer Simulation")
         self.view_tabs.addTab(self.thermal_validation_tab.widget, "Thermal Validation")
         self.view_tabs.addTab(self.headless_run_tab.widget, "Headless Run")
+        # Build Graph is the FIRST tab, because it is the first step of the
+        # pipeline and the one a new user needs before any other tab has
+        # anything to show. The editor stays the tab that OPENS, though:
+        # being first makes it visible, and that is enough.
+        self.view_tabs.setCurrentWidget(self.three_d_tab)
         right_layout.addWidget(self.view_tabs, 1)
 
         self.status_label = self.QtWidgets.QLabel("")
@@ -309,6 +322,7 @@ class GraphVisualizerApp:
 
         self.side_panel_stack = self.QtWidgets.QStackedWidget()
         self.side_panel_stack.addWidget(self.left_scroll)
+        self.side_panel_stack.addWidget(self.build_graph_tab.controls_scroll)
         self.side_panel_stack.addWidget(self.simulation_tab.controls_scroll)
         self.side_panel_stack.addWidget(self.thermal_validation_tab.controls_scroll)
         self.side_panel_stack.addWidget(self.headless_run_tab.controls_scroll)
@@ -2671,7 +2685,10 @@ class GraphVisualizerApp:
     def _handle_tab_changed(self, index: int) -> None:
         current = self.view_tabs.widget(index)
         if hasattr(self, "side_panel_stack"):
-            if current is self.simulation_tab.widget:
+            if current is self.build_graph_tab.widget:
+                self.simulation_tab.pause()
+                self.side_panel_stack.setCurrentWidget(self.build_graph_tab.controls_scroll)
+            elif current is self.simulation_tab.widget:
                 self.side_panel_stack.setCurrentWidget(self.simulation_tab.controls_scroll)
             elif current is self.thermal_validation_tab.widget:
                 self.simulation_tab.pause()
@@ -2690,6 +2707,8 @@ class GraphVisualizerApp:
         self.autosave_timer.stop()
         self.editor_sync_timer.stop()
         self.component_temperature_timer.stop()
+        if hasattr(self, "build_graph_tab"):
+            self.build_graph_tab.shutdown()
         if hasattr(self, "simulation_tab"):
             self.simulation_tab.shutdown()
         if hasattr(self, "thermal_validation_tab"):

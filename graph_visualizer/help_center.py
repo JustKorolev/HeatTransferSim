@@ -76,16 +76,23 @@ class HelpCenter:
         return targets
 
     def _panel_owners(self) -> list[tuple[int, Any]]:
-        """(tab index, tab object) for every tab that owns a controls panel."""
-        pairs = []
-        for attribute, tab_index in (
-            ("simulation_tab", 2),
-            ("thermal_validation_tab", 3),
-            ("headless_run_tab", 4),
-        ):
+        """(tab index, tab object) for every tab that owns a controls panel.
+
+        The index is looked up from the tab bar rather than hardcoded. It used to
+        be written in literally -- 2, 3, 4 -- and adding the Build Graph tab in
+        front of them silently made every search result point one tab to the left.
+        """
+        tabs = getattr(self.app, "view_tabs", None)
+        pairs: list[tuple[int, Any]] = []
+        for attribute in ("build_graph_tab", "simulation_tab", "thermal_validation_tab",
+                          "headless_run_tab"):
             owner = getattr(self.app, attribute, None)
-            if owner is not None:
-                pairs.append((tab_index, owner))
+            if owner is None or tabs is None:
+                continue
+            widget = getattr(owner, "widget", None)
+            index = tabs.indexOf(widget) if widget is not None else -1
+            if index >= 0:
+                pairs.append((index, owner))
         return pairs
 
     def _targets_from_panel(self, panel: Any, tab_title: str, tab_index: int) -> list[HelpTarget]:
@@ -244,6 +251,8 @@ class HelpCenter:
 
 
 _TAB_KEYWORDS = {
+    "Build Graph": ("cad", "step", "assembly", "octree", "voxel", "mesh",
+                    "convert", "import", "geometry", "new graph"),
     "3D Octree Graph Editor": ("cells", "geometry", "materials", "roles", "editor", "octree"),
     "2D Network Graph": ("adjacency", "network", "edges", "topology"),
     "Heat Transfer Simulation": ("run", "play", "live", "controller", "sys id", "simulate"),
